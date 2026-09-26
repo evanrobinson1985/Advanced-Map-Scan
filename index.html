@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-    <title>LiDAR WebGL Terrain Platform Pro</title>
+    <title>LiDAR Karst Archaeology GIS Platform</title>
     
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -63,6 +63,7 @@
         .cave-marker { filter: hue-rotate(0deg); }
         .mound-marker { filter: hue-rotate(150deg); }
         .shelter-marker { filter: hue-rotate(270deg); }
+        .hunt-marker { filter: hue-rotate(90deg); }
         #panelHeader:hover { opacity: 0.8; }
     </style>
 </head>
@@ -90,14 +91,25 @@
     </div>
 
     <div class="control-group">
-        <h4>1. Data Pipeline</h4>
+        <h4>1. Data Pipeline &mdash; Bare-Earth LiDAR DTM</h4>
+        <div style="font-size:0.72rem; color:#475569; margin-bottom:6px; line-height:1.4;">Source: USGS 3DEP bare-earth Digital Terrain Model (ground-classified LiDAR returns, forest canopy stripped) &mdash; not a canopy-top surface model. <b>1-meter resolution is the absolute minimum</b> for detecting human-scale anomalies like middens or small cave vestibules.</div>
         <div class="slider-row">
             <label>Download Detail</label>
             <input type="range" id="resCap" min="1000" max="5000" step="250" value="3000" oninput="updateResCapPreview()">
             <span class="val-display" id="resCapVal">3000px</span>
         </div>
         <div id="resCapPreview" style="font-size:0.72rem; color:#64748b; margin-bottom:8px; line-height:1.4;"></div>
-        <button id="downloadBtn" onclick="fetchDEM()">Download Visible DEM Area</button>
+        <button id="downloadBtn" onclick="fetchDEM()">Download Visible Bare-Earth DTM</button>
+        <input type="file" id="localDtmInput" accept=".tif,.tiff" style="display:none" onchange="loadLocalDTM(this)">
+        <input type="file" id="pipelineGeoJsonInput" accept=".json,.geojson" style="display:none" onchange="loadPipelineGeoJSON(this)">
+        <div style="display:flex; gap:6px;">
+            <button onclick="document.getElementById('localDtmInput').click()" style="font-size:0.78rem;">Load Local DTM (GeoTIFF, WGS84)</button>
+            <button onclick="document.getElementById('pipelineGeoJsonInput').click()" style="font-size:0.78rem;">Load Pipeline Results (GeoJSON)</button>
+        </div>
+        <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem; margin-top:6px;">
+            <input type="checkbox" id="enforce1m" checked> Require &le;1 m/px DTM before scanning
+        </label>
+        <div id="dtmResBadge" style="display:none; font-size:0.75rem; margin-top:6px; padding:4px 6px; border-radius:4px; text-align:center; font-weight:bold;"></div>
         <div id="status">Ready to load data.</div>
         <div style="font-size:0.7rem; color:#94a3b8; margin-top:4px; line-height:1.4;">There's no setting that gives fine detail over an unlimited area in one download - resolution and area covered trade off directly against a fixed pixel budget (bandwidth, memory, and scan time all scale with it). A smaller visible area at the same setting always buys finer resolution; zoom in and download again for a sharper result at any point. Higher settings mean slower downloads and scans.</div>
     </div>
@@ -134,12 +146,26 @@
             <input type="range" id="slopeOpacity" min="0" max="1" step="0.1" value="0.7" oninput="updateSlopeOpacity()">
             <span class="val-display" id="slopeOpacityVal">70%</span>
         </div>
+        <button id="view3dBtn" onclick="open3DView()" style="display:none; background:#334155; color:white; border:none; cursor:pointer;">Open 3D WebGL Fly-Through</button>
         <div style="font-size:0.7rem; color:#94a3b8; margin-top:4px;">Azimuth/Altitude/Z-Exaggeration only affect Hillshade. Slope shows true terrain angle (green=flat to dark red=60&deg;+), deliberately unaffected by Z-Exaggeration - useful for spotting bluff lines and cliff faces, e.g. where a horizontal cave entrance might be, especially layered under a faint Hillshade.</div>
     </div>
 
     <div class="control-group">
         <h4>3. Feature Detection</h4>
-        <select id="scanMode" onchange="onScanModeChange()"><option value="caves">Caves / Sinkholes</option><option value="mounds">Native Mounds</option><option value="shelter">Rockshelters / Overhangs</option><option value="settlement">Settlement Likelihood</option></select>
+        <select id="scanMode" onchange="onScanModeChange()">
+            <optgroup label="Karst Workflow (Phases 2-4)">
+                <option value="basecamp">Phase 2: Long-Term Habitation (Base Camps)</option>
+                <option value="huntcamp">Phase 3: Transient Hunt Camps</option>
+                <option value="ceremonial">Phase 4: Deep Ceremonial Karst</option>
+            </optgroup>
+            <optgroup label="General Feature Scans">
+                <option value="caves">Caves / Sinkholes</option>
+                <option value="mounds">Native Mounds</option>
+                <option value="shelter">Rockshelters / Overhangs</option>
+                <option value="settlement">Settlement Likelihood</option>
+            </optgroup>
+        </select>
+        <div id="modeDescription" style="font-size:0.72rem; color:#475569; margin-top:6px; line-height:1.4;"></div>
     </div>
 
     <div class="control-group">
@@ -217,6 +243,159 @@
             </div>
             <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">This can't see the overhang itself - a true overhang is invisible to any bare-earth elevation model, the same reason horizontal cave mouths are (two surfaces, ground and rock ceiling, at one map location - a DEM can only store one). What it finds instead is the setting shelters actually form in: relatively flat ground (Max Floor Slope) sitting right at the base of a real cliff (Min Cliff Slope) within Search Radius. A real overhang commonly exists at a flagged spot, but confirming it needs a field check, more than any other scan here.</div>
         </div>
+        <div id="basecampParamsGroup" style="display:none;">
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin-bottom:4px;">Step 1: Topographic Position Index (bluff lines)</div>
+            <div class="slider-row">
+                <label>TPI Radius</label>
+                <input type="range" id="bcTpiRadiusM" min="10" max="50" step="1" value="30" oninput="updateMetricLenVal('bcTpiRadiusM')">
+                <span class="val-display" id="bcTpiRadiusMVal">30m</span>
+            </div>
+            <div class="slider-row">
+                <label>TPI Extreme (&sigma;)</label>
+                <input type="range" id="bcTpiSigma" min="0.5" max="3" step="0.1" value="1.0" oninput="updateThresholdVal('bcTpiSigma','&sigma;',1)">
+                <span class="val-display" id="bcTpiSigmaVal">1.0&sigma;</span>
+            </div>
+            <div class="slider-row">
+                <label>Min Bluff Face Slope</label>
+                <input type="range" id="bcBluffSlope" min="25" max="80" step="1" value="40" oninput="updateThresholdVal('bcBluffSlope','°',0)">
+                <span class="val-display" id="bcBluffSlopeVal">40°</span>
+            </div>
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin:8px 0 4px;">Step 2: Solar Aspect Filtering</div>
+            <div class="slider-row">
+                <label>Aspect From</label>
+                <input type="range" id="bcAspectMin" min="0" max="360" step="5" value="135" oninput="updateThresholdVal('bcAspectMin','°',0)">
+                <span class="val-display" id="bcAspectMinVal">135°</span>
+            </div>
+            <div class="slider-row">
+                <label>Aspect To</label>
+                <input type="range" id="bcAspectMax" min="0" max="360" step="5" value="225" oninput="updateThresholdVal('bcAspectMax','°',0)">
+                <span class="val-display" id="bcAspectMaxVal">225°</span>
+            </div>
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin:8px 0 4px;">Step 3: Local Relief Model (benches &amp; middens)</div>
+            <div class="slider-row">
+                <label>LRM Smoothing Radius</label>
+                <input type="range" id="bcLrmRadiusM" min="5" max="50" step="1" value="20" oninput="updateMetricLenVal('bcLrmRadiusM')">
+                <span class="val-display" id="bcLrmRadiusMVal">20m</span>
+            </div>
+            <div class="slider-row">
+                <label>Max Bench Slope</label>
+                <input type="range" id="bcBenchSlope" min="3" max="25" step="1" value="12" oninput="updateThresholdVal('bcBenchSlope','°',0)">
+                <span class="val-display" id="bcBenchSlopeVal">12°</span>
+            </div>
+            <div class="slider-row">
+                <label>Bench-to-Bluff Distance</label>
+                <input type="range" id="bcBluffDistM" min="3" max="60" step="1" value="25" oninput="updateMetricLenVal('bcBluffDistM')">
+                <span class="val-display" id="bcBluffDistMVal">25m</span>
+            </div>
+            <div class="slider-row">
+                <label>Bench Segment Length</label>
+                <input type="range" id="bcSegmentM" min="20" max="200" step="5" value="60" oninput="updateMetricLenVal('bcSegmentM')">
+                <span class="val-display" id="bcSegmentMVal">60m</span>
+            </div>
+            <div class="slider-row">
+                <label>Midden Mounding Flag</label>
+                <input type="range" id="bcMiddenM" min="0.1" max="2" step="0.05" value="0.3" oninput="updateMetricLenVal('bcMiddenM',2)">
+                <span class="val-display" id="bcMiddenMVal">0.30m</span>
+            </div>
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin:8px 0 4px;">Step 4: Hydrology Intersection</div>
+            <div class="slider-row">
+                <label>Water Buffer</label>
+                <input type="range" id="bcWaterBufferM" min="100" max="300" step="10" value="300" oninput="updateMetricLenVal('bcWaterBufferM')">
+                <span class="val-display" id="bcWaterBufferMVal">300m</span>
+            </div>
+            <div class="slider-row">
+                <label>Year-Round Stream Min Drainage</label>
+                <input type="range" id="perennialAcres" min="5" max="2000" step="5" value="100" oninput="updateThresholdVal('perennialAcres','ac',0)">
+                <span class="val-display" id="perennialAcresVal">100ac</span>
+            </div>
+            <div class="slider-row">
+                <label>100-yr Floodplain Cutoff (HAND)</label>
+                <input type="range" id="floodHandM" min="0.5" max="10" step="0.25" value="3" oninput="updateMetricLenVal('floodHandM',2)">
+                <span class="val-display" id="floodHandMVal">3.00m</span>
+            </div>
+            <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">Pipeline: TPI isolates bluff crests (+) and bases (&minus;) &rarr; only bluff faces facing the Aspect window (default South/Southeast, 135&deg;&ndash;225&deg;) are kept &rarr; LRM is run strictly at the base of those bluffs to find flat, shelf-like dirt benches (and flags positive mounding under the drip line as a possible refuse midden) &rarr; benches must fall inside the buffer around year-round water (streams draining at least the minimum area above; springs usually sit on these channels) and are excluded if they lie within the 100-year floodplain. The floodplain is approximated with Height Above Nearest Drainage, since official flood maps can't be read from the browser here; toggle the FEMA Flood Hazard overlay (layers menu) to check it by eye.</div>
+        </div>
+        <div id="huntcampParamsGroup" style="display:none;">
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin-bottom:4px;">Step 1: Expanded Aspect &amp; Small-Scale TPI</div>
+            <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">No South/Southeast requirement &mdash; any aspect, including north-facing overhangs and small crevices.</div>
+            <div class="slider-row">
+                <label>TPI Radius (outcrops)</label>
+                <input type="range" id="hcTpiRadiusM" min="3" max="25" step="1" value="10" oninput="updateMetricLenVal('hcTpiRadiusM')">
+                <span class="val-display" id="hcTpiRadiusMVal">10m</span>
+            </div>
+            <div class="slider-row">
+                <label>TPI Extreme (&sigma;)</label>
+                <input type="range" id="hcTpiSigma" min="0.5" max="3" step="0.1" value="1.5" oninput="updateThresholdVal('hcTpiSigma','&sigma;',1)">
+                <span class="val-display" id="hcTpiSigmaVal">1.5&sigma;</span>
+            </div>
+            <div class="slider-row">
+                <label>Min Outcrop Slope</label>
+                <input type="range" id="hcOutcropSlope" min="20" max="80" step="1" value="35" oninput="updateThresholdVal('hcOutcropSlope','°',0)">
+                <span class="val-display" id="hcOutcropSlopeVal">35°</span>
+            </div>
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin:8px 0 4px;">Step 2: Terrain Choke Points</div>
+            <div class="slider-row">
+                <label>Terrain Scale</label>
+                <input type="range" id="hcChokeScaleM" min="10" max="100" step="5" value="30" oninput="updateMetricLenVal('hcChokeScaleM')">
+                <span class="val-display" id="hcChokeScaleMVal">30m</span>
+            </div>
+            <div class="slider-row">
+                <label>Max Distance to Choke Point</label>
+                <input type="range" id="hcChokeDistM" min="10" max="300" step="5" value="75" oninput="updateMetricLenVal('hcChokeDistM')">
+                <span class="val-display" id="hcChokeDistMVal">75m</span>
+            </div>
+            <div class="slider-row">
+                <label>Max Canyon Funnel Width</label>
+                <input type="range" id="hcFunnelWidthM" min="10" max="150" step="5" value="40" oninput="updateMetricLenVal('hcFunnelWidthM')">
+                <span class="val-display" id="hcFunnelWidthMVal">40m</span>
+            </div>
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin:8px 0 4px;">Step 3: Viewshed Analysis</div>
+            <div class="slider-row">
+                <label>Viewshed Radius</label>
+                <input type="range" id="hcViewRadiusM" min="200" max="3000" step="50" value="1000" oninput="updateMetricLenVal('hcViewRadiusM')">
+                <span class="val-display" id="hcViewRadiusMVal">1000m</span>
+            </div>
+            <div class="slider-row">
+                <label>Observer Height</label>
+                <input type="range" id="hcObserverM" min="0" max="5" step="0.1" value="1.6" oninput="updateMetricLenVal('hcObserverM',1)">
+                <span class="val-display" id="hcObserverMVal">1.6m</span>
+            </div>
+            <div class="slider-row">
+                <label>Min Visible Valley Floor</label>
+                <input type="range" id="hcMinViewHa" min="0.5" max="50" step="0.5" value="5" oninput="updateThresholdVal('hcMinViewHa','ha',1)">
+                <span class="val-display" id="hcMinViewHaVal">5.0ha</span>
+            </div>
+            <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">Minor rock outcrops (strong positive TPI at a small radius plus a steep face) are kept only if they sit next to a natural choke point: a topographic saddle or ridgeline gap (a point that is a low point along the ridge but a high point across it), or a narrow canyon funnel (a drainage line hemmed in by steep walls on both sides). A viewshed is then run from each outcrop. An unobstructed view over a broad valley floor or a shallow river crossing marks it as a likely observation blind.</div>
+        </div>
+        <div id="ceremonialParamsGroup" style="display:none;">
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin-bottom:4px;">Step 1: Depression Analysis (Fill Sink)</div>
+            <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">Closed depressions from Priority-Flood Fill Sink. Large ones may be collapsed karst windows. Use Min Depth / Min Diameter above to focus on large sinkholes.</div>
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin:8px 0 4px;">Step 2: Sinking Streams</div>
+            <div class="slider-row">
+                <label>Sinking Stream Min Drainage</label>
+                <input type="range" id="sinkStreamAcres" min="0.5" max="200" step="0.5" value="5" oninput="updateThresholdVal('sinkStreamAcres','ac',1)">
+                <span class="val-display" id="sinkStreamAcresVal">5.0ac</span>
+            </div>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem; margin-bottom:6px;">
+                <input type="checkbox" id="requireSinkingStream"> Only show sinks fed by a sinking stream
+            </label>
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin:8px 0 4px;">Step 3: Speleological Overlay</div>
+            <input type="file" id="caveSurveyInput" accept=".json,.geojson,.csv" style="display:none" onchange="importCaveSurvey(this)">
+            <button onclick="document.getElementById('caveSurveyInput').click()">Load Cave Survey Dataset (GeoJSON / CSV)</button>
+            <button onclick="clearCaveSurvey()" style="background:#f1f5f9;">Clear Cave Survey Overlay</button>
+            <div id="caveSurveySummary" style="font-size:0.75rem; color:#334155; margin:6px 0; text-align:center;">No cave survey loaded.</div>
+            <div class="slider-row">
+                <label>Match Distance</label>
+                <input type="range" id="caveMatchDistM" min="10" max="500" step="10" value="100" oninput="updateMetricLenVal('caveMatchDistM')">
+                <span class="val-display" id="caveMatchDistMVal">100m</span>
+            </div>
+            <div class="slider-row">
+                <label>Dark Zone Min Cave Length</label>
+                <input type="range" id="darkZoneLenM" min="20" max="2000" step="10" value="150" oninput="updateMetricLenVal('darkZoneLenM')">
+                <span class="val-display" id="darkZoneLenMVal">150m</span>
+            </div>
+            <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">Surface topography can't show how deep a cave goes. Load known cave footprints or entrances, for example a state cave survey export, as GeoJSON (points, lines or polygons) or CSV (<code>lat,lon[,name,length_m,depth_m]</code>). A candidate sink only counts as verified when it opens into a mapped system long enough to have a true Dark Zone. The survey data stays in this browser: it is kept only in memory and never uploaded or saved. Cave locations, mud-glyph sites and burial caves are protected by ARPA and state cave-protection laws. Don't publish or share coordinates.</div>
+        </div>
         <div id="settlementWeightsGroup" style="display:none;">
             <div class="slider-row">
                 <label>Water Proximity Weight</label>
@@ -290,6 +469,8 @@
 
         <button id="scanBtn" onclick="runScanner()">Scan Downloaded DEM</button>
         <button id="exportShpBtn" onclick="exportShapefile()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Shapefile (.zip)</button>
+        <button id="exportGeoJsonBtn" onclick="exportGeoJSON()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Candidates (GeoJSON)</button>
+        <button id="exportTiffBtn" onclick="exportMetricGeoTIFF()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Analysis Raster (GeoTIFF)</button>
         <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">
             Caves: Priority-Flood depression fill (closed-basin/doline detection). Mounds: Local Relief Model via morphological opening (regional-trend removal, radius set by Trend Radius above), scanned at three scales and merged since one radius alone can't see both small and large mounds well. Shelters: flags flat ground at the base of a real nearby cliff - not the overhang itself, which no bare-earth elevation model can see, the same reason a horizontal cave mouth can't be seen either. Waterways are derived straight from the DEM (flow accumulation, same technique as ArcGIS/QGIS hydrology tools) and excluded unless a candidate is an obviously deep pit or large opening despite the overlap - real sites still get a modest boost for sitting near (not on) a waterway, since they cluster near water. All results are algorithmic candidates &mdash; verify in the field. Click the map any time to inspect elevation, depth/relief, and to confirm a feature it did or didn't find.
         </div>
@@ -303,7 +484,7 @@
         <button onclick="document.getElementById('importFileInput').click()">Import Training Data</button>
         <button onclick="clearTrainingData()" style="background:#fee2e2;color:#991b1b;">Clear Training Data</button>
         <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">
-            Confirming a cave/sinkhole or mound &mdash; the checkbox on a marker's popup, or "This is a Cave/Sinkhole" / "This is a Mound" from click-to-inspect &mdash; only ever widens thresholds to include it and raises similar future candidates' Match Score. It never narrows the search or excludes anything unlike what's been confirmed so far. Settlement confirmation works differently, on purpose: a camp or village site can't be verified by looking at the map the way a hole in the ground can, so "Confirm Known Site" asks what actual evidence you have (artifacts, a documented record, midden staining, oral history) rather than offering a one-click checkbox. Confirmed sites boost future scans two ways: areas near a confirmed site score higher, and areas whose water/elevation/slope profile resembles a confirmed site score higher too, even far away. All three modes are learned separately. Training data lives in this browser only (localStorage) &mdash; export it to back it up or move it to another device.
+            Confirming a cave/sinkhole or mound &mdash; the checkbox on a marker's popup, or "This is a Cave/Sinkhole" / "This is a Mound" from click-to-inspect &mdash; only ever widens thresholds to include it and raises similar future candidates' Match Score. It never narrows the search or excludes anything unlike what's been confirmed so far. Settlement confirmation works differently, on purpose: a camp or village site can't be verified by looking at the map the way a hole in the ground can, so "Confirm Known Site" asks what actual evidence you have (artifacts, a documented record, midden staining, oral history) rather than offering a one-click checkbox. Confirmed sites boost future scans two ways: areas near a confirmed site score higher, and areas whose water/elevation/slope profile resembles a confirmed site score higher too, even far away. Each mode is learned separately. Training data lives in this browser only (localStorage) &mdash; export it to back it up or move it to another device.
         </div>
     </div>
 
@@ -466,8 +647,11 @@
         const height_m = 6371000 * (n - s) * Math.PI / 180;
         const previewRes = Math.max(width_m, height_m) / resCapVal;
         const acres = (width_m * height_m) / 4046.86;
-        document.getElementById('resCapPreview').innerText =
-            `At your current view: ~${metersToFeetInches(previewRes)}/px over ~${acres < 1 ? acres.toFixed(2) : Math.round(acres)} acres.`;
+        const previewEl = document.getElementById('resCapPreview');
+        previewEl.innerText =
+            `At your current view: ~${previewRes.toFixed(2)} m/px (${metersToFeetInches(previewRes)}) over ~${acres < 1 ? acres.toFixed(2) : Math.round(acres)} acres.` +
+            (previewRes > 1.0 ? ' Coarser than the 1 m minimum: zoom in or raise Download Detail.' : ' Meets the 1 m minimum.');
+        previewEl.style.color = previewRes > 1.0 ? '#b91c1c' : '#15803d';
     }
     map.on('moveend', updateResCapPreview);
     setTimeout(updateResCapPreview, 0);
@@ -774,9 +958,16 @@
     const settlementLayer = new GLOverlayLayer(settlementGL);
     hillshadeLayer.addTo(map); // on by default, matching prior behavior; Slope/Settlement start off
 
-    L.control.layers(
+    // FEMA National Flood Hazard Layer (layer 28 = Flood Hazard Zones), as a
+    // visual reference for the Phase 2 "exclude the 100-year floodplain"
+    // step. The scan itself approximates the floodplain from the DTM (HAND),
+    // since this map service can't be read pixel-by-pixel from the browser.
+    const femaFlood = L.tileLayer.wms('https://hazards.fema.gov/gis/nfhl/services/public/NFHL/MapServer/WMSServer', {
+        layers: '28', format: 'image/png', transparent: true, opacity: 0.55, maxZoom: 21, attribution: 'FEMA NFHL'
+    });
+    const layerControl = L.control.layers(
         {"Street Map": street, "Satellite Imagery": satellite, "USGS Topo": topo},
-        {"LiDAR Hillshade": hillshadeLayer, "Slope": slopeLayer, "Settlement Likelihood": settlementLayer, "Detected Features": detectedFeaturesLayer}
+        {"LiDAR Hillshade": hillshadeLayer, "Slope": slopeLayer, "Settlement Likelihood": settlementLayer, "Detected Features": detectedFeaturesLayer, "FEMA Flood Hazard (100-yr reference)": femaFlood}
     ).addTo(map);
 
     // --- 3. PIPELINE & RENDER LOGIC ---
@@ -880,35 +1071,8 @@
             // (failed) bounds - silently wrong hillshade placement, and any
             // scan run afterward would geolocate its results using the wrong
             // bounds entirely.
-            demBounds = { n, s, e, w };
-            demWidth = newWidth;
-            demHeight = newHeight;
-            effRes = width_m / demWidth;
-            currentDEM = newDEM;
-            cachedFlow = null; // stale - tied to the PREVIOUS DEM's terrain, now replaced
-            lastMetricRaster = null;
-            markersLayer.clearLayers();
-            polygonsLayer.clearLayers();
-            detectedFeatures = [];
-            document.getElementById("exportShpBtn").style.display = "none";
-
-            // Each context has its own texture object - a WebGL texture is tied
-            // to the GL context that created it, so this uploads the same DEM
-            // data to both independently rather than trying to share one.
-            // Contexts that failed to initialize (see setupGLLayer) are
-            // skipped - that layer just stays inactive rather than the whole
-            // download failing because of one unrelated context.
-            for (const ctx of [hillshadeGL, slopeGL]) {
-                if (!ctx.gl) continue;
-                ctx.gl.bindTexture(ctx.gl.TEXTURE_2D, ctx.texture);
-                ctx.gl.getExtension('OES_texture_float');
-                ctx.gl.getExtension('OES_texture_float_linear');
-                ctx.gl.texImage2D(ctx.gl.TEXTURE_2D, 0, ctx.gl.LUMINANCE, demWidth, demHeight, 0, ctx.gl.LUMINANCE, ctx.gl.FLOAT, currentDEM);
-            }
-
-            renderAllGLLayers();
-            status.innerText = "DEM Loaded. GPU Renderer Active.";
-            document.getElementById("scanBtn").style.display = "block";
+            commitDEM(newDEM, newWidth, newHeight, { n, s, e, w }, width_m,
+                "Bare-earth DTM loaded. GPU renderer active. Note: 3DEP serves the best LiDAR available at each spot; where only coarser source data exists, finer pixels are interpolated and won't add real detail.");
 
         } catch(err) {
             status.innerText = currentDEM
@@ -918,6 +1082,124 @@
         } finally {
             downloadBtn.disabled = false;
         }
+    }
+
+    // Commits a validated DTM (from the 3DEP download or a local GeoTIFF) as
+    // the app's current terrain: resets everything tied to the previous one
+    // and uploads it to the GPU layers.
+    function commitDEM(newDEM, newWidth, newHeight, bounds, width_m, statusMsg) {
+        demBounds = bounds;
+        demWidth = newWidth;
+        demHeight = newHeight;
+        effRes = width_m / demWidth;
+        currentDEM = newDEM;
+        cachedFlow = null; // stale - tied to the PREVIOUS DEM's terrain, now replaced
+        lastMetricRaster = null;
+        markersLayer.clearLayers();
+        polygonsLayer.clearLayers();
+        detectedFeatures = [];
+        document.getElementById("exportShpBtn").style.display = "none";
+
+        // Each context has its own texture object - a WebGL texture is tied
+        // to the GL context that created it, so this uploads the same DEM
+        // data to both independently rather than trying to share one.
+        // Contexts that failed to initialize (see setupGLLayer) are
+        // skipped - that layer just stays inactive rather than the whole
+        // download failing because of one unrelated context.
+        for (const ctx of [hillshadeGL, slopeGL]) {
+            if (!ctx.gl) continue;
+            ctx.gl.bindTexture(ctx.gl.TEXTURE_2D, ctx.texture);
+            ctx.gl.getExtension('OES_texture_float');
+            ctx.gl.getExtension('OES_texture_float_linear');
+            ctx.gl.texImage2D(ctx.gl.TEXTURE_2D, 0, ctx.gl.LUMINANCE, demWidth, demHeight, 0, ctx.gl.LUMINANCE, ctx.gl.FLOAT, currentDEM);
+        }
+
+        lastExportRaster = null; last3DOverlay = null; lastViewshedCtx = null;
+        if (viewshedOverlay) { map.removeLayer(viewshedOverlay); layerControl.removeLayer(viewshedOverlay); viewshedOverlay = null; }
+        updateExportButtons();
+        renderAllGLLayers();
+        const badge = document.getElementById('dtmResBadge');
+        badge.style.display = 'block';
+        if (effRes <= 1.0 + 1e-6) {
+            badge.style.background = '#dcfce7'; badge.style.color = '#166534';
+            badge.innerText = `Bare-earth DTM loaded: ${effRes.toFixed(2)} m/px (meets the 1 m minimum)`;
+        } else {
+            badge.style.background = '#fee2e2'; badge.style.color = '#991b1b';
+            badge.innerText = `Bare-earth DTM loaded: ${effRes.toFixed(2)} m/px, below the 1 m minimum. Zoom in and download again.`;
+        }
+        document.getElementById('status').innerText = statusMsg;
+        document.getElementById("scanBtn").style.display = "block";
+        document.getElementById("view3dBtn").style.display = "block";
+    }
+
+    // Loads a local bare-earth DTM GeoTIFF instead of the 3DEP download: your
+    // own LiDAR-derived DTM, or dtm_wgs84.tif from pipeline/karst_pipeline.py.
+    // Must be in WGS84 lon/lat (EPSG:4326), since everything in this app is
+    // positioned by lat/lon bounds.
+    async function loadLocalDTM(fileInput) {
+        const file = fileInput.files[0];
+        fileInput.value = '';
+        if (!file) return;
+        const status = document.getElementById('status');
+        status.innerText = `Reading ${file.name}...`;
+        try {
+            const tiff = await GeoTIFF.fromArrayBuffer(await file.arrayBuffer());
+            const image = await tiff.getImage();
+            const keys = image.getGeoKeys ? image.getGeoKeys() : {};
+            if (keys && (keys.ProjectedCSTypeGeoKey || keys.GTModelTypeGeoKey === 1)) {
+                throw new Error('it is in a projected CRS. Reproject it to WGS84 first (e.g. gdalwarp -t_srs EPSG:4326 in.tif out.tif), or use the pipeline\'s dtm_wgs84.tif');
+            }
+            const [minX, minY, maxX, maxY] = image.getBoundingBox();
+            if (!(minX >= -180 && maxX <= 180 && minY >= -90 && maxY <= 90)) throw new Error('its bounds are not lon/lat degrees');
+            const W = image.getWidth(), H = image.getHeight();
+            if (W * H > 40e6) throw new Error(`it is ${W}x${H} pixels, too large for the browser. Clip it to a smaller area first`);
+            const raw = (await image.readRasters())[0];
+            const nodata = image.getGDALNoData();
+            const dem = new Float32Array(W * H);
+            for (let i = 0; i < dem.length; i++) {
+                const v = raw[i];
+                dem[i] = (!isFinite(v) || (nodata !== null && v === nodata) || v < -1000) ? -9999 : v;
+            }
+            const bounds = { n: maxY, s: minY, e: maxX, w: minX };
+            const width_m = 6371000 * (maxX - minX) * Math.PI / 180 * Math.cos((maxY + minY) / 2 * Math.PI / 180);
+            commitDEM(dem, W, H, bounds, width_m, `Local DTM loaded from ${file.name}.`);
+            map.fitBounds([[minY, minX], [maxY, maxX]]);
+        } catch (err) {
+            status.innerText = `Could not load that DTM: ${err.message || err}.`;
+            console.error(err);
+        }
+    }
+
+    // Overlays candidate GeoJSON produced by pipeline/karst_pipeline.py (or
+    // any GeoJSON) for review alongside the in-browser scans and 3D view.
+    let pipelineLayer = null;
+    function loadPipelineGeoJSON(fileInput) {
+        const file = fileInput.files[0];
+        fileInput.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                const gj = JSON.parse(reader.result);
+                if (pipelineLayer) { map.removeLayer(pipelineLayer); layerControl.removeLayer(pipelineLayer); }
+                const colors = { basecamp: '#f97316', huntcamp: '#16a34a', ceremonial: '#7c3aed' };
+                pipelineLayer = L.geoJSON(gj, {
+                    style: (f) => ({ color: colors[f.properties && f.properties.type] || '#0ea5e9', weight: 2, fillOpacity: 0.2 }),
+                    pointToLayer: (f, ll) => L.circleMarker(ll, { radius: 6 }),
+                    onEachFeature: (f, layer) => {
+                        const rows = Object.entries(f.properties || {}).map(([k2, v]) => `<b>${escapeHtml(k2)}:</b> ${escapeHtml(v)}`).join('<br>');
+                        layer.bindPopup(`<b>Pipeline result</b><br>${rows}`);
+                    }
+                }).addTo(map);
+                layerControl.addOverlay(pipelineLayer, 'Pipeline Results');
+                const b = pipelineLayer.getBounds();
+                if (b.isValid()) map.fitBounds(b);
+                document.getElementById('status').innerText = `Loaded ${pipelineLayer.getLayers().length} pipeline feature(s) from ${file.name}.`;
+            } catch (e) {
+                document.getElementById('status').innerText = 'Could not read that file as GeoJSON.';
+            }
+        };
+        reader.readAsText(file);
     }
 
     function renderGLLayer(ctx) {
@@ -982,6 +1264,15 @@
     // Show the mounds-only "Trend Radius" slider only in that mode (wired via
     // the scanMode <select>'s inline onchange in the HTML).
     const scanModeEl = document.getElementById('scanMode');
+    const MODE_DESCRIPTIONS = {
+        basecamp: '<b>Phase 2: Long-term habitation.</b> Shelters that could carry families through a hard winter: large south/southeast-facing bluff overhangs (passive solar heat) with a flat, dry dirt bench at their base, near year-round water and above the 100-year floodplain.',
+        huntcamp: '<b>Phase 3: Transient hunt camps.</b> Small outcrops and overhangs facing any direction, with quick cover, placed beside game choke points (saddles, ridgeline gaps, canyon funnels) and with a commanding view over valley floors or stream crossings.',
+        ceremonial: '<b>Phase 4: Deep ceremonial karst.</b> Maps the geological "plumbing" instead of surface relief: large closed sinkholes (possible collapsed karst windows), sinking streams that drain into cave entrances, and a cross-check against known cave surveys to confirm a system deep enough for a true Dark Zone.',
+        caves: 'Closed depressions (dolines/sinkholes) from Priority-Flood depression filling.',
+        mounds: 'Earthen mounds from a multi-scale Local Relief Model.',
+        shelter: 'Flat ground at the base of a steep cliff, the setting rockshelters form in (any aspect).',
+        settlement: 'A continuous settlement-suitability surface (water, flood safety, flat ground, known sites).'
+    };
     const trendRadiusRow = document.getElementById('trendRadiusRow');
     function syncScanModeUI() {
         const mode = scanModeEl.value;
@@ -991,6 +1282,10 @@
         document.getElementById('maxElongationRow').style.display = mode === 'mounds' ? 'flex' : 'none';
         document.getElementById('elongationWarningCaption').style.display = mode === 'mounds' ? 'block' : 'none';
         shelterParamsGroup.style.display = mode === 'shelter' ? 'block' : 'none';
+        document.getElementById('basecampParamsGroup').style.display = mode === 'basecamp' ? 'block' : 'none';
+        document.getElementById('huntcampParamsGroup').style.display = mode === 'huntcamp' ? 'block' : 'none';
+        document.getElementById('ceremonialParamsGroup').style.display = mode === 'ceremonial' ? 'block' : 'none';
+        document.getElementById('modeDescription').innerHTML = MODE_DESCRIPTIONS[mode] || '';
         document.getElementById('moundPresetRow').style.display = mode === 'mounds' ? 'block' : 'none';
         document.getElementById('geometricThresholdsGroup').style.display = mode === 'settlement' ? 'none' : 'block';
         document.getElementById('settlementWeightsGroup').style.display = mode === 'settlement' ? 'block' : 'none';
@@ -998,7 +1293,9 @@
         // every mode - relabeled per mode so the number alongside it stays
         // meaningful.
         document.getElementById('minHeightLabel').innerText =
-            mode === 'shelter' ? 'Min Bluff Height' : 'Min Depth/Relief';
+            (mode === 'shelter' || mode === 'basecamp') ? 'Min Bluff Height'
+            : mode === 'huntcamp' ? 'Min Outcrop Prominence'
+            : mode === 'ceremonial' ? 'Min Sink Depth' : 'Min Depth/Relief';
         // Waterway Threshold always applies to Settlement mode (it always uses
         // waterway data as a scoring input) regardless of the Exclude
         // Waterways checkbox, which is specific to Caves/Mounds/Shelter filtering.
@@ -1149,6 +1446,15 @@
         return `${ft}ft ${inch}in`;
     }
     function feetToMeters(ft) { return ft * FT_TO_M; }
+    // Karst-workflow sliders are entered in meters, matching the units the
+    // workflow's parameters are specified in (10-50 m TPI radius, 100-300 m
+    // water buffer, ...); shown with a feet equivalent for convenience.
+    function updateMetricLenVal(id, decimals) {
+        const m = parseFloat(document.getElementById(id).value);
+        const el = document.getElementById(id + 'Val');
+        el.innerText = m.toFixed(decimals || 0) + 'm';
+        el.title = metersToFeetInches(m);
+    }
     function metersToFeet(m) { return m / FT_TO_M; }
     // Length-based slider readout: value is entered in feet, displayed as ft/in.
     function updateLengthVal(id) {
@@ -1204,30 +1510,41 @@
         // natural ravine-edge ridge or levee (unbounded by any construction
         // effort, unlike an intentional mound) can easily run considerably
         // longer relative to its width.
+        // Karst workflow modes. Bench zones and bluff-foot outcrops run along
+        // a bluff line, so like shelters they're naturally elongated (low
+        // circularity is normal); ceremonial sinks keep a doline-like
+        // circularity floor but a larger max diameter for collapsed karst
+        // windows.
+        if (mode === 'basecamp') return { ...base, minHeight: 10, minCircularity: 0.05, minDiameter: 10, maxDiameter: 1000 };
+        if (mode === 'huntcamp') return { ...base, minHeight: 2, minCircularity: 0.05, minDiameter: 3, maxDiameter: 300 };
+        if (mode === 'ceremonial') return { ...base, minHeight: 2, minCircularity: 0.2, minDiameter: 15, maxDiameter: 1000 };
         if (mode === 'mounds') return { ...base, minHeight: 1.5, minCircularity: 0.15, maxDiameter: 850, minDiameter: 15, trendRadius: 55, maxFlankSlope: 70, maxElongation: 3.0 };
         return base;
+    }
+    // Every threshold-learning mode, in one place, so adding a mode means
+    // updating this list once rather than every load/import/clear path.
+    const GEOMETRIC_MODES = ['caves', 'mounds', 'shelter', 'basecamp', 'huntcamp', 'ceremonial'];
+    // Fills in anything missing - older saved/exported data predates the
+    // rejected lists and the karst workflow modes - so every code path can
+    // rely on trainingData[mode].examples/.thresholds/.rejected existing.
+    function normalizeTrainingData(d) {
+        d = d || {};
+        for (const m of GEOMETRIC_MODES) {
+            d[m] = d[m] || { examples: [], thresholds: defaultModeThresholds(m) };
+            d[m].examples = d[m].examples || [];
+            d[m].thresholds = d[m].thresholds || defaultModeThresholds(m);
+            d[m].rejected = d[m].rejected || [];
+        }
+        d.settlement = d.settlement || { examples: [] };
+        d.settlement.examples = d.settlement.examples || [];
+        return d;
     }
     function loadTrainingData() {
         try {
             const raw = localStorage.getItem(TRAINING_KEY);
-            if (raw) {
-                const d = JSON.parse(raw);
-                d.caves = d.caves || { examples: [], thresholds: defaultModeThresholds('caves') };
-                d.mounds = d.mounds || { examples: [], thresholds: defaultModeThresholds('mounds') };
-                d.shelter = d.shelter || { examples: [], thresholds: defaultModeThresholds('shelter') };
-                d.settlement = d.settlement || { examples: [] };
-                d.caves.rejected = d.caves.rejected || []; // older saved training data predates this
-                d.mounds.rejected = d.mounds.rejected || [];
-                d.shelter.rejected = d.shelter.rejected || [];
-                return d;
-            }
+            if (raw) return normalizeTrainingData(JSON.parse(raw));
         } catch (e) { console.error('Could not load training data', e); }
-        return {
-            caves: { examples: [], thresholds: defaultModeThresholds('caves'), rejected: [] },
-            mounds: { examples: [], thresholds: defaultModeThresholds('mounds'), rejected: [] },
-            shelter: { examples: [], thresholds: defaultModeThresholds('shelter'), rejected: [] },
-            settlement: { examples: [] },
-        };
+        return normalizeTrainingData({});
     }
     function saveTrainingData() {
         try { localStorage.setItem(TRAINING_KEY, JSON.stringify(trainingData)); }
@@ -1239,13 +1556,16 @@
     // needs to describe what's being detected - centralized so adding a mode
     // means updating these once, not hunting down every inline ternary.
     function modeFeatureName(mode) {
-        return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'shelter' ? 'Rockshelter / Overhang' : 'Feature';
+        return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'shelter' ? 'Rockshelter / Overhang'
+            : mode === 'basecamp' ? 'Base Camp Shelter (bluff-base bench)' : mode === 'huntcamp' ? 'Hunt Camp (outcrop at choke point)'
+            : mode === 'ceremonial' ? 'Ceremonial Karst Entrance' : 'Feature';
     }
     function modeMetricLabel(mode) {
-        return mode === 'caves' ? 'Max Depth' : mode === 'shelter' ? 'Max Bluff Height' : 'Max Relief';
+        return (mode === 'caves' || mode === 'ceremonial') ? 'Max Depth' : (mode === 'shelter' || mode === 'basecamp') ? 'Max Bluff Height'
+            : mode === 'huntcamp' ? 'Outcrop Prominence (TPI)' : 'Max Relief';
     }
     function modeSignalLabel(mode) {
-        return mode === 'caves' ? 'depression' : mode === 'shelter' ? 'nearby cliff/rise' : 'relief';
+        return (mode === 'caves' || mode === 'ceremonial') ? 'depression' : (mode === 'shelter' || mode === 'basecamp') ? 'nearby cliff/rise' : mode === 'huntcamp' ? 'outcrop' : 'relief';
     }
 
     function approxMetersBetween(lat1, lon1, lat2, lon2) {
@@ -1319,8 +1639,8 @@
     function updateTrainingSummary() {
         const el = document.getElementById('trainingSummary');
         if (!el) return;
-        const sigCount = trainingData.caves.examples.filter(e => e.significance).length + trainingData.shelter.examples.filter(e => e.significance).length;
-        el.innerText = `Confirmed: ${trainingData.caves.examples.length} cave/sinkhole, ${trainingData.mounds.examples.length} mound, ${trainingData.shelter.examples.length} shelter, ${trainingData.settlement.examples.length} settlement example(s)` +
+        const sigCount = ['caves', 'shelter', 'ceremonial'].reduce((n, m) => n + trainingData[m].examples.filter(e => e.significance).length, 0);
+        el.innerText = `Confirmed: ${trainingData.basecamp.examples.length} base camp, ${trainingData.huntcamp.examples.length} hunt camp, ${trainingData.ceremonial.examples.length} ceremonial karst, ${trainingData.caves.examples.length} cave/sinkhole, ${trainingData.mounds.examples.length} mound, ${trainingData.shelter.examples.length} shelter, ${trainingData.settlement.examples.length} settlement example(s)` +
             (sigCount > 0 ? ` \u2014 ${sigCount} marked with burial/ritual significance` : '');
     }
     updateTrainingSummary();
@@ -1394,7 +1714,7 @@
     // way an individual cave or shelter usually is not.
     function markSpecialSignificance(mode, lat, lon, ev) {
         if (ev) { ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); }
-        if (mode !== 'caves' && mode !== 'shelter') return;
+        if (mode !== 'caves' && mode !== 'shelter' && mode !== 'ceremonial') return;
         const ex = trainingData[mode].examples.find(e => approxMetersBetween(e.lat, e.lon, lat, lon) < 20);
         if (!ex) { document.getElementById('status').innerText = 'This site needs to be confirmed first.'; return; }
         const typeInput = prompt(
@@ -1589,9 +1909,7 @@
             try {
                 const parsed = JSON.parse(reader.result);
                 if (!parsed.caves || !parsed.mounds) throw new Error('unexpected format');
-                parsed.settlement = parsed.settlement || { examples: [] }; // older exports predate this category
-                parsed.shelter = parsed.shelter || { examples: [], thresholds: defaultModeThresholds('shelter') }; // older exports predate this category too
-                trainingData = parsed;
+                trainingData = normalizeTrainingData(parsed); // older exports predate some categories
                 saveTrainingData();
                 applyModeThresholds(activeThresholdMode);
                 updateTrainingSummary();
@@ -1604,13 +1922,8 @@
         fileInput.value = '';
     }
     function clearTrainingData() {
-        if (!confirm('Clear all confirmed examples and learned thresholds/patterns for ALL FOUR modes (caves, mounds, shelters, settlement)? Export first if you want a backup - this cannot be undone.')) return;
-        trainingData = {
-            caves: { examples: [], thresholds: defaultModeThresholds('caves') },
-            mounds: { examples: [], thresholds: defaultModeThresholds('mounds') },
-            shelter: { examples: [], thresholds: defaultModeThresholds('shelter') },
-            settlement: { examples: [] },
-        };
+        if (!confirm('Clear all confirmed examples and learned thresholds/patterns for ALL modes (base camps, hunt camps, ceremonial karst, caves, mounds, shelters, settlement)? Export first if you want a backup - this cannot be undone.')) return;
+        trainingData = normalizeTrainingData({});
         saveTrainingData();
         applyModeThresholds(activeThresholdMode);
         updateTrainingSummary();
@@ -1974,7 +2287,11 @@
     // raster for that. `stR`/`stC` (scratch stack arrays) are allocated ONCE by
     // the caller and passed in, so calling this many times in a loop doesn't
     // re-allocate a full-grid-sized array on every single cell.
-    function traceOneComponent(mask, metric, dem, width, height, effRes, nodataThresh, visited, stR, stC, startR, startC, waterwayMask, slopeDegRaster) {
+    // `extraMaxRasters` is optional - an array of extra rasters whose per-
+    // component MAXIMUM is returned as k.extraMax[] (same order), used by the
+    // karst workflow modes for things like peak LRM under a drip line or peak
+    // sinking-stream inflow into a sink.
+    function traceOneComponent(mask, metric, dem, width, height, effRes, nodataThresh, visited, stR, stC, startR, startC, waterwayMask, slopeDegRaster, extraMaxRasters) {
         const i0 = startR * width + startC;
         if (!mask[i0] || visited[i0]) return null;
 
@@ -1985,6 +2302,7 @@
         let count = 0, sumMetric = 0, maxMetric = -Infinity, waterwayCount = 0, maxFlankSlope = 0;
         let sumR = 0, sumC = 0, sumRR = 0, sumCC = 0, sumRC = 0;
         let minR = height, maxR = -1, minC = width, maxC = -1, exposed = 0, gapEdges = 0;
+        const extraMax = extraMaxRasters ? extraMaxRasters.map(() => -Infinity) : null;
 
         while (sp > 0) {
             sp--;
@@ -2005,6 +2323,7 @@
             // edge are themselves somewhat degraded - the accurate interior
             // readings dominate a max.
             if (slopeDegRaster && slopeDegRaster[ci] > maxFlankSlope) maxFlankSlope = slopeDegRaster[ci];
+            if (extraMax) for (let x = 0; x < extraMax.length; x++) { const v = extraMaxRasters[x][ci]; if (v > extraMax[x]) extraMax[x] = v; }
             sumR += cr; sumC += cc; sumRR += cr*cr; sumCC += cc*cc; sumRC += cr*cc;
             if (cr < minR) minR = cr; if (cr > maxR) maxR = cr;
             if (cc < minC) minC = cc; if (cc > maxC) maxC = cc;
@@ -2063,7 +2382,7 @@
             centroidR: meanR, centroidC: meanC,
             circularity, elongation: Math.sqrt(lambda1/lambda2), orientation, fillRatio,
             waterwayFraction: waterwayMask ? waterwayCount / count : 0,
-            maxFlankSlope,
+            maxFlankSlope, extraMax,
             incomplete: (minR === 0 || maxR === height-1 || minC === 0 || maxC === width-1 || gapFraction > 0.25)
         };
     }
@@ -2083,13 +2402,13 @@
     // clipped by the tile edge — its true extent/depth is equally unknown.
     // `waterwayMask` is optional - pass null to skip waterway-fraction tracking.
     // `slopeDegRaster` is optional - pass null to skip flank-slope tracking.
-    function traceComponents(mask, metric, dem, width, height, effRes, nodataThresh, waterwayMask, slopeDegRaster) {
+    function traceComponents(mask, metric, dem, width, height, effRes, nodataThresh, waterwayMask, slopeDegRaster, extraMaxRasters) {
         const visited = new Uint8Array(width * height);
         const stR = new Int32Array(width * height), stC = new Int32Array(width * height);
         const comps = [];
         for (let r = 0; r < height; r++) {
             for (let c = 0; c < width; c++) {
-                const comp = traceOneComponent(mask, metric, dem, width, height, effRes, nodataThresh, visited, stR, stC, r, c, waterwayMask, slopeDegRaster);
+                const comp = traceOneComponent(mask, metric, dem, width, height, effRes, nodataThresh, visited, stR, stC, r, c, waterwayMask, slopeDegRaster, extraMaxRasters);
                 if (comp) comps.push(comp);
             }
         }
@@ -2216,6 +2535,725 @@
         return { metricRaster, candidateMask };
     }
 
+    // =====================================================================
+    // KARST ARCHAEOLOGY WORKFLOW (Phases 2-4 of the GIS workflow guidelines)
+    // =====================================================================
+    // Three scan modes built directly on the raster pipelines described in
+    // the workflow: Long-Term Habitation (TPI -> Solar Aspect -> LRM ->
+    // Hydrology), Transient Hunt Camps (small-scale TPI -> Choke Points ->
+    // Viewshed) and Deep Ceremonial Karst (Fill Sink -> Sinking Streams ->
+    // Speleological Overlay). Each returns the same { metricRaster,
+    // candidateMask } pair every other mode does, so tracing, filtering,
+    // training, markers and exports all work unchanged; mode-specific
+    // popup lines, filters and score boosts come back via `modeCtx`.
+
+    // Compass aspect of the downslope direction each cell faces, in degrees
+    // (0=N, 90=E, 180=S, 270=W) - the standard GIS Aspect definition. -1 for
+    // flat cells (no defined aspect) and NoData. Row index increases
+    // southward, so "north" is row-1.
+    function computeAspectDegrees(dem, width, height, effResVal, nodataThresh) {
+        const aspect = new Float32Array(width * height);
+        for (let r = 0; r < height; r++) {
+            for (let c = 0; c < width; c++) {
+                const i = r*width + c;
+                if (dem[i] < nodataThresh) { aspect[i] = -1; continue; }
+                const l = c > 0 && dem[i-1] >= nodataThresh ? dem[i-1] : dem[i];
+                const rr = c < width-1 && dem[i+1] >= nodataThresh ? dem[i+1] : dem[i];
+                const u = r > 0 && dem[i-width] >= nodataThresh ? dem[i-width] : dem[i];
+                const d = r < height-1 && dem[i+width] >= nodataThresh ? dem[i+width] : dem[i];
+                const dzdx = (rr - l) / (2 * effResVal);   // rise toward the east
+                const dzdn = (u - d) / (2 * effResVal);    // rise toward the north
+                if (dzdx === 0 && dzdn === 0) { aspect[i] = -1; continue; }
+                let a = Math.atan2(-dzdx, -dzdn) * 180 / Math.PI; // facing = downslope = -gradient
+                if (a < 0) a += 360;
+                aspect[i] = a;
+            }
+        }
+        return aspect;
+    }
+    // Inclusive compass window test that also handles windows wrapping
+    // through north (e.g. From 315 To 45).
+    function aspectInWindow(a, from, to) {
+        if (a < 0) return false;
+        return from <= to ? (a >= from && a <= to) : (a >= from || a <= to);
+    }
+
+    // Standard deviation of a raster's valid cells (sampled - same reasoning
+    // as estimateNoiseFloor). Used to threshold TPI to its "extreme" values in
+    // a way that adapts to how rugged THIS tile is, rather than a fixed number
+    // of meters that would mean something very different on the Plateau
+    // escarpment than on a gentle valley floor.
+    function rasterStd(raster, validMin) {
+        const n = raster.length, step = Math.max(1, Math.floor(n / 100000));
+        let sum = 0, sumSq = 0, cnt = 0;
+        for (let i = 0; i < n; i += step) {
+            const v = raster[i];
+            if (!(v > validMin)) continue;
+            sum += v; sumSq += v*v; cnt++;
+        }
+        if (cnt < 2) return 0;
+        const mean = sum / cnt;
+        return Math.sqrt(Math.max(0, sumSq / cnt - mean*mean));
+    }
+
+    // Multi-source BFS like distanceToMask, but also returns WHICH source
+    // cell is nearest - lets a bench report the aspect/height of the actual
+    // bluff it sits under, not just that some bluff is nearby.
+    function distanceToMaskWithSource(mask, width, height) {
+        const n = width * height;
+        const dist = new Float32Array(n).fill(Infinity);
+        const src = new Int32Array(n).fill(-1);
+        const queue = new Int32Array(n);
+        let head = 0, tail = 0;
+        for (let i = 0; i < n; i++) if (mask[i]) { dist[i] = 0; src[i] = i; queue[tail++] = i; }
+        const dr4 = [-1,1,0,0], dc4 = [0,0,-1,1];
+        while (head < tail) {
+            const i = queue[head++];
+            const r = (i / width) | 0, c = i % width;
+            for (let k = 0; k < 4; k++) {
+                const nr = r+dr4[k], nc = c+dc4[k];
+                if (nr < 0 || nr >= height || nc < 0 || nc >= width) continue;
+                const ni = nr*width + nc;
+                if (dist[ni] > dist[i] + 1) { dist[ni] = dist[i] + 1; src[ni] = src[i]; queue[tail++] = ni; }
+            }
+        }
+        return { dist, src };
+    }
+
+    // Height Above Nearest Drainage, strict variant: identical to computeHAND
+    // except a cell whose flow path ends WITHOUT reaching the given water
+    // network (a closed flat/sink, or the tile edge) gets NaN - "unknown"
+    // rather than 0. For flood-plain exclusion that distinction matters: the
+    // lenient version reports such cells as sitting right at water level and
+    // would wrongly throw them out as flood-prone.
+    function computeHANDStrict(filledDem, dir, waterMask, width, height, nodataThresh) {
+        const n = width * height;
+        const baseElev = new Float32Array(n).fill(NaN);
+        const order = [];
+        for (let i = 0; i < n; i++) if (filledDem[i] >= nodataThresh) order.push(i);
+        order.sort((a, b) => filledDem[a] - filledDem[b]);
+        const dr8 = [-1,-1,-1,0,0,1,1,1], dc8 = [-1,0,1,-1,1,-1,0,1];
+        for (const i of order) {
+            if (waterMask[i]) { baseElev[i] = filledDem[i]; continue; }
+            const k = dir[i];
+            if (k < 0) continue; // never reaches water - stays NaN
+            const r = (i / width) | 0, c = i % width;
+            baseElev[i] = baseElev[(r + dr8[k]) * width + (c + dc8[k])];
+        }
+        const hand = new Float32Array(n);
+        for (let i = 0; i < n; i++) hand[i] = filledDem[i] - baseElev[i];
+        return hand;
+    }
+
+    function acresToCells(acres) { return (acres * 4046.86) / (effRes * effRes); }
+    function readNum(id) { return parseFloat(document.getElementById(id).value); }
+    function rcIndex(k) {
+        const r = Math.min(demHeight-1, Math.max(0, Math.round(k.centroidR)));
+        const c = Math.min(demWidth-1, Math.max(0, Math.round(k.centroidC)));
+        return r * demWidth + c;
+    }
+    function compassLabel(a) {
+        if (a < 0) return 'flat';
+        return ['N','NE','E','SE','S','SW','W','NW'][Math.round(a / 45) % 8] + ` (${a.toFixed(0)}&deg;)`;
+    }
+    const warnBox = (html) => `<div style="margin-top:6px;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:4px 6px;border-radius:4px;">${html}</div>`;
+    const goodBox = (html) => `<div style="margin-top:6px;font-size:0.75rem;color:#166534;background:#dcfce7;padding:4px 6px;border-radius:4px;">${html}</div>`;
+
+    // ---- PHASE 2: LONG-TERM HABITATION (BASE CAMPS) ----
+    async function computeBasecampRasters(denoised, candidateThreshold) {
+        const status = document.getElementById('status');
+        const nd = -100, W = demWidth, H = demHeight, n = W * H;
+        const tick = async (msg) => { status.innerText = msg; await new Promise(r => setTimeout(r, 0)); };
+
+        await tick('Step 1/4: Topographic Position Index (isolating bluff lines)...');
+        const slope = computeSlopeDegrees(denoised, W, H, effRes, nd);
+        const tpiOuter = Math.max(2, Math.round(readNum('bcTpiRadiusM') / effRes));
+        const tpiInner = Math.max(1, Math.round(tpiOuter / 4));
+        const tpi = computeTPI(denoised, W, H, tpiInner, tpiOuter, nd);
+        const tpiSigma = rasterStd(tpi, -9000);
+        const tpiCut = readNum('bcTpiSigma') * tpiSigma;
+        // Extreme positive TPI = bluff crests, extreme negative = bluff
+        // bases. A bluff FACE is the steep ground between them, so a steep
+        // cell counts as part of a bluff line when it lies within one TPI
+        // radius of either extreme - this keeps long, merely-steep hillsides
+        // (no crest/base contrast) out of the bluff set.
+        const extremeMask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) if (tpi[i] > -9000 && Math.abs(tpi[i]) > tpiCut) extremeMask[i] = 1;
+        const extremeDist = distanceToMask(extremeMask, W, H);
+
+        await tick('Step 2/4: Solar aspect filtering (south/southeast bluffs)...');
+        const aspect = computeAspectDegrees(denoised, W, H, effRes, nd);
+        const aspFrom = readNum('bcAspectMin'), aspTo = readNum('bcAspectMax');
+        const bluffSlope = readNum('bcBluffSlope');
+        const steepMask = new Uint8Array(n), solarBluff = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+            if (denoised[i] < nd || slope[i] < bluffSlope) continue;
+            steepMask[i] = 1;
+            if (extremeDist[i] <= tpiOuter && aspectInWindow(aspect[i], aspFrom, aspTo)) solarBluff[i] = 1;
+        }
+        const { dist: bluffDist, src: bluffSrc } = distanceToMaskWithSource(solarBluff, W, H);
+
+        await tick('Step 3/4: Local Relief Model at the bluff bases...');
+        // LRM = DTM minus a heavily smoothed DTM. The bluff faces themselves
+        // are masked out of the smoothing (treated as NoData) so the cliff's
+        // own mass can't drag the trend surface above the bench at its foot.
+        // What's left highlights shelf-like flats and small mounded anomalies
+        // (e.g. a refuse midden under the drip line) against the general
+        // hillside trend.
+        const lrmR = Math.max(2, Math.round(readNum('bcLrmRadiusM') / effRes));
+        const masked = new Float32Array(n);
+        for (let i = 0; i < n; i++) masked[i] = steepMask[i] ? -9999 : denoised[i];
+        const trend = boxSmooth(masked, W, H, lrmR, nd);
+        const lrm = new Float32Array(n);
+        for (let i = 0; i < n; i++) lrm[i] = (denoised[i] >= nd && trend[i] >= nd) ? denoised[i] - trend[i] : -9999;
+        const bluffDistPx = Math.max(1, Math.round(readNum('bcBluffDistM') / effRes));
+        const maxNearbyElev = extremeFilter2D(denoised, W, H, bluffDistPx + 1, true);
+
+        await tick('Step 4/4: Hydrology intersection (water buffer, floodplain exclusion)...');
+        const flow = await getFlowData();
+        const perennialCells = acresToCells(readNum('perennialAcres'));
+        const waterMask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) if (flow.accum[i] >= perennialCells) waterMask[i] = 1;
+        const waterDist = distanceToMask(waterMask, W, H);
+        const hand = computeHANDStrict(flow.filled, flow.dir, waterMask, W, H, nd);
+        const bufferM = readNum('bcWaterBufferM');
+        const floodCut = readNum('floodHandM');
+        const benchSlope = readNum('bcBenchSlope');
+
+        const metricRaster = new Float32Array(n);
+        const candidateMask = new Uint8Array(n);
+        const stats = { bluffCells: 0, benchCells: 0, floodExcluded: 0 };
+        for (let i = 0; i < n; i++) {
+            if (denoised[i] < nd) continue;
+            if (solarBluff[i]) stats.bluffCells++;
+            const rise = maxNearbyElev[i] - denoised[i];
+            metricRaster[i] = rise;
+            if (steepMask[i]) continue;                                  // on the face itself, not the floor
+            if (!(bluffDist[i] <= bluffDistPx)) continue;                // not at the base of a solar bluff
+            if (tpi[i] > 0) continue;                                    // crest side of the bluff, not its base
+            if (rise <= candidateThreshold) continue;                    // nothing actually rises above it
+            if (slope[i] >= benchSlope) continue;                        // not a flat living surface
+            if (lrm[i] < -0.25) continue;                                // a hollow/gully, not a shelf
+            stats.benchCells++;
+            if (!(waterDist[i] * effRes <= bufferM)) continue;           // outside the year-round water buffer
+            if (hand[i] <= floodCut) { stats.floodExcluded++; continue; } // inside the ~100-yr floodplain
+            candidateMask[i] = 1;
+        }
+        // A bench along a continuous bluff line is one long strip, often
+        // kilometers long and running off the tile. As a single region it
+        // would be rejected as edge-clipped or oversized and would be
+        // useless as a field target. Cutting it on a grid of the Bench
+        // Segment Length turns it into site-sized pieces that can each be
+        // scored, confirmed and exported on their own.
+        const segPx = Math.max(4, Math.round(readNum('bcSegmentM') / effRes));
+        for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) if (r % segPx === 0 || c % segPx === 0) candidateMask[r*W + c] = 0;
+
+        const middenM = readNum('bcMiddenM');
+        const modeCtx = {
+            extraMaxRasters: [lrm],
+            overlay3D: { candidateMask, highlightMask: solarBluff },
+            summary: () => `${stats.bluffCells.toLocaleString()} south-facing bluff cells, ${stats.benchCells.toLocaleString()} bench cells at their base, ${stats.floodExcluded.toLocaleString()} dropped as floodplain.`,
+            describe(k) {
+                const i = rcIndex(k);
+                const src = bluffSrc[i];
+                const bluffAsp = src >= 0 ? aspect[src] : -1;
+                const wd = waterDist[i] * effRes;
+                const peakLrm = k.extraMax ? k.extraMax[0] : 0;
+                let html = `<b>Bluff Aspect:</b> ${compassLabel(bluffAsp)}<br>` +
+                           `<b>Distance to Year-Round Water:</b> ${isFinite(wd) ? Math.round(wd) + ' m' : 'n/a'}<br>` +
+                           `<b>Height Above Drainage:</b> ${isFinite(hand[i]) ? hand[i].toFixed(1) + ' m (above the ' + floodCut + ' m floodplain cutoff)' : 'unknown'}<br>` +
+                           `<b>Peak Local Relief (LRM):</b> ${peakLrm.toFixed(2)} m<br>`;
+                let boost = 0;
+                if (peakLrm >= middenM) {
+                    html += warnBox(`&#9888; Positive mounding of ${peakLrm.toFixed(2)} m on the bench. Could be a deep refuse midden under the drip line; the workflow expects lithic scatter and limestone-tempered pottery at a real one. Could also be rockfall or colluvium. Check in the field.`);
+                    boost += 0.15;
+                }
+                return { html, boost };
+            }
+        };
+        return { metricRaster, candidateMask, modeCtx };
+    }
+
+    // ---- PHASE 3: TRANSIENT HUNT CAMPS ----
+    // Saddles / ridgeline gaps: at a chosen terrain scale, a saddle is a point
+    // that's a low point in one direction and a high point in the
+    // perpendicular one - i.e. the smoothed surface's Hessian has one
+    // positive and one negative principal curvature (determinant < 0), with
+    // the saddle point itself close by: a Newton step (H^-1 * gradient) from
+    // this cell must land within half the scale distance. Without that test
+    // the lower flanks of any isolated hill qualify too (they curve up
+    // radially and down around the hill, which gives the same determinant
+    // sign) even though no gap exists there. Both curvatures must also be
+    // large enough to represent real relief (~0.5 m over the scale
+    // distance), so gently warped flats don't register.
+    function computeSaddleMask(denoised, W, H, scalePx, nd) {
+        const sm = boxSmooth(denoised, W, H, Math.max(1, Math.round(scalePx / 2)), nd);
+        const h = Math.max(1, scalePx);
+        const hm = h * effRes;
+        const minCurv = 2 * 0.5 / (hm * hm);
+        const mask = new Uint8Array(W * H);
+        for (let r = h; r < H - h; r++) {
+            for (let c = h; c < W - h; c++) {
+                const i = r*W + c;
+                const z = sm[i], zl = sm[i-h], zr = sm[i+h], zu = sm[i-h*W], zd = sm[i+h*W];
+                const zul = sm[i-h*W-h], zur = sm[i-h*W+h], zdl = sm[i+h*W-h], zdr = sm[i+h*W+h];
+                if (z < nd || zl < nd || zr < nd || zu < nd || zd < nd || zul < nd || zur < nd || zdl < nd || zdr < nd) continue;
+                const fxx = (zr - 2*z + zl) / (hm*hm);
+                const fyy = (zd - 2*z + zu) / (hm*hm);
+                const fxy = (zdr - zdl - zur + zul) / (4*hm*hm);
+                const det = fxx*fyy - fxy*fxy;
+                if (det >= 0) continue;
+                const gx = (zr - zl) / (2*hm), gy = (zd - zu) / (2*hm);
+                if (Math.atan(Math.hypot(gx, gy)) * 180 / Math.PI > 8) continue;
+                const stepX = (fyy*gx - fxy*gy) / det, stepY = (fxx*gy - fxy*gx) / det; // H^-1 g
+                if (Math.hypot(stepX, stepY) > Math.max(effRes, hm / 2)) continue;
+                const half = (fxx + fyy) / 2, disc = Math.sqrt(half*half - det);
+                if (Math.min(Math.abs(half + disc), Math.abs(half - disc)) < minCurv) continue;
+                mask[i] = 1;
+            }
+        }
+        return mask;
+    }
+    // Canyon funnels: a drainage-line cell hemmed in by steep walls on BOTH
+    // opposite sides within half the maximum funnel width - checked along
+    // each of the 4 axes (N-S, E-W and both diagonals).
+    function computeFunnelMask(accum, slope, W, H, channelCells, halfWidthPx, wallSlope) {
+        const mask = new Uint8Array(W * H);
+        const dr8 = [-1,-1,0,1,1,1,0,-1], dc8 = [0,1,1,1,0,-1,-1,-1];
+        const steepAlong = (r, c, d) => {
+            for (let s = 1; s <= halfWidthPx; s++) {
+                const nr = r + dr8[d]*s, nc = c + dc8[d]*s;
+                if (nr < 0 || nr >= H || nc < 0 || nc >= W) return false;
+                if (slope[nr*W + nc] >= wallSlope) return true;
+            }
+            return false;
+        };
+        for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+            const i = r*W + c;
+            if (accum[i] < channelCells) continue;
+            for (let d = 0; d < 4; d++) {
+                if (steepAlong(r, c, d) && steepAlong(r, c, d + 4)) { mask[i] = 1; break; }
+            }
+        }
+        return mask;
+    }
+
+    // Radial line-of-sight viewshed from (r0,c0). Every ray is marched one
+    // cell at a time, keeping the steepest angle seen so far; a cell is
+    // visible when its angle from the observer's eye meets or beats that.
+    // Earth curvature/refraction is ignored (negligible at a few km). For
+    // area estimates each ray sample stands for its annular-sector share of
+    // the circle, so the total is unbiased without needing a ray per edge
+    // cell. `markVisible` (optional Uint8Array) gets every visible cell set,
+    // for drawing the viewshed on the map.
+    function computeViewshed(dem, W, H, r0, c0, radiusM, observerM, nd, isFloor, isCrossing, nRays, markVisible) {
+        const i0 = r0*W + c0;
+        const z0 = dem[i0] + observerM;
+        const Rpx = Math.max(2, Math.round(radiusM / effRes));
+        const cellHa = effRes * effRes / 10000;
+        let floorHa = 0, crossingHa = 0, visibleHa = 0;
+        for (let a = 0; a < nRays; a++) {
+            const th = a * 2 * Math.PI / nRays;
+            const dx = Math.cos(th), dy = Math.sin(th);
+            let maxTan = -Infinity;
+            for (let s = 1; s <= Rpx; s++) {
+                const r = Math.round(r0 + dy*s), c = Math.round(c0 + dx*s);
+                if (r < 0 || r >= H || c < 0 || c >= W) break;
+                const i = r*W + c;
+                if (dem[i] < nd) continue;
+                const tanA = (dem[i] - z0) / (s * effRes);
+                if (tanA >= maxTan) {
+                    const w = (2 * Math.PI * s / nRays) * cellHa; // this sample's share of the ring at distance s
+                    visibleHa += w;
+                    if (isFloor(i, z0)) floorHa += w;
+                    if (isCrossing(i)) crossingHa += w;
+                    if (markVisible) markVisible[i] = 1;
+                    maxTan = tanA;
+                }
+            }
+        }
+        return { floorHa, crossingHa, visibleHa };
+    }
+
+    async function computeHuntcampRasters(denoised, candidateThreshold) {
+        const status = document.getElementById('status');
+        const nd = -100, W = demWidth, H = demHeight, n = W * H;
+        const tick = async (msg) => { status.innerText = msg; await new Promise(r => setTimeout(r, 0)); };
+
+        await tick('Step 1/3: Small-scale TPI (minor rock outcrops, any aspect)...');
+        const slope = computeSlopeDegrees(denoised, W, H, effRes, nd);
+        const aspect = computeAspectDegrees(denoised, W, H, effRes, nd);
+        const tpiOuter = Math.max(2, Math.round(readNum('hcTpiRadiusM') / effRes));
+        const tpiInner = Math.max(1, Math.round(tpiOuter / 4));
+        const tpi = computeTPI(denoised, W, H, tpiInner, tpiOuter, nd);
+        const tpiCut = readNum('hcTpiSigma') * rasterStd(tpi, -9000);
+        const outcropSlope = readNum('hcOutcropSlope');
+
+        await tick('Step 2/3: Terrain choke points (saddles, ridgeline gaps, canyon funnels)...');
+        const scalePx = Math.max(2, Math.round(readNum('hcChokeScaleM') / effRes));
+        const saddleMask = computeSaddleMask(denoised, W, H, scalePx, nd);
+        const flow = await getFlowData();
+        const channelCells = acresToCells(readNum('waterwayThreshold'));
+        const halfWidthPx = Math.max(1, Math.round(readNum('hcFunnelWidthM') / 2 / effRes));
+        const funnelMask = computeFunnelMask(flow.accum, slope, W, H, channelCells, halfWidthPx, 30);
+        const chokeMask = new Uint8Array(n);
+        let saddleCount = 0, funnelCount = 0;
+        for (let i = 0; i < n; i++) {
+            if (saddleMask[i]) { chokeMask[i] = 1; saddleCount++; }
+            if (funnelMask[i]) { chokeMask[i] = 1; funnelCount++; }
+        }
+        const { dist: chokeDist, src: chokeSrc } = distanceToMaskWithSource(chokeMask, W, H);
+        const chokeDistPx = readNum('hcChokeDistM') / effRes;
+
+        const metricRaster = new Float32Array(n);
+        const candidateMask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+            if (denoised[i] < nd || tpi[i] < -9000) continue;
+            metricRaster[i] = tpi[i]; // outcrop prominence above its surroundings
+            if (tpi[i] > tpiCut && tpi[i] > candidateThreshold && slope[i] >= outcropSlope && chokeDist[i] <= chokeDistPx) candidateMask[i] = 1;
+        }
+
+        // Step 3 runs per candidate (in describe below) since a viewshed
+        // is a per-observer computation. Capped so a scan over very rugged
+        // terrain with hundreds of outcrops stays responsive; the rest still
+        // show, just without a viewshed verdict.
+        const viewRadiusM = readNum('hcViewRadiusM'), observerM = readNum('hcObserverM'), minViewHa = readNum('hcMinViewHa');
+        const isFloor = (i, z0) => slope[i] < 8 && denoised[i] < z0 - 5;
+        const isCrossing = (i) => flow.accum[i] >= channelCells && slope[i] < 5;
+        const MAX_VIEWSHEDS = 150;
+        let viewshedsRun = 0;
+        const modeCtx = {
+            overlay3D: { candidateMask, highlightMask: chokeMask },
+            summary: () => `${saddleCount.toLocaleString()} saddle/gap cells, ${funnelCount.toLocaleString()} canyon-funnel cells; ${viewshedsRun} viewshed(s) computed.`,
+            describe(k) {
+                const i = rcIndex(k);
+                const src = chokeSrc[i];
+                const chokeType = src >= 0 ? (saddleMask[src] ? 'saddle / ridgeline gap' : 'canyon funnel') : 'n/a';
+                const cd = chokeDist[i] * effRes;
+                const obs = findObserverCell(k, candidateMask, denoised);
+                let html = `<b>Outcrop Aspect:</b> ${compassLabel(aspect[obs.i])}<br>` +
+                           `<b>Nearest Choke Point:</b> ${chokeType}, ${isFinite(cd) ? Math.round(cd) + ' m' : 'n/a'}<br>`;
+                let boost = 0;
+                if (viewshedsRun < MAX_VIEWSHEDS) {
+                    viewshedsRun++;
+                    const v = computeViewshed(denoised, W, H, obs.r, obs.c, viewRadiusM, observerM, nd, isFloor, isCrossing, 720, null);
+                    html += `<b>Viewshed (${viewRadiusM} m):</b> ${v.visibleHa.toFixed(1)} ha visible, ${v.floorHa.toFixed(1)} ha valley floor, ${v.crossingHa.toFixed(2)} ha shallow stream/crossing<br>`;
+                    if (v.floorHa >= minViewHa || v.crossingHa >= 0.05) {
+                        html += goodBox(`&#10003; Clear line of sight over ${v.floorHa >= minViewHa ? 'a broad valley floor' : ''}${v.floorHa >= minViewHa && v.crossingHa >= 0.05 ? ' and ' : ''}${v.crossingHa >= 0.05 ? 'a shallow stream crossing' : ''}. That tactical value makes this a likely observation blind or hunt camp. Expect specialized cutting blades, small tool-repair debitage and atlatl weights.`);
+                        boost += 0.25;
+                    }
+                    html += `<button style="width:auto;padding:3px 6px;font-size:0.72rem;margin-top:6px;" onclick="showViewshedOverlay(${obs.r}, ${obs.c}, event)">Show viewshed on map</button><br>`;
+                } else {
+                    html += `<span style="font-size:0.72rem;color:#64748b">Viewshed skipped (limit of ${MAX_VIEWSHEDS} per scan). Use "Show viewshed on map" to run it here.</span>
+                             <br><button style="width:auto;padding:3px 6px;font-size:0.72rem;margin-top:6px;" onclick="showViewshedOverlay(${obs.r}, ${obs.c}, event)">Show viewshed on map</button><br>`;
+                }
+                return { html, boost };
+            }
+        };
+        lastViewshedCtx = { denoised, slope, accum: flow.accum, channelCells, W, H };
+        return { metricRaster, candidateMask, modeCtx };
+    }
+    // Highest candidate cell within the component's own footprint radius of
+    // its centroid - the natural place to stand on an outcrop.
+    function findObserverCell(k, mask, dem) {
+        const rad = Math.max(1, Math.round(Math.sqrt(k.count / Math.PI)));
+        const r0 = Math.round(k.centroidR), c0 = Math.round(k.centroidC);
+        let best = { r: Math.min(demHeight-1, Math.max(0, r0)), c: Math.min(demWidth-1, Math.max(0, c0)) };
+        best.i = best.r * demWidth + best.c;
+        let bestZ = -Infinity;
+        for (let r = Math.max(0, r0 - rad); r <= Math.min(demHeight-1, r0 + rad); r++) {
+            for (let c = Math.max(0, c0 - rad); c <= Math.min(demWidth-1, c0 + rad); c++) {
+                const i = r*demWidth + c;
+                if (mask[i] && dem[i] > bestZ) { bestZ = dem[i]; best = { r, c, i }; }
+            }
+        }
+        return best;
+    }
+
+    let lastViewshedCtx = null, viewshedOverlay = null;
+    function showViewshedOverlay(r0, c0, ev) {
+        if (ev) { ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); }
+        const v = lastViewshedCtx;
+        if (!v || v.W !== demWidth || v.H !== demHeight) { document.getElementById('status').innerText = 'Run a Hunt Camp scan on this DTM first.'; return; }
+        const radiusM = readNum('hcViewRadiusM'), observerM = readNum('hcObserverM');
+        const visible = new Uint8Array(v.W * v.H);
+        const nRays = Math.min(8192, Math.max(720, Math.ceil(2 * Math.PI * radiusM / effRes)));
+        const isFloor = (i, z0) => v.slope[i] < 8 && v.denoised[i] < z0 - 5;
+        const isCrossing = (i) => v.accum[i] >= v.channelCells && v.slope[i] < 5;
+        const res = computeViewshed(v.denoised, v.W, v.H, r0, c0, radiusM, observerM, -100, isFloor, isCrossing, nRays, visible);
+        const canvas = document.createElement('canvas');
+        canvas.width = v.W; canvas.height = v.H;
+        const g = canvas.getContext('2d');
+        const img = g.createImageData(v.W, v.H);
+        for (let i = 0; i < visible.length; i++) {
+            if (!visible[i]) continue;
+            const crossing = isCrossing(i);
+            img.data[i*4] = crossing ? 37 : 250; img.data[i*4+1] = crossing ? 99 : 204; img.data[i*4+2] = crossing ? 235 : 21; img.data[i*4+3] = 150;
+        }
+        g.putImageData(img, 0, 0);
+        if (viewshedOverlay) { map.removeLayer(viewshedOverlay); layerControl.removeLayer(viewshedOverlay); }
+        viewshedOverlay = L.imageOverlay(canvas.toDataURL(), [[demBounds.s, demBounds.w], [demBounds.n, demBounds.e]], { opacity: 0.6, interactive: false }).addTo(map);
+        layerControl.addOverlay(viewshedOverlay, 'Viewshed');
+        map.closePopup();
+        document.getElementById('status').innerText = `Viewshed shown (yellow = visible, blue = visible stream/crossing): ${res.visibleHa.toFixed(1)} ha visible, ${res.floorHa.toFixed(1)} ha valley floor. Toggle it off in the layers menu under "Viewshed".`;
+    }
+
+    // ---- PHASE 4: DEEP CEREMONIAL KARST ----
+    async function computeCeremonialRasters(denoised, candidateThreshold) {
+        const status = document.getElementById('status');
+        const nd = -100, W = demWidth, H = demHeight, n = W * H;
+        const tick = async (msg) => { status.innerText = msg; await new Promise(r => setTimeout(r, 0)); };
+
+        await tick('Step 1/3: Depression analysis (Fill Sink / closed depressions)...');
+        // Same denoise radius as computeMetricRasterForMode, so the cached
+        // flow data's filled surface IS this mode's Fill Sink result - no
+        // need to run the Priority-Flood fill twice.
+        const flow = await getFlowData();
+        const filled = flow.filled;
+        const metricRaster = new Float32Array(n);
+        const candidateMask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+            if (denoised[i] < nd) continue;
+            const depth = filled[i] - denoised[i];
+            metricRaster[i] = depth;
+            if (depth > candidateThreshold) candidateMask[i] = 1;
+        }
+
+        await tick('Step 2/3: Subterranean hydrology (sinking streams)...');
+        // A sinking stream is a surface channel that abruptly ENDS inside
+        // the DTM instead of flowing on to the edge. On the depression-filled
+        // surface D8 flow stops at the flat water-level surface of a closed
+        // basin, so every channel cell (accumulation above the threshold)
+        // that drains onto a basin's filled surface is a stream swallowed by
+        // that basin. A channel usually ends on the basin's shallow outer
+        // margin rather than its deep core, so inflow is credited to the
+        // WHOLE filled basin (labelled as one connected region), then read
+        // back per candidate sink (k.extraMax[0], in acres).
+        const sinkCells = acresToCells(readNum('sinkStreamAcres'));
+        // Basin cells: anything the fill raised, plus interior cells where
+        // D8 flow simply stops (the fill's water-level surface right at the
+        // basin margin can be raised by well under a millimeter, yet it is
+        // still where the stream disappears).
+        const inBasin = (i) => {
+            if (denoised[i] < nd) return false;
+            if (filled[i] - denoised[i] > 1e-3) return true;
+            const r = (i / W) | 0, c = i % W;
+            return flow.dir[i] < 0 && r > 0 && c > 0 && r < H - 1 && c < W - 1;
+        };
+        const basinLabel = new Int32Array(n).fill(-1);
+        const stack = new Int32Array(n);
+        let nBasins = 0;
+        for (let i0 = 0; i0 < n; i0++) {
+            if (basinLabel[i0] >= 0 || !inBasin(i0)) continue;
+            let sp = 0; stack[sp++] = i0; basinLabel[i0] = nBasins;
+            while (sp > 0) {
+                const i = stack[--sp], r = (i / W) | 0, c = i % W;
+                for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+                    const nr = r + dr, nc = c + dc;
+                    if ((dr === 0 && dc === 0) || nr < 0 || nr >= H || nc < 0 || nc >= W) continue;
+                    const ni = nr*W + nc;
+                    if (basinLabel[ni] < 0 && inBasin(ni)) { basinLabel[ni] = nBasins; stack[sp++] = ni; }
+                }
+            }
+            nBasins++;
+        }
+        const basinInflow = new Float32Array(nBasins);
+        const dr8 = [-1,-1,-1,0,0,1,1,1], dc8 = [-1,0,1,-1,1,-1,0,1];
+        const sinkingStreamEnds = [];
+        for (let j = 0; j < n; j++) {
+            const k = flow.dir[j];
+            if (k < 0 || basinLabel[j] >= 0 || flow.accum[j] < sinkCells) continue;
+            const r = (j / W) | 0, c = j % W;
+            const t = (r + dr8[k]) * W + (c + dc8[k]);
+            if (basinLabel[t] < 0) continue;
+            const ac = flow.accum[j] * effRes * effRes / 4046.86;
+            if (ac > basinInflow[basinLabel[t]]) basinInflow[basinLabel[t]] = ac;
+            sinkingStreamEnds.push(j);
+        }
+        const inflowAcres = new Float32Array(n);
+        for (let i = 0; i < n; i++) if (candidateMask[i] && basinLabel[i] >= 0) inflowAcres[i] = basinInflow[basinLabel[i]];
+        const sinkingMask = new Uint8Array(n);
+        for (const j of sinkingStreamEnds) sinkingMask[j] = 1;
+
+        await tick('Step 3/3: Speleological overlay...');
+        const matchDistM = readNum('caveMatchDistM'), darkZoneLenM = readNum('darkZoneLenM');
+        const requireSinking = document.getElementById('requireSinkingStream').checked;
+        const modeCtx = {
+            extraMaxRasters: [inflowAcres],
+            skipWaterwayExclusion: true, // a sink fed by a stream is exactly what this mode is looking for
+            overlay3D: { candidateMask, highlightMask: sinkingMask },
+            summary: () => `${sinkingStreamEnds.length.toLocaleString()} sinking-stream terminus cells; ${caveSurveyFeatures.length ? caveSurveyFeatures.length + ' cave survey feature(s) cross-referenced' : 'no cave survey loaded, so Step 3 was skipped'}.`,
+            keep(k) { return !requireSinking || (k.extraMax && k.extraMax[0] > 0); },
+            describe(k, lat, lon) {
+                const inflow = k.extraMax ? Math.max(0, k.extraMax[0]) : 0;
+                let html = `<b>Sinking Stream Inflow:</b> ${inflow > 0 ? inflow.toFixed(1) + ' acres of drainage swallowed here' : 'none detected'}<br>`;
+                let boost = 0;
+                const diameter = 2 * Math.sqrt(k.area / Math.PI);
+                if (diameter >= 30 && k.maxMetric >= 3) {
+                    html += warnBox('&#9888; Large, deep closed depression. Consistent with a collapsed karst window, a hidden vertical entrance into a cavern network.');
+                    boost += 0.1;
+                }
+                if (inflow > 0) {
+                    html += warnBox('&#9888; A surface channel ends in this sink (sinking stream / swallet). These drains usually lead straight into cave entrances.');
+                    boost += 0.15;
+                }
+                const cave = nearestCaveFeature(lat, lon);
+                if (caveSurveyFeatures.length === 0) {
+                    html += `<span style="font-size:0.72rem;color:#64748b">Depth underground unverified. Load a cave survey dataset (Step 3) to cross-reference.</span><br>`;
+                } else if (cave && cave.distM <= matchDistM) {
+                    const len = cave.feature.lengthM;
+                    const dark = len != null && len >= darkZoneLenM;
+                    html += `<b>Cave Survey Match:</b> ${escapeHtml(cave.feature.name || 'unnamed cave')} &mdash; ${cave.distM < 1 ? 'directly over its mapped footprint' : Math.round(cave.distM) + ' m away'}${len != null ? `, surveyed length ${Math.round(len)} m` : ''}${cave.feature.depthM != null ? `, depth ${Math.round(cave.feature.depthM)} m` : ''}<br>`;
+                    if (dark) { html += goodBox(`&#10003; Opens into a mapped system at least ${darkZoneLenM} m long, which can hold an extensive Dark Zone.`); boost += 0.3; }
+                    else { html += warnBox(len == null ? 'Known cave nearby, but the dataset gives no survey length, so Dark Zone extent is unverified.' : `Known cave nearby, but its surveyed length is under the ${darkZoneLenM} m Dark Zone threshold.`); boost += 0.1; }
+                } else {
+                    html += `<span style="font-size:0.72rem;color:#64748b">No surveyed cave within ${matchDistM} m${cave ? ` (nearest: ${Math.round(cave.distM)} m)` : ''}.</span><br>`;
+                }
+                html += `<div style="margin-top:6px;font-size:0.72rem;color:#7c2d12;">Deep caves can hold burials, mud glyphs and ceremonial caches that are protected under ARPA / NAGPRA and state cave laws. Record the site, don't disturb it, and keep the coordinates confidential.</div>`;
+                return { html, boost };
+            }
+        };
+        return { metricRaster, candidateMask, modeCtx };
+    }
+
+    // ---- SPELEOLOGICAL DATASET (Phase 4, Step 3) ----
+    // Kept in memory only - deliberately NOT written to localStorage or
+    // anywhere else, since state cave survey data is typically distributed
+    // under confidentiality agreements. Reload the page and it's gone.
+    let caveSurveyFeatures = []; // [{ name, lengthM, depthM, points:[[lat,lon]...], kind: 'point'|'line'|'polygon', rings? }]
+    const caveSurveyLayer = L.layerGroup();
+    layerControl.addOverlay(caveSurveyLayer, 'Speleological Survey Overlay');
+    function escapeHtml(s) { return String(s).replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch])); }
+    function pickProp(props, names) {
+        if (!props) return null;
+        for (const key of Object.keys(props)) {
+            if (names.includes(key.toLowerCase()) && props[key] !== null && props[key] !== '') return props[key];
+        }
+        return null;
+    }
+    function parseCaveProps(props) {
+        const name = pickProp(props, ['name', 'cave_name', 'cavename', 'title']);
+        let lengthM = parseFloat(pickProp(props, ['length_m', 'length', 'survey_length', 'surveyed_length', 'len_m']));
+        const lengthFt = parseFloat(pickProp(props, ['length_ft', 'len_ft']));
+        if (isNaN(lengthM) && !isNaN(lengthFt)) lengthM = lengthFt * FT_TO_M;
+        let depthM = parseFloat(pickProp(props, ['depth_m', 'depth', 'vertical_extent']));
+        const depthFt = parseFloat(pickProp(props, ['depth_ft']));
+        if (isNaN(depthM) && !isNaN(depthFt)) depthM = depthFt * FT_TO_M;
+        return { name: name != null ? String(name) : null, lengthM: isNaN(lengthM) ? null : lengthM, depthM: isNaN(depthM) ? null : depthM };
+    }
+    function polylineLengthM(pts) {
+        let L2 = 0;
+        for (let i = 1; i < pts.length; i++) L2 += approxMetersBetween(pts[i-1][0], pts[i-1][1], pts[i][0], pts[i][1]);
+        return L2;
+    }
+    function importCaveSurvey(fileInput) {
+        const file = fileInput.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                const feats = /\.csv$/i.test(file.name) ? parseCaveCSV(reader.result) : parseCaveGeoJSON(JSON.parse(reader.result));
+                if (feats.length === 0) throw new Error('no usable features');
+                caveSurveyFeatures = feats;
+                drawCaveSurvey();
+                document.getElementById('status').innerText = `Loaded ${feats.length} cave survey feature(s). They are kept in memory only and never saved or uploaded.`;
+            } catch (e) {
+                document.getElementById('status').innerText = `Could not read cave survey (${e.message}). Expected GeoJSON in WGS84 lon/lat, or CSV with lat,lon columns.`;
+            }
+        };
+        reader.readAsText(file);
+        fileInput.value = '';
+    }
+    function parseCaveGeoJSON(gj) {
+        const out = [];
+        const feats = gj.type === 'FeatureCollection' ? gj.features : gj.type === 'Feature' ? [gj] : [{ type: 'Feature', geometry: gj, properties: {} }];
+        const addGeom = (geom, props) => {
+            if (!geom) return;
+            const meta = parseCaveProps(props);
+            const ll = (p) => [p[1], p[0]]; // GeoJSON is [lon, lat]
+            if (geom.type === 'Point') out.push({ ...meta, kind: 'point', points: [ll(geom.coordinates)] });
+            else if (geom.type === 'MultiPoint') geom.coordinates.forEach(p => out.push({ ...meta, kind: 'point', points: [ll(p)] }));
+            else if (geom.type === 'LineString' || geom.type === 'MultiLineString') {
+                const lines = geom.type === 'LineString' ? [geom.coordinates] : geom.coordinates;
+                const pts = lines.map(l => l.map(ll));
+                const len = pts.reduce((s, l) => s + polylineLengthM(l), 0);
+                out.push({ ...meta, lengthM: meta.lengthM != null ? meta.lengthM : len, kind: 'line', lines: pts, points: pts.flat() });
+            } else if (geom.type === 'Polygon' || geom.type === 'MultiPolygon') {
+                const polys = geom.type === 'Polygon' ? [geom.coordinates] : geom.coordinates;
+                const rings = polys.map(p => p[0].map(ll));
+                out.push({ ...meta, kind: 'polygon', rings, points: rings.flat() });
+            } else if (geom.type === 'GeometryCollection') geom.geometries.forEach(g => addGeom(g, props));
+        };
+        for (const f of feats) addGeom(f.geometry, f.properties || {});
+        return out.filter(f => f.points.length && f.points.every(p => isFinite(p[0]) && isFinite(p[1])));
+    }
+    function parseCaveCSV(text) {
+        const lines = text.split(/\r?\n/).filter(l => l.trim());
+        if (lines.length < 2) return [];
+        const split = (l) => l.split(',').map(x => x.trim().replace(/^"|"$/g, ''));
+        const header = split(lines[0]).map(h => h.toLowerCase());
+        const latI = header.findIndex(h => ['lat', 'latitude', 'y'].includes(h));
+        const lonI = header.findIndex(h => ['lon', 'lng', 'long', 'longitude', 'x'].includes(h));
+        if (latI < 0 || lonI < 0) throw new Error('CSV needs lat and lon columns');
+        return lines.slice(1).map(l => {
+            const v = split(l);
+            const props = {};
+            header.forEach((h, i) => props[h] = v[i]);
+            return { ...parseCaveProps(props), kind: 'point', points: [[parseFloat(v[latI]), parseFloat(v[lonI])]] };
+        }).filter(f => isFinite(f.points[0][0]) && isFinite(f.points[0][1]));
+    }
+    function drawCaveSurvey() {
+        caveSurveyLayer.clearLayers();
+        const style = { color: '#7c3aed', weight: 2, fillOpacity: 0.2, interactive: true };
+        for (const f of caveSurveyFeatures) {
+            const label = `<b>${escapeHtml(f.name || 'Unnamed cave')}</b><br>${f.lengthM != null ? 'Length: ' + Math.round(f.lengthM) + ' m<br>' : ''}${f.depthM != null ? 'Depth: ' + Math.round(f.depthM) + ' m' : ''}<br><i style="color:#64748b">Cave survey overlay (in memory only)</i>`;
+            if (f.kind === 'point') L.circleMarker(f.points[0], { ...style, radius: 6 }).bindPopup(label).addTo(caveSurveyLayer);
+            else if (f.kind === 'line') f.lines.forEach(l => L.polyline(l, style).bindPopup(label).addTo(caveSurveyLayer));
+            else f.rings.forEach(r => L.polygon(r, style).bindPopup(label).addTo(caveSurveyLayer));
+        }
+        if (!map.hasLayer(caveSurveyLayer)) caveSurveyLayer.addTo(map);
+        const withLen = caveSurveyFeatures.filter(f => f.lengthM != null).length;
+        document.getElementById('caveSurveySummary').innerText = `${caveSurveyFeatures.length} cave feature(s) loaded (${withLen} with survey length). Kept in memory only.`;
+    }
+    function clearCaveSurvey() {
+        caveSurveyFeatures = [];
+        caveSurveyLayer.clearLayers();
+        document.getElementById('caveSurveySummary').innerText = 'No cave survey loaded.';
+    }
+    // Distance (m) from a candidate to the closest cave survey feature: 0 when
+    // inside a mapped footprint polygon, otherwise the distance to the nearest
+    // point / survey-line segment / polygon edge, in a local equirectangular
+    // projection centered on the candidate (accurate to well under 1% over
+    // the few-km distances that matter here).
+    function nearestCaveFeature(lat, lon) {
+        if (caveSurveyFeatures.length === 0) return null;
+        const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 111320;
+        const toXY = (p) => [(p[1] - lon) * kx, (p[0] - lat) * ky];
+        const segDist = (a, b) => {
+            const [ax, ay] = toXY(a), [bx, by] = toXY(b);
+            const dx = bx - ax, dy = by - ay, L2 = dx*dx + dy*dy;
+            const t = L2 > 0 ? Math.max(0, Math.min(1, -(ax*dx + ay*dy) / L2)) : 0;
+            return Math.hypot(ax + t*dx, ay + t*dy);
+        };
+        const inside = (ring) => {
+            let hit = false;
+            for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+                const [xi, yi] = toXY(ring[i]), [xj, yj] = toXY(ring[j]);
+                if ((yi > 0) !== (yj > 0) && 0 < (xj - xi) * (0 - yi) / (yj - yi) + xi) hit = !hit;
+            }
+            return hit;
+        };
+        let best = null;
+        for (const f of caveSurveyFeatures) {
+            let d = Infinity;
+            if (f.kind === 'point') d = Math.hypot(...toXY(f.points[0]));
+            else if (f.kind === 'line') { for (const l of f.lines) for (let i = 1; i < l.length; i++) d = Math.min(d, segDist(l[i-1], l[i])); if (f.lines.every(l => l.length === 1)) d = Math.hypot(...toXY(f.points[0])); }
+            else for (const r of f.rings) { if (inside(r)) { d = 0; break; } for (let i = 1; i < r.length; i++) d = Math.min(d, segDist(r[i-1], r[i])); }
+            if (!best || d < best.distM) best = { feature: f, distM: d };
+        }
+        return best;
+    }
+
     async function computeMetricRasterForMode(mode, overrideTrendRadiusM) {
         const status = document.getElementById("status");
         const nodataThresh = -100;
@@ -2245,9 +3283,15 @@
         // behavior.
         const candidateThreshold = Math.max(0.02, 5 * estimateNoiseFloor(currentDEM, denoised, nodataThresh));
 
-        let metricRaster, candidateMask;
+        let metricRaster, candidateMask, modeCtx = null;
 
-        if (mode === 'caves') {
+        if (mode === 'basecamp') {
+            ({ metricRaster, candidateMask, modeCtx } = await computeBasecampRasters(denoised, candidateThreshold));
+        } else if (mode === 'huntcamp') {
+            ({ metricRaster, candidateMask, modeCtx } = await computeHuntcampRasters(denoised, candidateThreshold));
+        } else if (mode === 'ceremonial') {
+            ({ metricRaster, candidateMask, modeCtx } = await computeCeremonialRasters(denoised, candidateThreshold));
+        } else if (mode === 'caves') {
             status.innerText = "Filling depressions (Priority-Flood)...";
             await new Promise(r => setTimeout(r, 0));
             metricRaster = new Float32Array(demWidth * demHeight);
@@ -2278,7 +3322,7 @@
             const trendRadiusM = overrideTrendRadiusM != null ? overrideTrendRadiusM : feetToMeters(parseFloat(document.getElementById('trendRadius').value));
             ({ metricRaster, candidateMask } = computeMoundsMetricFromDenoised(denoised, trendRadiusM, candidateThreshold));
         }
-        return { denoised, metricRaster, candidateMask };
+        return { denoised, metricRaster, candidateMask, modeCtx };
     }
 
     // Cached per-DEM (recomputed only when a new one downloads) since flow
@@ -2566,8 +3610,6 @@
         // the ground truth a settlement confirmation needs to be useful.
         lastSettlementRasters = { waterwayDist, hand, slopeDegRaster, demWidth, demHeight };
 
-        lastSettlementRasters = { waterwayDist, hand, slopeDegRaster, demWidth, demHeight };
-
         if (settlementGL.gl) {
             settlementGL.gl.bindTexture(settlementGL.gl.TEXTURE_2D, settlementGL.texture);
             settlementGL.gl.getExtension('OES_texture_float');
@@ -2624,14 +3666,29 @@
             L.polygon(ring, { color: '#dc2626', weight: 2, fillColor: '#dc2626', fillOpacity: 0.15, interactive: false }).addTo(polygonsLayer);
             detectedFeatures.push({ mode: 'settlement', k, lat, lon, diameter, matchScore });
         }
-        document.getElementById('exportShpBtn').style.display = hotspots.length > 0 ? 'block' : 'none';
+        lastExportRaster = { data: rank, name: 'settlement_likelihood_rank', mode: 'settlement' };
+        last3DOverlay = null;
+        updateExportButtons();
 
         status.innerText = `Settlement likelihood computed - ${hotspots.length} candidate area(s) marked${hasKnownSiteData ? '' : ' (no confirmed mounds or settlement sites yet, so that factor was skipped and the other three reweighted)'}.`;
         scanBtn.disabled = false;
     }
 
+    // Phase 1 of the workflow: 1 m is the absolute minimum resolution for
+    // human-scale anomalies. Blocks a scan on a coarser DTM (unless the user
+    // turns the requirement off) instead of silently producing results that
+    // can't resolve middens or small vestibules.
+    function checkDTMResolution() {
+        if (effRes <= 1.0 + 1e-6 || !document.getElementById('enforce1m').checked) return true;
+        document.getElementById('status').innerText =
+            `This DTM is ~${effRes.toFixed(2)} m/px, coarser than the 1 m minimum the workflow requires for human-scale features. ` +
+            `Zoom in (or raise Download Detail) and download again, or untick "Require ≤1 m/px DTM" to scan anyway.`;
+        return false;
+    }
+
     async function runScanner() {
         if (!currentDEM) return;
+        if (!checkDTMResolution()) return;
         const mode0 = document.getElementById('scanMode').value;
         if (mode0 === 'settlement') { await runSettlementScan(); return; }
 
@@ -2664,7 +3721,7 @@
             waterwayDist = distanceToMask(waterwayMask, demWidth, demHeight);
         }
 
-        let comps, denoised, baseScaleMetricRaster, moundTPI = null;
+        let comps, denoised, baseScaleMetricRaster, moundTPI = null, modeCtx = null, lastMask = null;
         if (mode === 'mounds') {
             // "All Shapes" runs the Conical and Platform presets as two
             // complete, independent scans and merges the results - each
@@ -2831,9 +3888,11 @@
             const result = await computeMetricRasterForMode(mode);
             denoised = result.denoised;
             baseScaleMetricRaster = result.metricRaster;
+            modeCtx = result.modeCtx;
+            lastMask = result.candidateMask;
             status.innerText = "Tracing candidate regions...";
             await new Promise(r => setTimeout(r, 0));
-            comps = traceComponents(result.candidateMask, result.metricRaster, denoised, demWidth, demHeight, effRes, nodataThresh, waterwayMask);
+            comps = traceComponents(result.candidateMask, result.metricRaster, denoised, demWidth, demHeight, effRes, nodataThresh, waterwayMask, null, modeCtx ? modeCtx.extraMaxRasters : null);
         }
 
         const featureName = modeFeatureName(mode);
@@ -2855,14 +3914,15 @@
             // if it's obviously a deep pit (e.g. a swallet/resurgence, genuinely
             // common right at a stream) or a big opening, since real karst and
             // archaeological sites do cluster near water for practical reasons.
-            if (excludeWaterways && k.waterwayFraction > 0.4) {
+            if (excludeWaterways && k.waterwayFraction > 0.4 && !(modeCtx && modeCtx.skipWaterwayExclusion)) {
                 const obviouslyDeepOrBig = (k.maxMetric >= minMetric * 2.5) || (diameter >= maxDiameter * 0.5);
                 if (!obviouslyDeepOrBig) return false;
             }
+            if (modeCtx && modeCtx.keep && !modeCtx.keep(k)) return false;
             return true;
         });
 
-        const customIcon = L.Icon.Default.extend({ options: { className: mode === "caves" ? 'cave-marker' : mode === "mounds" ? 'mound-marker' : mode === "shelter" ? 'shelter-marker' : '' } });
+        const customIcon = L.Icon.Default.extend({ options: { className: (mode === "caves" || mode === "ceremonial") ? 'cave-marker' : mode === "mounds" ? 'mound-marker' : (mode === "shelter" || mode === "basecamp") ? 'shelter-marker' : mode === "huntcamp" ? 'hunt-marker' : '' } });
         const iconInst = new customIcon();
 
         let suppressedCount = 0;
@@ -2892,7 +3952,15 @@
             const scoreMinDiameter = mode === 'mounds' ? k._presetMinDiameterM : minDiameter;
             const scoreMaxDiameter = mode === 'mounds' ? k._presetMaxDiameterM : maxDiameter;
             const scoreMinMetric = mode === 'mounds' ? k._presetMinHeightM : minMetric;
-            const matchScore = scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue);
+            let matchScore = scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue);
+            // Karst workflow modes: evidence from later pipeline steps
+            // (midden mounding, viewshed, sinking stream, cave survey match)
+            // only ever RAISES the score, same boost-only blend as above.
+            const extra = modeCtx && modeCtx.describe ? modeCtx.describe(k, lat, lon) : null;
+            if (extra && extra.boost > 0) {
+                const b = Math.min(1, extra.boost);
+                matchScore = Math.round(matchScore + (100 - matchScore) * b);
+            }
 
             const already = trainingData[mode].examples.find(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
             const confirmHtml = already
@@ -2904,7 +3972,7 @@
             // shelters (matching how this was asked for), and only once the
             // site is already confirmed real - a separate, deliberate action
             // from routine confirmation, not bundled into the same checkbox.
-            const significanceHtml = (mode === 'caves' || mode === 'shelter')
+            const significanceHtml = (mode === 'caves' || mode === 'shelter' || mode === 'ceremonial')
                 ? (already && already.significance
                     ? `<div style="margin-top:6px;font-size:0.75rem;color:#7c2d12;background:#fef3c7;padding:4px 6px;border-radius:4px;">&#9888; Marked: ${already.significance.type} significance${already.significance.notes ? ' &mdash; ' + already.significance.notes : ''}</div>`
                     : already
@@ -2912,7 +3980,7 @@
                         : '')
                 : '';
 
-            const protectionNote = (mode === 'mounds' || mode === 'shelter') ? '; these sites may be legally protected, and shelters in particular often hold stratified, easily-disturbed deposits' : '';
+            const protectionNote = (mode === 'mounds' || mode === 'shelter' || mode === 'basecamp' || mode === 'huntcamp') ? '; these sites may be legally protected, and shelters in particular often hold stratified, easily-disturbed deposits' : '';
             const flankSlopeLine = mode === 'mounds' ? `<b>Max Flank Slope:</b> ${k.maxFlankSlope.toFixed(1)}&deg;<br>` : '';
             const shapePresetLine = mode === 'mounds' ? `<b>Matched Shape:</b> ${k._presetName}<br>` : '';
             let shapeWarning = '';
@@ -2944,7 +4012,7 @@
                                 <b>Circularity:</b> ${k.circularity.toFixed(2)}<br>
                                 <b>Elongation:</b> ${k.elongation.toFixed(2)}&times;<br>
                                 <b>Fill Ratio:</b> ${k.fillRatio.toFixed(2)}<br>
-                                ${flankSlopeLine}${shapePresetLine}<b>Match Score:</b> ${matchScore}%<br>
+                                ${flankSlopeLine}${shapePresetLine}${extra ? extra.html : ''}<b>Match Score:</b> ${matchScore}%<br>
                                 <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}
                                 ${shapeWarning}${confirmHtml}${significanceHtml}`;
 
@@ -2961,10 +4029,13 @@
         }
 
         lastMetricRaster = baseScaleMetricRaster; lastScanMode = mode; lastDemWidth = demWidth; lastDemHeight = demHeight;
+        lastExportRaster = baseScaleMetricRaster ? { data: baseScaleMetricRaster, name: `${mode}_${modeMetricLabel(mode).toLowerCase().replace(/[^a-z]+/g, '_')}_m`, mode } : null;
+        last3DOverlay = modeCtx && modeCtx.overlay3D ? modeCtx.overlay3D : (lastMask ? { candidateMask: lastMask } : null);
         const shownCount = filtered.length - suppressedCount;
         status.innerText = `Scan complete. Found ${shownCount} candidate feature(s).` +
-            (suppressedCount > 0 ? ` (${suppressedCount} more matched a location you'd already marked not real, and were skipped.)` : '');
-        document.getElementById('exportShpBtn').style.display = shownCount > 0 ? 'block' : 'none';
+            (suppressedCount > 0 ? ` (${suppressedCount} more matched a location you'd already marked not real, and were skipped.)` : '') +
+            (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '');
+        updateExportButtons();
         scanBtn.disabled = false;
     }
 
@@ -3177,7 +4248,7 @@
         const features = detectedFeatures.map(f => ({
             ring: ellipseRingLatLon(f.k, 32),
             attrs: {
-                type: f.mode === 'caves' ? 'Cave' : f.mode === 'mounds' ? 'Mound' : f.mode === 'shelter' ? 'Shelter' : 'Settlement',
+                type: featureTypeCode(f.mode),
                 diameter_ft: metersToFeet(f.diameter),
                 depth_ft: metersToFeet(f.k.maxMetric),
                 circularity: f.k.circularity,
@@ -3199,6 +4270,348 @@
         a.href = url; a.download = 'detected_features_shapefile.zip';
         a.click();
         URL.revokeObjectURL(url);
+    }
+
+    // --- 5b. OPTIMIZED OUTPUTS: GeoJSON + GeoTIFF (Phase 5) ---
+    // The workflow's automated pipeline hands off "optimized GeoTIFFs or JSON
+    // geometry"; these two exports do exactly that from the browser, so a
+    // scan's results drop straight into QGIS/ArcGIS or a Python pipeline.
+    let lastExportRaster = null; // { data: Float32Array, name, mode } - the last scan's analysis raster
+    let last3DOverlay = null;    // { candidateMask, highlightMask? } - tinted onto the 3D terrain
+    function featureTypeCode(mode) {
+        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial' }[mode] || 'Feature';
+    }
+    function updateExportButtons() {
+        const hasFeatures = detectedFeatures.length > 0;
+        document.getElementById('exportShpBtn').style.display = hasFeatures ? 'block' : 'none';
+        document.getElementById('exportGeoJsonBtn').style.display = hasFeatures ? 'block' : 'none';
+        document.getElementById('exportTiffBtn').style.display = lastExportRaster ? 'block' : 'none';
+    }
+    function downloadBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = filename;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+    function exportGeoJSON() {
+        if (detectedFeatures.length === 0) return;
+        const fc = {
+            type: 'FeatureCollection',
+            features: detectedFeatures.map((f, idx) => ({
+                type: 'Feature',
+                geometry: { type: 'Polygon', coordinates: [ellipseRingLatLon(f.k, 32)] },
+                properties: {
+                    id: idx + 1,
+                    type: featureTypeCode(f.mode),
+                    diameter_m: +f.diameter.toFixed(2),
+                    metric: modeMetricLabel(f.mode),
+                    metric_m: +f.k.maxMetric.toFixed(3),
+                    circularity: +f.k.circularity.toFixed(3),
+                    elongation: +f.k.elongation.toFixed(3),
+                    match_pct: f.matchScore,
+                    lat: +f.lat.toFixed(6), lon: +f.lon.toFixed(6),
+                    dtm_res_m: +effRes.toFixed(3)
+                }
+            }))
+        };
+        downloadBlob(new Blob([JSON.stringify(fc)], { type: 'application/geo+json' }), 'detected_features.geojson');
+    }
+
+    // Minimal, dependency-free GeoTIFF writer: one uncompressed Float32 strip
+    // in WGS84 (EPSG:4326), georeferenced with ModelPixelScale +
+    // ModelTiepoint + a GeoKeyDirectory, and GDAL_NODATA = -9999, which is
+    // everything GDAL/QGIS/rasterio need to place it exactly where the DTM
+    // was downloaded from.
+    function buildGeoTIFF(data, width, height, bounds) {
+        const geoKeys = [1, 1, 0, 3, 1024, 0, 1, 2, 1025, 0, 1, 1, 2048, 0, 1, 4326];
+        const nodataStr = '-9999\0';
+        const tags = []; // [tag, type, count, valueOrBytes]
+        const SHORT = 3, LONG = 4, DOUBLE = 12, ASCII = 2;
+        const numTags = 15;
+        const ifdSize = 2 + numTags * 12 + 4;
+        let extraOff = 8 + ifdSize;
+        const extras = [];
+        const addExtra = (bytes) => { const off = extraOff; extras.push(bytes); extraOff += bytes.byteLength + (bytes.byteLength % 2); return off; };
+        const f64 = (arr) => { const b = new ArrayBuffer(arr.length * 8); const dv = new DataView(b); arr.forEach((v, i) => dv.setFloat64(i * 8, v, true)); return new Uint8Array(b); };
+        const u16 = (arr) => { const b = new ArrayBuffer(arr.length * 2); const dv = new DataView(b); arr.forEach((v, i) => dv.setUint16(i * 2, v, true)); return new Uint8Array(b); };
+        const scaleOff = addExtra(f64([(bounds.e - bounds.w) / width, (bounds.n - bounds.s) / height, 0]));
+        const tieOff = addExtra(f64([0, 0, 0, bounds.w, bounds.n, 0]));
+        const keysOff = addExtra(u16(geoKeys));
+        const nodataOff = addExtra(new TextEncoder().encode(nodataStr));
+        const imageOff = extraOff;
+        const imageBytes = width * height * 4;
+        tags.push([256, LONG, 1, width], [257, LONG, 1, height], [258, SHORT, 1, 32], [259, SHORT, 1, 1],
+                  [262, SHORT, 1, 1], [273, LONG, 1, imageOff], [277, SHORT, 1, 1], [278, LONG, 1, height],
+                  [279, LONG, 1, imageBytes], [284, SHORT, 1, 1], [339, SHORT, 1, 3],
+                  [33550, DOUBLE, 3, scaleOff], [33922, DOUBLE, 6, tieOff], [34735, SHORT, geoKeys.length, keysOff],
+                  [42113, ASCII, nodataStr.length, nodataOff]);
+        const buf = new ArrayBuffer(imageOff + imageBytes);
+        const dv = new DataView(buf);
+        dv.setUint16(0, 0x4949, false); dv.setUint16(2, 42, true); dv.setUint32(4, 8, true);
+        dv.setUint16(8, numTags, true);
+        tags.forEach(([tag, type, count, val], idx) => {
+            const o = 10 + idx * 12;
+            dv.setUint16(o, tag, true); dv.setUint16(o + 2, type, true); dv.setUint32(o + 4, count, true);
+            if (type === SHORT && count === 1) dv.setUint16(o + 8, val, true);
+            else dv.setUint32(o + 8, val, true); // LONG value, or offset to out-of-line data
+        });
+        dv.setUint32(10 + numTags * 12, 0, true); // no next IFD
+        let off = 8 + ifdSize;
+        const u8 = new Uint8Array(buf);
+        for (const e of extras) { u8.set(e, off); off += e.byteLength + (e.byteLength % 2); }
+        for (let i = 0; i < width * height; i++) dv.setFloat32(imageOff + i * 4, data[i], true);
+        return u8;
+    }
+    function exportMetricGeoTIFF() {
+        if (!lastExportRaster || !currentDEM) return;
+        const src = lastExportRaster.data;
+        const out = new Float32Array(demWidth * demHeight);
+        for (let i = 0; i < out.length; i++) out[i] = (currentDEM[i] < -100 || !(src[i] > -9000)) ? -9999 : src[i];
+        downloadBlob(new Blob([buildGeoTIFF(out, demWidth, demHeight, demBounds)], { type: 'image/tiff' }), `${lastExportRaster.name}.tif`);
+    }
+
+    // --- 5c. 3D WEBGL FLY-THROUGH (Phase 5) ---
+    // Renders the downloaded bare-earth DTM as a lit 3D mesh you can fly
+    // through, with the last scan's candidate cells tinted red and its
+    // pipeline context tinted amber (south-facing bluff faces for Base
+    // Camps, choke points for Hunt Camps, sinking-stream ends for Ceremonial
+    // Karst). The point is to see where south-facing overhangs and flat dirt
+    // benches actually meet before planning a trip.
+    let view3D = null;
+    function mat4Perspective(fovy, aspect, near, far) {
+        const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+        return new Float32Array([f/aspect,0,0,0, 0,f,0,0, 0,0,(far+near)*nf,-1, 0,0,2*far*near*nf,0]);
+    }
+    function mat4LookAt(eye, target, up) {
+        let zx = eye[0]-target[0], zy = eye[1]-target[1], zz = eye[2]-target[2];
+        let len = Math.hypot(zx, zy, zz); zx /= len; zy /= len; zz /= len;
+        let xx = up[1]*zz - up[2]*zy, xy = up[2]*zx - up[0]*zz, xz = up[0]*zy - up[1]*zx;
+        len = Math.hypot(xx, xy, xz); xx /= len; xy /= len; xz /= len;
+        const yx = zy*xz - zz*xy, yy = zz*xx - zx*xz, yz = zx*xy - zy*xx;
+        return new Float32Array([xx,yx,zx,0, xy,yy,zy,0, xz,yz,zz,0,
+            -(xx*eye[0]+xy*eye[1]+xz*eye[2]), -(yx*eye[0]+yy*eye[1]+yz*eye[2]), -(zx*eye[0]+zy*eye[1]+zz*eye[2]), 1]);
+    }
+    function mat4Mul(a, b) {
+        const o = new Float32Array(16);
+        for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) {
+            let s2 = 0;
+            for (let k = 0; k < 4; k++) s2 += a[k*4 + r] * b[c*4 + k];
+            o[c*4 + r] = s2;
+        }
+        return o;
+    }
+
+    function open3DView() {
+        if (!currentDEM || view3D) return;
+        const overlay = document.createElement('div');
+        overlay.id = 'view3dOverlay';
+        overlay.style.cssText = 'position:fixed;inset:0;z-index:5000;background:#0b1220;touch-action:none;';
+        overlay.innerHTML = `
+            <canvas id="view3dCanvas" style="width:100%;height:100%;display:block;"></canvas>
+            <div style="position:absolute;top:10px;left:10px;right:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;color:#e2e8f0;font:12px sans-serif;pointer-events:none;">
+                <div style="background:rgba(15,23,42,0.8);padding:8px 10px;border-radius:8px;pointer-events:auto;max-width:560px;line-height:1.4;">
+                    <b>3D Fly-Through</b> (bare-earth DTM, ${effRes.toFixed(2)} m/px)<br>
+                    Drag to look &middot; W/A/S/D or arrows to fly &middot; Q/E down/up &middot; Shift = fast &middot; wheel = forward/back<br>
+                    <span style="color:#f87171">&#9632;</span> scan candidates &nbsp;<span style="color:#fbbf24">&#9632;</span> ${last3DOverlay && last3DOverlay.highlightMask ? 'pipeline context (bluff faces / choke points / sinking streams)' : 'run a karst workflow scan to add context'} &nbsp;<span style="color:#f472b6">&#9679;</span> markers
+                    <div style="margin-top:4px;">Vertical exaggeration <input id="view3dExag" type="range" min="1" max="5" step="0.25" value="1.5" style="vertical-align:middle;width:120px;"> <span id="view3dExagVal">1.5x</span></div>
+                </div>
+                <button id="view3dClose" style="margin-left:auto;width:auto;pointer-events:auto;background:#f1f5f9;">Close 3D view</button>
+            </div>
+            <div style="position:absolute;bottom:16px;right:16px;display:grid;grid-template-columns:repeat(2,56px);gap:6px;">
+                <button data-hold="fwd" style="margin:0;">Fwd</button><button data-hold="up" style="margin:0;">Up</button>
+                <button data-hold="back" style="margin:0;">Back</button><button data-hold="down" style="margin:0;">Down</button>
+            </div>`;
+        document.body.appendChild(overlay);
+        const canvas = overlay.querySelector('#view3dCanvas');
+        const gl = canvas.getContext('webgl', { antialias: true });
+        if (!gl) { overlay.remove(); document.getElementById('status').innerText = 'Could not start WebGL for the 3D view (WebGL unavailable or too many contexts). Close other graphics-heavy tabs and try again.'; return; }
+        const uintExt = gl.getExtension('OES_element_index_uint');
+
+        // ---- Mesh ----
+        const W = demWidth, H = demHeight, nd = -100;
+        const maxGrid = uintExt ? 700 : 255;
+        const step = Math.max(1, Math.ceil(Math.max(W, H) / maxGrid));
+        const gw = Math.floor((W - 1) / step) + 1, gh = Math.floor((H - 1) / step) + 1;
+        let minZ = Infinity, maxZ = -Infinity;
+        for (let i = 0; i < currentDEM.length; i++) { const z = currentDEM[i]; if (z >= nd) { if (z < minZ) minZ = z; if (z > maxZ) maxZ = z; } }
+        const cx = (W - 1) * effRes / 2, cz = (H - 1) * effRes / 2;
+        const zAt = (r, c) => { const z = currentDEM[Math.min(H-1, Math.max(0, r)) * W + Math.min(W-1, Math.max(0, c))]; return z >= nd ? z - minZ : 0; };
+        const cand = last3DOverlay && last3DOverlay.candidateMask && last3DOverlay.candidateMask.length === W * H ? last3DOverlay.candidateMask : null;
+        const hi = last3DOverlay && last3DOverlay.highlightMask && last3DOverlay.highlightMask.length === W * H ? last3DOverlay.highlightMask : null;
+        const nV = gw * gh;
+        const pos = new Float32Array(nV * 3), nrm = new Float32Array(nV * 3), col = new Float32Array(nV * 3);
+        const relief = Math.max(1, maxZ - minZ);
+        for (let gr = 0; gr < gh; gr++) for (let gc = 0; gc < gw; gc++) {
+            const v = gr * gw + gc, r = gr * step, c = gc * step;
+            const z = zAt(r, c);
+            pos[v*3] = c * effRes - cx; pos[v*3+1] = z; pos[v*3+2] = r * effRes - cz;
+            const dzdx = (zAt(r, c + step) - zAt(r, c - step)) / (2 * step * effRes);
+            const dzdz = (zAt(r + step, c) - zAt(r - step, c)) / (2 * step * effRes);
+            const nl = Math.hypot(dzdx, 1, dzdz);
+            nrm[v*3] = -dzdx / nl; nrm[v*3+1] = 1 / nl; nrm[v*3+2] = -dzdz / nl;
+            // Earth-tone ramp by elevation, overridden by overlay tints
+            // (block-max over this vertex's step x step footprint, so thin
+            // bench/bluff zones aren't lost when the mesh is decimated).
+            const t = (z) / relief;
+            let R = 0.36 + 0.3 * t, G = 0.42 + 0.12 * t, B = 0.28 + 0.1 * t;
+            if (currentDEM[r * W + c] < nd) { R = G = B = 0.1; }
+            let isCand = false, isHi = false;
+            if (cand || hi) {
+                for (let rr = r; rr < Math.min(H, r + step) && !isCand; rr++) for (let cc = c; cc < Math.min(W, c + step); cc++) {
+                    const i = rr * W + cc;
+                    if (cand && cand[i]) { isCand = true; break; }
+                    if (hi && hi[i]) isHi = true;
+                }
+            }
+            if (isCand) { R = 0.95; G = 0.25; B = 0.2; } else if (isHi) { R = 0.98; G = 0.72; B = 0.15; }
+            col[v*3] = R; col[v*3+1] = G; col[v*3+2] = B;
+        }
+        const nIdx = (gw - 1) * (gh - 1) * 6;
+        const idx = nV > 65535 ? new Uint32Array(nIdx) : new Uint16Array(nIdx);
+        let k = 0;
+        for (let gr = 0; gr < gh - 1; gr++) for (let gc = 0; gc < gw - 1; gc++) {
+            const a = gr * gw + gc, b = a + 1, c2 = a + gw, d = c2 + 1;
+            idx[k++] = a; idx[k++] = c2; idx[k++] = b; idx[k++] = b; idx[k++] = c2; idx[k++] = d;
+        }
+        // Markers for the current scan's features: a vertical stalk plus a
+        // point on top, so they're findable from a distance.
+        const extent = Math.max(W, H) * effRes;
+        const stalk = Math.max(10, relief * 0.15);
+        const mk = [];
+        for (const f of detectedFeatures) {
+            const r = Math.round(((demBounds.n - f.lat) / (demBounds.n - demBounds.s)) * H);
+            const c = Math.round(((f.lon - demBounds.w) / (demBounds.e - demBounds.w)) * W);
+            const x = c * effRes - cx, zz = r * effRes - cz, y = zAt(r, c);
+            mk.push(x, y, zz, x, y + stalk, zz);
+        }
+        const markerPos = new Float32Array(mk);
+
+        // ---- Shaders ----
+        const vs = `attribute vec3 a_pos; attribute vec3 a_nrm; attribute vec3 a_col;
+            uniform mat4 u_mvp; uniform float u_zScale; uniform vec3 u_eye; uniform float u_pointSize;
+            varying vec3 v_nrm; varying vec3 v_col; varying float v_dist;
+            void main() {
+                vec3 p = vec3(a_pos.x, a_pos.y * u_zScale, a_pos.z);
+                gl_Position = u_mvp * vec4(p, 1.0);
+                gl_PointSize = u_pointSize;
+                v_nrm = normalize(vec3(a_nrm.x, a_nrm.y / max(u_zScale, 0.01), a_nrm.z));
+                v_col = a_col; v_dist = distance(p, u_eye);
+            }`;
+        const fs = `precision mediump float;
+            varying vec3 v_nrm; varying vec3 v_col; varying float v_dist;
+            uniform vec3 u_sun; uniform float u_flat; uniform vec3 u_flatColor; uniform float u_fogFar;
+            void main() {
+                if (u_flat > 0.5) { gl_FragColor = vec4(u_flatColor, 1.0); return; }
+                float d = max(dot(normalize(v_nrm), u_sun), 0.0);
+                vec3 c = v_col * (0.28 + 0.72 * d);
+                float fog = clamp(v_dist / u_fogFar, 0.0, 1.0) * 0.55;
+                gl_FragColor = vec4(mix(c, vec3(0.043, 0.071, 0.125), fog), 1.0);
+            }`;
+        const prog = gl.createProgram();
+        gl.attachShader(prog, createShader(gl, gl.VERTEX_SHADER, vs));
+        gl.attachShader(prog, createShader(gl, gl.FRAGMENT_SHADER, fs));
+        gl.linkProgram(prog);
+        gl.useProgram(prog);
+        const loc = (n2) => gl.getAttribLocation(prog, n2), uni = (n2) => gl.getUniformLocation(prog, n2);
+        const aPos = loc('a_pos'), aNrm = loc('a_nrm'), aCol = loc('a_col');
+        const mkBuf = (data, target) => { const b = gl.createBuffer(); gl.bindBuffer(target || gl.ARRAY_BUFFER, b); gl.bufferData(target || gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); return b; };
+        const bPos = mkBuf(pos), bNrm = mkBuf(nrm), bCol = mkBuf(col), bIdx = mkBuf(idx, gl.ELEMENT_ARRAY_BUFFER), bMk = mkBuf(markerPos.length ? markerPos : new Float32Array(3));
+        const uMvp = uni('u_mvp'), uZ = uni('u_zScale'), uEye = uni('u_eye'), uSun = uni('u_sun'), uFlat = uni('u_flat'), uFlatColor = uni('u_flatColor'), uFog = uni('u_fogFar'), uPt = uni('u_pointSize');
+        gl.enable(gl.DEPTH_TEST);
+
+        // ---- Camera ----
+        const cam = { x: 0, y: relief * 1.5 + extent * 0.15, z: cz * 1.15, yaw: 0, pitch: -0.35 };
+        const held = new Set();
+        let zScale = 1.5, last = performance.now(), raf = 0, dragging = null;
+        const onKey = (e, down) => {
+            const key = e.key.toLowerCase();
+            if (key === 'escape' && down) { close(); return; }
+            if (['w','a','s','d','q','e','arrowup','arrowdown','arrowleft','arrowright','shift'].includes(key)) { down ? held.add(key) : held.delete(key); e.preventDefault(); }
+        };
+        const kd = (e) => onKey(e, true), ku = (e) => onKey(e, false);
+        window.addEventListener('keydown', kd); window.addEventListener('keyup', ku);
+        canvas.addEventListener('pointerdown', (e) => { dragging = { x: e.clientX, y: e.clientY }; canvas.setPointerCapture(e.pointerId); });
+        canvas.addEventListener('pointermove', (e) => {
+            if (!dragging) return;
+            cam.yaw += (e.clientX - dragging.x) * 0.005;
+            cam.pitch = Math.max(-1.5, Math.min(1.5, cam.pitch - (e.clientY - dragging.y) * 0.005));
+            dragging = { x: e.clientX, y: e.clientY };
+        });
+        canvas.addEventListener('pointerup', () => { dragging = null; });
+        canvas.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const d = -Math.sign(e.deltaY) * extent * 0.03;
+            cam.x += Math.cos(cam.pitch) * Math.sin(cam.yaw) * d; cam.y += Math.sin(cam.pitch) * d; cam.z -= Math.cos(cam.pitch) * Math.cos(cam.yaw) * d;
+        }, { passive: false });
+        overlay.querySelectorAll('[data-hold]').forEach(btn => {
+            const k2 = 'btn-' + btn.dataset.hold;
+            btn.addEventListener('pointerdown', (e) => { e.preventDefault(); held.add(k2); });
+            ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => btn.addEventListener(ev, () => held.delete(k2)));
+        });
+        const exagEl = overlay.querySelector('#view3dExag');
+        exagEl.addEventListener('input', () => { zScale = parseFloat(exagEl.value); overlay.querySelector('#view3dExagVal').innerText = zScale + 'x'; });
+
+        function frame(now) {
+            const dt = Math.min(0.1, (now - last) / 1000); last = now;
+            const speed = extent * 0.12 * (held.has('shift') ? 4 : 1) * dt;
+            const fx = Math.sin(cam.yaw), fz = -Math.cos(cam.yaw);
+            if (held.has('w') || held.has('arrowup') || held.has('btn-fwd')) { cam.x += fx * speed; cam.z += fz * speed; cam.y += Math.sin(cam.pitch) * speed; }
+            if (held.has('s') || held.has('arrowdown') || held.has('btn-back')) { cam.x -= fx * speed; cam.z -= fz * speed; cam.y -= Math.sin(cam.pitch) * speed; }
+            if (held.has('a')) { cam.x += fz * speed; cam.z -= fx * speed; }
+            if (held.has('d')) { cam.x -= fz * speed; cam.z += fx * speed; }
+            if (held.has('arrowleft')) cam.yaw -= 1.2 * dt;
+            if (held.has('arrowright')) cam.yaw += 1.2 * dt;
+            if (held.has('q') || held.has('btn-down')) cam.y -= speed;
+            if (held.has('e') || held.has('btn-up')) cam.y += speed;
+
+            const dpr = Math.min(2, window.devicePixelRatio || 1);
+            const cw = Math.round(canvas.clientWidth * dpr), ch = Math.round(canvas.clientHeight * dpr);
+            if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
+            gl.viewport(0, 0, cw, ch);
+            gl.clearColor(0.043, 0.071, 0.125, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+            const eye = [cam.x, cam.y, cam.z];
+            const dir = [Math.cos(cam.pitch) * Math.sin(cam.yaw), Math.sin(cam.pitch), -Math.cos(cam.pitch) * Math.cos(cam.yaw)];
+            const view = mat4LookAt(eye, [eye[0] + dir[0], eye[1] + dir[1], eye[2] + dir[2]], [0, 1, 0]);
+            const proj = mat4Perspective(Math.PI / 3, cw / Math.max(1, ch), Math.max(0.5, extent / 5000), extent * 6);
+            gl.uniformMatrix4fv(uMvp, false, mat4Mul(proj, view));
+            gl.uniform1f(uZ, zScale); gl.uniform3fv(uEye, eye); gl.uniform1f(uFog, extent * 2.5);
+            const az = parseFloat(document.getElementById('sunAz').value) * Math.PI / 180;
+            const alt = parseFloat(document.getElementById('sunAlt').value) * Math.PI / 180;
+            gl.uniform3f(uSun, Math.sin(az) * Math.cos(alt), Math.sin(alt), -Math.cos(az) * Math.cos(alt));
+
+            // Terrain
+            gl.uniform1f(uFlat, 0); gl.uniform1f(uPt, 1);
+            gl.bindBuffer(gl.ARRAY_BUFFER, bPos); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, bNrm); gl.enableVertexAttribArray(aNrm); gl.vertexAttribPointer(aNrm, 3, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, bCol); gl.enableVertexAttribArray(aCol); gl.vertexAttribPointer(aCol, 3, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bIdx);
+            gl.drawElements(gl.TRIANGLES, nIdx, idx instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT, 0);
+
+            // Feature markers
+            if (markerPos.length) {
+                gl.disableVertexAttribArray(aNrm); gl.disableVertexAttribArray(aCol);
+                gl.bindBuffer(gl.ARRAY_BUFFER, bMk); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+                gl.uniform1f(uFlat, 1); gl.uniform3f(uFlatColor, 0.96, 0.45, 0.71);
+                gl.drawArrays(gl.LINES, 0, markerPos.length / 3);
+                gl.uniform1f(uPt, 9 * dpr);
+                gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 24, 12); // just the top of each stalk
+                gl.drawArrays(gl.POINTS, 0, markerPos.length / 6);
+            }
+            raf = requestAnimationFrame(frame);
+        }
+        function close() {
+            cancelAnimationFrame(raf);
+            window.removeEventListener('keydown', kd); window.removeEventListener('keyup', ku);
+            const lose = gl.getExtension('WEBGL_lose_context');
+            if (lose) lose.loseContext(); // release the GPU context - the 2D map already runs three
+            overlay.remove();
+            view3D = null;
+        }
+        overlay.querySelector('#view3dClose').addEventListener('click', close);
+        view3D = { close };
+        raf = requestAnimationFrame(frame);
     }
 
     // --- 6. CLICK-TO-INSPECT ---
@@ -3226,10 +4639,10 @@
             if (sameGrid) {
                 const metricVal = lastMetricRaster[i];
                 const minMetric = feetToMeters(parseFloat(document.getElementById('minHeight').value));
-                const label = lastScanMode === 'caves' ? 'Fill Depth' : 'Local Relief';
+                const label = (lastScanMode === 'caves' || lastScanMode === 'ceremonial') ? 'Fill Depth' : modeMetricLabel(lastScanMode).replace(/^Max /, '');
                 const passes = metricVal >= minMetric;
                 html += `<br><b>${label}:</b> ${metersToFeetInches(metricVal)} (threshold: ${metersToFeetInches(minMetric)}) &mdash; ${passes ? 'meets threshold &#10003;' : 'below threshold'}`;
-                html += `<br><span style="font-size:0.75rem;color:#64748b">From the last ${lastScanMode === 'caves' ? 'Caves/Sinkholes' : 'Native Mounds'} scan.</span>`;
+                html += `<br><span style="font-size:0.75rem;color:#64748b">From the last ${modeFeatureName(lastScanMode)} scan.</span>`;
             } else {
                 html += `<br><span style="font-size:0.75rem;color:#64748b">Run a scan to see fill depth / relief at this point.</span>`;
             }

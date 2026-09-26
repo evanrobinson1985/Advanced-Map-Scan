@@ -1,0 +1,6 @@
+numpy>=1.24
+scipy>=1.10
+rasterio>=1.3
+scikit-image>=0.21
+# optional, speeds up flow routing on large DTMs:
+# numba>=0.58
