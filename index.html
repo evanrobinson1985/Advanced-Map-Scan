@@ -94,12 +94,33 @@
         <h4>1. Data Pipeline &mdash; Bare-Earth LiDAR DTM</h4>
         <div style="font-size:0.72rem; color:#475569; margin-bottom:6px; line-height:1.4;">Source: USGS 3DEP bare-earth Digital Terrain Model (ground-classified LiDAR returns, forest canopy stripped) &mdash; not a canopy-top surface model. <b>1-meter resolution is the absolute minimum</b> for detecting human-scale anomalies like middens or small cave vestibules.</div>
         <div class="slider-row">
-            <label>Download Detail</label>
-            <input type="range" id="resCap" min="1000" max="5000" step="250" value="3000" oninput="updateResCapPreview()">
-            <span class="val-display" id="resCapVal">3000px</span>
+            <label>Resolution</label>
+            <select id="dlRes" onchange="updateDownloadPreview()" style="width:auto; flex-grow:1; margin:0 0 0 10px; padding:6px;">
+                <option value="auto" selected>Auto: finest that fits (1 m LiDAR)</option>
+                <option value="0.5">0.5 m (only where source data is this fine)</option>
+                <option value="1">1 m (full LiDAR)</option>
+                <option value="2">2 m</option>
+                <option value="3">3 m</option>
+                <option value="5">5 m</option>
+                <option value="10">10 m</option>
+            </select>
         </div>
-        <div id="resCapPreview" style="font-size:0.72rem; color:#64748b; margin-bottom:8px; line-height:1.4;"></div>
-        <button id="downloadBtn" onclick="fetchDEM()">Download Visible Bare-Earth DTM</button>
+        <div class="slider-row">
+            <label>Memory Budget</label>
+            <select id="dlBudget" onchange="updateDownloadPreview()" style="width:auto; flex-grow:1; margin:0 0 0 10px; padding:6px;">
+                <option value="16">16 Mpx (~64 MB, phones)</option>
+                <option value="32">32 Mpx (~128 MB)</option>
+                <option value="64" selected>64 Mpx (~256 MB)</option>
+                <option value="128">128 Mpx (~512 MB)</option>
+                <option value="256">256 Mpx (~1 GB, desktop only)</option>
+            </select>
+        </div>
+        <div id="dlPreview" style="font-size:0.72rem; color:#64748b; margin-bottom:8px; line-height:1.4;"></div>
+        <button id="downloadBtn" onclick="fetchDEM()">Download Entire Map View (Bare-Earth DTM)</button>
+        <div id="dlProgressWrap" style="display:none; margin-top:6px;">
+            <div style="height:8px; background:#e2e8f0; border-radius:4px; overflow:hidden;"><div id="dlProgressBar" style="height:100%; width:0%; background:#2563eb; transition:width 0.2s;"></div></div>
+            <button id="dlCancelBtn" onclick="cancelDownload()" style="background:#fee2e2; color:#991b1b; padding:6px;">Cancel download</button>
+        </div>
         <input type="file" id="localDtmInput" accept=".tif,.tiff" style="display:none" onchange="loadLocalDTM(this)">
         <input type="file" id="pipelineGeoJsonInput" accept=".json,.geojson" style="display:none" onchange="loadPipelineGeoJSON(this)">
         <div style="display:flex; gap:6px;">
@@ -111,7 +132,7 @@
         </label>
         <div id="dtmResBadge" style="display:none; font-size:0.75rem; margin-top:6px; padding:4px 6px; border-radius:4px; text-align:center; font-weight:bold;"></div>
         <div id="status">Ready to load data.</div>
-        <div style="font-size:0.7rem; color:#94a3b8; margin-top:4px; line-height:1.4;">There's no setting that gives fine detail over an unlimited area in one download - resolution and area covered trade off directly against a fixed pixel budget (bandwidth, memory, and scan time all scale with it). A smaller visible area at the same setting always buys finer resolution; zoom in and download again for a sharper result at any point. Higher settings mean slower downloads and scans.</div>
+        <div style="font-size:0.7rem; color:#94a3b8; margin-top:4px; line-height:1.4;">Downloads everything in the map view, in tiles that are fetched in parallel and stitched into one seamless DTM. Auto uses full 1 m LiDAR whenever the whole view fits the memory budget, and otherwise the finest resolution that fits. The terrain is drawn with smooth bicubic interpolation, so zooming in past the data's resolution stays smooth instead of turning blocky. Finer pixels than the source LiDAR are interpolated and don't add real detail.</div>
     </div>
 
     <div class="control-group">
@@ -607,54 +628,124 @@
     // Last scan's raw output, kept around so clicking the map can show the
     // actual fill-depth/relief value at a point without re-scanning. Cleared
     // whenever a new DEM is downloaded, since it would no longer line up.
-    let lastMetricRaster = null, lastScanMode = null, lastDemWidth = 0, lastDemHeight = 0;
+    let lastMetricRaster = null, lastScanMode = null;
 
     // Full feature records for the current scan's markers, kept around so
     // Export Shapefile has something to draw from beyond just the popup text.
     let detectedFeatures = [];
 
-    // Being a real pane member, the canvas now pans smoothly for free along
-    // with everything else (no more hiding it mid-drag) - just redraw at the
-    // end of a move/zoom, since layer-point distances scale with zoom level.
+    // ---- Scan grids ----
+    // A whole-view download can be far larger than the browser can scan in
+    // one go: every scan allocates several full-size working rasters. Scans
+    // therefore run on a "grid", either the whole DTM or, for downloads over
+    // SCAN_MAX_PX, the part currently in view. They run with the global
+    // DTM variables temporarily pointed at that grid, and every result
+    // (markers, exports, click-to-inspect rasters, 3D overlays) remembers the
+    // grid it came from.
+    const SCAN_MAX_PX = 16e6;
+    let fullDemGrid = null, scanInProgress = false, lastMetricGrid = null;
+    function gridInfo(withData) {
+        const g = { bounds: demBounds, w: demWidth, h: demHeight, res: effRes };
+        if (withData) g.data = currentDEM;
+        return g;
+    }
+    function setGridGlobals(g) { currentDEM = g.data; demWidth = g.w; demHeight = g.h; demBounds = g.bounds; effRes = g.res; }
+    async function withGrid(g, fn) { const saved = gridInfo(true); setGridGlobals(g); try { return await fn(); } finally { setGridGlobals(saved); } }
+    function withGridSync(g, fn) { const saved = gridInfo(true); setGridGlobals(g); try { return fn(); } finally { setGridGlobals(saved); } }
+    // Cell index of a lat/lon within a grid, or -1 if outside it
+    function gridIndexAt(g, lat, lon) {
+        const r = Math.floor((g.bounds.n - lat) / (g.bounds.n - g.bounds.s) * g.h);
+        const c = Math.floor((lon - g.bounds.w) / (g.bounds.e - g.bounds.w) * g.w);
+        return (r < 0 || r >= g.h || c < 0 || c >= g.w) ? -1 : r * g.w + c;
+    }
+    function cropGrid(g, r0, c0, r1, c1) {
+        const w = c1 - c0, h = r1 - r0, data = new Float32Array(w * h);
+        for (let r = 0; r < h; r++) data.set(g.data.subarray((r0 + r) * g.w + c0, (r0 + r) * g.w + c1), r * w);
+        const b = g.bounds, dLat = (b.n - b.s) / g.h, dLon = (b.e - b.w) / g.w;
+        return { data, w, h, res: g.res, bounds: { n: b.n - r0 * dLat, s: b.n - r1 * dLat, w: b.w + c0 * dLon, e: b.w + c1 * dLon } };
+    }
+    function visibleWindow(g) {
+        const mb = map.getBounds(), b = g.bounds;
+        const c0 = Math.max(0, Math.floor((mb.getWest() - b.w) / (b.e - b.w) * g.w)), c1 = Math.min(g.w, Math.ceil((mb.getEast() - b.w) / (b.e - b.w) * g.w));
+        const r0 = Math.max(0, Math.floor((b.n - mb.getNorth()) / (b.n - b.s) * g.h)), r1 = Math.min(g.h, Math.ceil((b.n - mb.getSouth()) / (b.n - b.s) * g.h));
+        return (c1 - c0 < 8 || r1 - r0 < 8) ? null : { r0, r1, c0, c1 };
+    }
+    function pickScanGrid() {
+        const g = fullDemGrid;
+        if (g.w * g.h <= SCAN_MAX_PX) return { grid: g, cropped: false };
+        const v = visibleWindow(g);
+        if (!v) return { error: 'The map view is outside the downloaded area.' };
+        const px = (v.r1 - v.r0) * (v.c1 - v.c0);
+        if (px > SCAN_MAX_PX) return { error: `The part of this download in view is ${(px / 1e6).toFixed(0)} Mpx, and scans are limited to ${SCAN_MAX_PX / 1e6} Mpx at a time to stay within browser memory. Zoom in to scan a smaller part - the download stays loaded, no need to download again.` };
+        return { grid: cropGrid(g, v.r0, v.c0, v.r1, v.c1), cropped: true };
+    }
+
+    // Hint when zoomed well past the loaded DTM's resolution and a finer
+    // download is actually possible (the 1 m LiDAR floor already reached
+    // means there's nothing finer to fetch; the renderer's bicubic
+    // interpolation takes over from there).
     map.on('moveend', () => {
         if (!currentDEM) return;
-        renderAllGLLayers();
-        // Standard Web Mercator ground resolution formula: how many real-world
-        // meters one screen pixel covers at the current zoom/latitude. If
-        // that's now noticeably finer than the loaded DEM's own per-pixel
-        // resolution, the hillshade texture is being stretched well past what
-        // it actually contains - the fix is re-downloading at this new, more
-        // zoomed-in view (which, now that resolution isn't artificially capped
-        // at 1m/px, actually buys real extra detail for a smaller area).
         const screenMPP = 156543.03392 * Math.cos(map.getCenter().lat * Math.PI / 180) / Math.pow(2, map.getZoom());
-        if (effRes > screenMPP * 2) {
+        if (effRes > 1.05 && effRes > screenMPP * 2) {
             document.getElementById('status').innerText =
-                `Zoomed in past this DEM's resolution (~${effRes.toFixed(2)}m/px) - click Download Visible DEM Area again for a sharper result here.`;
+                `Zoomed in past this download's ${effRes.toFixed(2)} m/px - click Download again for a sharper result here.`;
         }
     });
 
-    // Live "what would I actually get" preview for the Download Detail slider -
-    // recomputed on every pan/zoom (not just slider input) since it depends on
-    // the CURRENT visible area, and works even before any DEM has been
-    // downloaded yet, unlike the hint above.
-    function updateResCapPreview() {
-        const resCapVal = parseInt(document.getElementById('resCap').value);
-        document.getElementById('resCapVal').innerText = resCapVal + 'px';
-        const bounds = map.getBounds();
-        const n = bounds.getNorth(), s = bounds.getSouth(), e = bounds.getEast(), w = bounds.getWest();
-        const midLatRad = (n + s) / 2 * Math.PI / 180;
-        const width_m = 6371000 * (e - w) * Math.PI / 180 * Math.cos(midLatRad);
-        const height_m = 6371000 * (n - s) * Math.PI / 180;
-        const previewRes = Math.max(width_m, height_m) / resCapVal;
-        const acres = (width_m * height_m) / 4046.86;
-        const previewEl = document.getElementById('resCapPreview');
-        previewEl.innerText =
-            `At your current view: ~${previewRes.toFixed(2)} m/px (${metersToFeetInches(previewRes)}) over ~${acres < 1 ? acres.toFixed(2) : Math.round(acres)} acres.` +
-            (previewRes > 1.0 ? ' Coarser than the 1 m minimum: zoom in or raise Download Detail.' : ' Meets the 1 m minimum.');
-        previewEl.style.color = previewRes > 1.0 ? '#b91c1c' : '#15803d';
+    // ---- DOWNLOAD PLANNING: the whole map view, tiled ----
+    // The entire visible map is downloaded as a grid of <=2048 px tiles
+    // requested from 3DEP in parallel and stitched into one seamless DTM.
+    // Every tile is cut from ONE shared pixel grid (its bbox is computed from
+    // global pixel indices, with adjustAspectRatio=false), so neighbouring
+    // tiles abut exactly with no seams, gaps or overlaps. The only real limit
+    // is memory: 4 bytes per cell, plus scan working space, hence the budget.
+    const DL_TILE_PX = 2048, DL_PARALLEL = 4;
+    function planDownload() {
+        const mb = map.getBounds();
+        const bb = { n: Math.min(85, mb.getNorth()), s: Math.max(-85, mb.getSouth()), e: Math.min(180, mb.getEast()), w: Math.max(-180, mb.getWest()) };
+        const midLat = (bb.n + bb.s) / 2 * Math.PI / 180;
+        const width_m = 6371000 * (bb.e - bb.w) * Math.PI / 180 * Math.cos(midLat);
+        const height_m = 6371000 * (bb.n - bb.s) * Math.PI / 180;
+        const budget = parseFloat(document.getElementById('dlBudget').value) * 1e6;
+        const choice = document.getElementById('dlRes').value;
+        const pxAt = (r) => Math.ceil(width_m / r) * Math.ceil(height_m / r);
+        let res = choice === 'auto' ? 1.0 : parseFloat(choice);
+        let fitted = false;
+        if (choice === 'auto' && pxAt(res) > budget) {
+            // Finest resolution that still fits: 1 m where it fits, otherwise
+            // the coarsest step needed to keep the whole view in budget.
+            res = Math.sqrt(width_m * height_m / budget);
+            while (pxAt(res) > budget) res *= 1.01;
+            fitted = true;
+        }
+        // ceil, so the delivered pixel size is never coarser than asked for
+        const W = Math.max(2, Math.ceil(width_m / res - 1e-9)), H = Math.max(2, Math.ceil(height_m / res - 1e-9));
+        return { bounds: bb, width_m, height_m, res: width_m / W, W, H, px: W * H, budget, overBudget: W * H > budget, fitted,
+                 tiles: Math.ceil(W / DL_TILE_PX) * Math.ceil(H / DL_TILE_PX) };
     }
-    map.on('moveend', updateResCapPreview);
-    setTimeout(updateResCapPreview, 0);
+    function updateDownloadPreview() {
+        const p = planDownload();
+        const el = document.getElementById('dlPreview');
+        const km = (m) => m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.round(m) + ' m';
+        let msg = `Whole view: ${km(p.width_m)} &times; ${km(p.height_m)} at <b>${p.res.toFixed(2)} m/px</b> &rarr; ${p.W.toLocaleString()} &times; ${p.H.toLocaleString()} px ` +
+                  `(${(p.px / 1e6).toFixed(1)} Mpx, ${p.tiles} tile${p.tiles === 1 ? '' : 's'}, ~${Math.round(p.px * 4 / 1048576)} MB).`;
+        let color = '#15803d';
+        if (p.overBudget) {
+            msg += ' <b>Over the memory budget</b>: choose a coarser resolution or a larger budget, or zoom in.'; color = '#b91c1c';
+        } else if (p.res > 1.005) {
+            msg += p.fitted ? ' Auto coarsened this to fit the memory budget. That is below the 1 m scan minimum; raise the budget or zoom in for full 1 m LiDAR.'
+                            : ' Coarser than the 1 m scan minimum.';
+            color = '#b45309';
+        } else {
+            msg += ' Full LiDAR resolution.';
+        }
+        if (p.px > SCAN_MAX_PX && !p.overBudget) msg += ` Scans on downloads this large run on the area you're viewing (up to ${SCAN_MAX_PX / 1e6} Mpx at a time).`;
+        el.innerHTML = msg;
+        el.style.color = color;
+    }
+    map.on('moveend', updateDownloadPreview);
+    setTimeout(updateDownloadPreview, 0);
 
     function updateOpacity() {
         const val = document.getElementById('opacity').value;
@@ -667,148 +758,115 @@
         document.getElementById('slopeOpacityVal').innerText = Math.round(val * 100) + '%';
     }
 
-    // --- 2. WEBGL SHADER SETUP ---
+    // --- 2. WEBGL TERRAIN RENDERER ---
+    // Draws the DTM as a level-of-detail pyramid of GPU texture tiles, and
+    // only the part that is actually on screen (plus a margin for panning),
+    // at the display's full pixel density. The old renderer uploaded the
+    // whole DTM as one texture and sized its canvas to the DTM's entire
+    // on-screen footprint. Zoomed in, that canvas ran past the browser's
+    // maximum drawing-buffer size and was silently shrunk and stretched back
+    // up, and a large download could exceed the GPU's maximum texture size
+    // and simply not draw.
+    //
+    // Shading: elevation is reconstructed with bicubic (Catmull-Rom)
+    // interpolation from the 4x4 surrounding samples, and the surface
+    // gradient is taken analytically from that same smooth surface. The
+    // lighting normal therefore varies smoothly across each DTM cell instead
+    // of being constant per cell. Constant per-cell normals give flat,
+    // faceted blocks when zoomed in, which is the "video game terrain" look.
+    // Textures use NEAREST sampling on purpose (the interpolation is done in
+    // the shader), so this no longer depends on float-texture linear
+    // filtering support, which many GPUs, including all iPhones, lack.
+    const GL_TILE = 1024, GL_BORDER = 2, GL_MAX_TILES = 48;
+
     const vsSource = `
-        attribute vec2 a_position;
-        varying vec2 v_texcoord;
-        void main() {
-            v_texcoord = vec2((a_position.x + 1.0) * 0.5, 1.0 - (a_position.y + 1.0) * 0.5);
-            gl_Position = vec4(a_position, 0.0, 1.0);
-        }
+        attribute vec2 a_clip;   // clip-space position (computed on the CPU from lat/lon)
+        attribute vec2 a_px;     // position in pyramid-level pixel units
+        varying vec2 v_px;
+        void main() { v_px = a_px; gl_Position = vec4(a_clip, 0.0, 1.0); }
     `;
 
     const fsSource = `
         precision highp float;
-        varying vec2 v_texcoord;
-        uniform sampler2D u_dem;
-        uniform vec2 u_resolution;
-        uniform float u_sunAzimuth;
+        varying vec2 v_px;
+        uniform sampler2D u_tex;
+        uniform vec2 u_texOrigin;      // level-pixel coordinate of this texture's (0,0) texel edge
+        uniform vec2 u_texSize;
+        uniform float u_pixelRes;      // ground meters per level pixel
+        uniform float u_sunAzimuth;    // degrees clockwise from north
         uniform float u_sunAltitude;
         uniform float u_zExaggeration;
-        uniform float u_pixelRes;
-        uniform float u_displayMode; // 0.0 = hillshade, 1.0 = slope
-        uniform float u_multiDirectional; // 0.0 = classic single light, 1.0 = 4-direction max-blend
+        uniform float u_displayMode;   // 0 = hillshade, 1 = slope, 2 = settlement rank
+        uniform float u_multiDirectional;
 
-        // One hillshade evaluation at a given light azimuth/altitude, reused
-        // for both the classic single-light mode and the 4-direction blend
-        // below so there's exactly one place the actual lighting math lives.
-        float computeHillshadeAt(float slope, float aspect, float azimuthDeg, float altitudeDeg) {
-            float azRad = (360.0 - azimuthDeg + 90.0) * 3.14159 / 180.0;
-            float altRad = altitudeDeg * 3.14159 / 180.0;
-            float h = (sin(altRad) * cos(slope)) + (cos(altRad) * sin(slope) * cos(azRad - aspect));
-            return clamp(h, 0.0, 1.0);
+        float fetchH(vec2 ij) { return texture2D(u_tex, (ij + 0.5) / u_texSize).r; }
+        vec4 rowVals(vec2 b, float c) {
+            vec4 v = vec4(fetchH(b), fetchH(b + vec2(1.0, 0.0)), fetchH(b + vec2(2.0, 0.0)), fetchH(b + vec2(3.0, 0.0)));
+            return mix(v, vec4(c), step(v, vec4(-100.0))); // NoData neighbours take the centre value
         }
+        // Catmull-Rom weights and their derivatives for fractional offset t
+        vec4 crW(float t) { float t2 = t*t, t3 = t2*t;
+            return vec4(-0.5*t3 + t2 - 0.5*t, 1.5*t3 - 2.5*t2 + 1.0, -1.5*t3 + 2.0*t2 + 0.5*t, 0.5*t3 - 0.5*t2); }
+        vec4 crD(float t) { float t2 = t*t;
+            return vec4(-1.5*t2 + 2.0*t - 0.5, 4.5*t2 - 5.0*t, -4.5*t2 + 4.0*t + 0.5, 1.5*t2 - t); }
 
-        // Slope color ramp matching common GIS steepness classes (used for
-        // things like trail/land-use suitability): green=flat through
-        // yellow/orange to red=steep, dark magenta for very steep (45\u00b0+),
-        // which is also roughly the range bluff faces and cliff lines fall in.
+        float lightAt(vec3 n, float azDeg, float altDeg) {
+            float az = radians(azDeg), alt = radians(altDeg);
+            return max(dot(n, vec3(sin(az)*cos(alt), cos(az)*cos(alt), sin(alt))), 0.0);
+        }
         vec3 slopeColor(float slopeDeg) {
-            vec3 c0 = vec3(0.0, 0.55, 0.0);
-            vec3 c1 = vec3(0.65, 0.75, 0.0);
-            vec3 c2 = vec3(1.0, 0.65, 0.0);
-            vec3 c3 = vec3(0.85, 0.1, 0.1);
-            vec3 c4 = vec3(0.45, 0.0, 0.3);
+            vec3 c0 = vec3(0.0, 0.55, 0.0), c1 = vec3(0.65, 0.75, 0.0), c2 = vec3(1.0, 0.65, 0.0), c3 = vec3(0.85, 0.1, 0.1), c4 = vec3(0.45, 0.0, 0.3);
             if (slopeDeg < 15.0) return mix(c0, c1, slopeDeg / 15.0);
             if (slopeDeg < 30.0) return mix(c1, c2, (slopeDeg - 15.0) / 15.0);
             if (slopeDeg < 45.0) return mix(c2, c3, (slopeDeg - 30.0) / 15.0);
             if (slopeDeg < 60.0) return mix(c3, c4, (slopeDeg - 45.0) / 15.0);
             return c4;
         }
-
-        vec3 suitabilityColor(float rank) {
-            // Discrete, non-blended bands - a classification map (like a
-            // hazard/suitability map) reads far more clearly at a glance than
-            // a smooth gradient, especially once several underlying factors
-            // are combined. rank is a PERCENTILE within the current scan
-            // area (computed in JS before upload, not a raw score), so these
-            // fixed cutoffs always show a genuinely balanced spread of all 5
-            // classes regardless of whether raw scores happen to cluster high
-            // or low for this particular area.
-            if (rank < 0.2) return vec3(0.15, 0.2, 0.5);
-            if (rank < 0.4) return vec3(0.25, 0.55, 0.75);
-            if (rank < 0.6) return vec3(0.9, 0.85, 0.25);
-            if (rank < 0.8) return vec3(0.95, 0.55, 0.1);
-            return vec3(0.85, 0.05, 0.05);
-        }
-        float suitabilityAlpha(float rank) {
-            if (rank < 0.2) return 0.0; // bottom fifth: fully transparent - don't
-            if (rank < 0.4) return 0.35; // color the whole map, only what's
-            if (rank < 0.6) return 0.5;  // meaningfully above-average for this
-            if (rank < 0.8) return 0.65; // specific area
-            return 0.85;
+        // Settlement suitability: discrete percentile bands (see rankTransform)
+        vec4 suitability(float rank) {
+            if (rank < 0.2) return vec4(0.0);
+            if (rank < 0.4) return vec4(0.25, 0.55, 0.75, 0.35);
+            if (rank < 0.6) return vec4(0.9, 0.85, 0.25, 0.5);
+            if (rank < 0.8) return vec4(0.95, 0.55, 0.1, 0.65);
+            return vec4(0.85, 0.05, 0.05, 0.85);
         }
 
         void main() {
-            vec2 texel = vec2(1.0 / u_resolution.x, 1.0 / u_resolution.y);
-            
-            float hCenter = texture2D(u_dem, v_texcoord).r;
-            if (hCenter < -100.0) { gl_FragColor = vec4(0.0, 0.0, 0.0, 0.0); return; }
-
+            vec2 local = v_px - u_texOrigin;
+            float centre = fetchH(floor(local));
+            if (centre < -100.0) { gl_FragColor = vec4(0.0); return; }
             if (u_displayMode > 1.5) {
-                // Settlement Likelihood: u_dem holds a pre-computed percentile
-                // rank (0-1) directly here, not elevation - so just classify
-                // and color it, no gradient/hillshade math needed (or valid).
-                float rank = clamp(hCenter, 0.0, 1.0);
-                gl_FragColor = vec4(suitabilityColor(rank), suitabilityAlpha(rank));
+                vec4 s = suitability(clamp(centre, 0.0, 1.0));
+                gl_FragColor = vec4(s.rgb * s.a, s.a); // premultiplied alpha
                 return;
             }
-
-            float hLeft = texture2D(u_dem, v_texcoord + vec2(-texel.x, 0.0)).r;
-            float hRight = texture2D(u_dem, v_texcoord + vec2(texel.x, 0.0)).r;
-            float hUp = texture2D(u_dem, v_texcoord + vec2(0.0, texel.y)).r;
-            float hDown = texture2D(u_dem, v_texcoord + vec2(0.0, -texel.y)).r;
-
-            if(hLeft < -100.0) hLeft = hCenter; if(hRight < -100.0) hRight = hCenter;
-            if(hUp < -100.0) hUp = hCenter; if(hDown < -100.0) hDown = hCenter;
-
-            float dzdx_raw = (hRight - hLeft) / (2.0 * u_pixelRes);
-            float dzdy_raw = (hUp - hDown) / (2.0 * u_pixelRes);
+            vec2 t = local - 0.5;
+            vec2 i = floor(t), f = t - i;
+            vec4 wx = crW(f.x), wy = crW(f.y), dwx = crD(f.x), dwy = crD(f.y);
+            vec4 r0 = rowVals(i + vec2(-1.0, -1.0), centre), r1 = rowVals(i + vec2(-1.0, 0.0), centre);
+            vec4 r2 = rowVals(i + vec2(-1.0, 1.0), centre), r3 = rowVals(i + vec2(-1.0, 2.0), centre);
+            vec4 hx = vec4(dot(r0, wx), dot(r1, wx), dot(r2, wx), dot(r3, wx));
+            vec4 gx = vec4(dot(r0, dwx), dot(r1, dwx), dot(r2, dwx), dot(r3, dwx));
+            float dzdE = dot(gx, wy) / u_pixelRes;          // rise per meter toward the east
+            float dzdN = -dot(hx, dwy) / u_pixelRes;        // rows run south, so north = -row
 
             if (u_displayMode > 0.5) {
-                // True slope angle - deliberately NOT run through Z-Exaggeration,
-                // which is a lighting aid for hillshade and would otherwise make
-                // this read steeper than the terrain actually is.
-                float trueSlopeDeg = atan(sqrt(dzdx_raw*dzdx_raw + dzdy_raw*dzdy_raw)) * 180.0 / 3.14159;
-                gl_FragColor = vec4(slopeColor(trueSlopeDeg), 1.0);
+                // True slope angle - deliberately NOT exaggerated
+                gl_FragColor = vec4(slopeColor(degrees(atan(length(vec2(dzdE, dzdN))))), 1.0);
                 return;
             }
-
-            float dzdx = dzdx_raw * u_zExaggeration;
-            float dzdy = dzdy_raw * u_zExaggeration;
-
-            float slope = atan(sqrt(dzdx*dzdx + dzdy*dzdy));
-            float aspect = atan(dzdx, dzdy);
-
-            float hillshade;
+            vec3 n = normalize(vec3(-dzdE * u_zExaggeration, -dzdN * u_zExaggeration, 1.0));
+            float hs;
             if (u_multiDirectional > 0.5) {
-                // 4 lights spread evenly around the compass (still anchored
-                // to the Azimuth slider, which rotates the whole set), so
-                // every possible aspect is within 45 degrees of one of them
-                // - max-blended so a flank facing away from any ONE of the
-                // 4 still shows the same full brightness it would if a
-                // light were placed exactly to reveal it, rather than only
-                // whichever single azimuth the slider happens to be set to.
-                float h0 = computeHillshadeAt(slope, aspect, u_sunAzimuth, u_sunAltitude);
-                float h1 = computeHillshadeAt(slope, aspect, u_sunAzimuth + 90.0, u_sunAltitude);
-                float h2 = computeHillshadeAt(slope, aspect, u_sunAzimuth + 180.0, u_sunAltitude);
-                float h3 = computeHillshadeAt(slope, aspect, u_sunAzimuth + 270.0, u_sunAltitude);
-                hillshade = max(max(h0, h1), max(h2, h3));
+                // 4 lights around the compass, max-blended, still anchored to Azimuth
+                hs = max(max(lightAt(n, u_sunAzimuth, u_sunAltitude), lightAt(n, u_sunAzimuth + 90.0, u_sunAltitude)),
+                         max(lightAt(n, u_sunAzimuth + 180.0, u_sunAltitude), lightAt(n, u_sunAzimuth + 270.0, u_sunAltitude)));
             } else {
-                hillshade = computeHillshadeAt(slope, aspect, u_sunAzimuth, u_sunAltitude);
+                hs = lightAt(n, u_sunAzimuth, u_sunAltitude);
             }
-            // A tight contrast stretch (the old 0.2-0.8 smoothstep) plus zero
-            // ambient light crushes shadowed terrain to flat black and pushes
-            // lit terrain to flat white, with a hard edge between - exactly
-            // what gives shaded relief a flat, faceted "video game terrain"
-            // look instead of a smooth, photographic one. Purely a color/
-            // lighting change: the slope/aspect/hillshade math above (and
-            // everything derived from the DEM elsewhere - detection, the Slope
-            // layer, exports) is completely untouched.
-            float shaded = smoothstep(0.05, 0.95, hillshade); // gentler stretch
-            float ambient = 0.22; // real outdoor shadow is never fully dark (skylight/bounce)
-            shaded = ambient + (1.0 - ambient) * shaded;
-
+            // Gentle contrast stretch plus skylight ambient: real shadow is never pitch black
+            float shaded = smoothstep(0.02, 0.98, hs);
+            shaded = 0.22 + 0.78 * shaded;
             gl_FragColor = vec4(vec3(shaded), 1.0);
         }
     `;
@@ -821,86 +879,85 @@
         return shader;
     }
 
-    // Sets up one fully independent WebGL context - own canvas, shader
-    // program, texture, uniforms - so Hillshade and Slope can be genuinely
-    // separate, simultaneously-visible map layers instead of two modes fighting
-    // over one canvas. Each canvas lives in its own Leaflet pane, a real
-    // sibling of tilePane/markerPane/popupPane (see the note on why that
-    // matters below), so it can compete with them by z-index for real.
-    // Creates (or, after a context loss, re-creates) every GL-side resource
-    // for one layer: shader program, position buffer, texture, uniform
-    // locations. None of these survive a WebGL context loss even though the
-    // context object itself does - so this needs to be re-invokable, not just
-    // a one-time setup step, to support restoration below.
+    // ---- Raster sources: level-of-detail pyramids ----
+    // A source is any lat-linear grid (the DTM, or the settlement rank
+    // surface) plus lazily built 2x-downsampled levels. Zoomed out, the
+    // renderer reads a coarser level so the whole view needs only a few
+    // texture tiles; zoomed in it reads full resolution, visible tiles only.
+    let rasterSourceSeq = 0;
+    function buildRasterSource(data, w, h, bounds) {
+        return { id: ++rasterSourceSeq, bounds, w, h, levels: [{ data, w, h }] };
+    }
+    function sourceLevel(src, L) {
+        while (src.levels.length <= L) {
+            const p = src.levels[src.levels.length - 1];
+            if (p.w === 1 && p.h === 1) return p;
+            const w = Math.ceil(p.w / 2), h = Math.ceil(p.h / 2);
+            const d = new Float32Array(w * h);
+            for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+                let sum = 0, cnt = 0;
+                for (let dr = 0; dr < 2; dr++) for (let dc = 0; dc < 2; dc++) {
+                    const rr = 2*r + dr, cc = 2*c + dc;
+                    if (rr >= p.h || cc >= p.w) continue;
+                    const v = p.data[rr * p.w + cc];
+                    if (v >= -100) { sum += v; cnt++; }
+                }
+                d[r * w + c] = cnt ? sum / cnt : -9999;
+            }
+            src.levels.push({ data: d, w, h });
+        }
+        return src.levels[L];
+    }
+
+    // Creates (or, after a context loss, re-creates) the GL program and
+    // buffers for one layer. Tile textures are created lazily per render.
     function initGLResources(ctx) {
         const gl = ctx.gl;
-        const shaderProgram = gl.createProgram();
-        gl.attachShader(shaderProgram, createShader(gl, gl.VERTEX_SHADER, vsSource));
-        gl.attachShader(shaderProgram, createShader(gl, gl.FRAGMENT_SHADER, fsSource));
-        gl.linkProgram(shaderProgram);
-        gl.useProgram(shaderProgram);
-
-        const positionBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW);
-        const positionLocation = gl.getAttribLocation(shaderProgram, "a_position");
-        gl.enableVertexAttribArray(positionLocation);
-        gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
-
-        ctx.texture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, ctx.texture);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-
-        ctx.uRes = gl.getUniformLocation(shaderProgram, "u_resolution");
-        ctx.uSunAz = gl.getUniformLocation(shaderProgram, "u_sunAzimuth");
-        ctx.uSunAlt = gl.getUniformLocation(shaderProgram, "u_sunAltitude");
-        ctx.uZExag = gl.getUniformLocation(shaderProgram, "u_zExaggeration");
-        ctx.uMultiDir = gl.getUniformLocation(shaderProgram, "u_multiDirectional");
-        ctx.uPixelRes = gl.getUniformLocation(shaderProgram, "u_pixelRes");
-        ctx.uDisplayMode = gl.getUniformLocation(shaderProgram, "u_displayMode");
+        if (!gl.getExtension('OES_texture_float')) {
+            document.getElementById('status').innerText = 'This GPU/browser lacks float textures (OES_texture_float), so the terrain layers cannot be drawn.';
+        }
+        const prog = gl.createProgram();
+        gl.attachShader(prog, createShader(gl, gl.VERTEX_SHADER, vsSource));
+        gl.attachShader(prog, createShader(gl, gl.FRAGMENT_SHADER, fsSource));
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error('Terrain shader link failed:', gl.getProgramInfoLog(prog));
+        gl.useProgram(prog);
+        ctx.vbo = gl.createBuffer();
+        ctx.aClip = gl.getAttribLocation(prog, 'a_clip');
+        ctx.aPx = gl.getAttribLocation(prog, 'a_px');
+        const u = (n) => gl.getUniformLocation(prog, n);
+        ctx.u = { tex: u('u_tex'), texOrigin: u('u_texOrigin'), texSize: u('u_texSize'), pixelRes: u('u_pixelRes'),
+                  sunAz: u('u_sunAzimuth'), sunAlt: u('u_sunAltitude'), zExag: u('u_zExaggeration'),
+                  displayMode: u('u_displayMode'), multiDir: u('u_multiDirectional') };
+        ctx.tiles = new Map();
+        ctx.maxDim = Math.min(8192, gl.getParameter(gl.MAX_VIEWPORT_DIMS)[0], gl.getParameter(gl.MAX_VIEWPORT_DIMS)[1]);
+        gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     }
 
     function setupGLLayer(canvasId, paneName, zIndex, displayModeValue) {
         const canvas = document.getElementById(canvasId);
-        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        const gl = canvas.getContext('webgl', { premultipliedAlpha: true }) || canvas.getContext('experimental-webgl');
         const pane = map.createPane(paneName);
         pane.style.zIndex = zIndex;
         pane.style.width = '100%'; pane.style.height = '100%';
         pane.style.pointerEvents = 'none';
         pane.appendChild(canvas);
 
-        const ctx = { canvas, gl, texture: null, displayModeValue, visible: false, uRes: null, uSunAz: null, uSunAlt: null, uZExag: null, uPixelRes: null, uDisplayMode: null };
+        const ctx = { canvas, gl, displayModeValue, visible: false, source: null, tiles: new Map(), rendered: null };
         if (!gl) {
-            // getContext CAN legitimately return null - WebGL unsupported, or
-            // (plausible here specifically, since this app runs three
-            // contexts at once) the browser declining to create another one
-            // under resource pressure. Previously this crashed the entire
-            // script immediately at page load - every layer, not just this
-            // one - with a generic "Cannot read properties of null" and no
-            // indication of what went wrong. renderGLLayer already checks
-            // currentDEM first and no-ops harmlessly on a dead context since
-            // every gl.* call below it is skipped once ctx.gl is falsy there.
+            // getContext CAN return null (WebGL unsupported, or the browser
+            // refusing yet another context). Only this layer goes inactive.
             console.error(`Could not create a WebGL context for ${canvasId}`);
             document.getElementById('status').innerText =
                 'Could not start the GPU renderer (WebGL unavailable or blocked) - try closing other graphics-heavy tabs, or check your browser/GPU driver settings.';
-            return ctx; // renderGLLayer now checks ctx.gl and skips this one layer harmlessly; the other layers/DEM download are unaffected
+            return ctx;
         }
         initGLResources(ctx);
 
-        // WebGL contexts can be forcibly reclaimed by the browser or GPU
-        // driver under resource pressure - a real, documented phenomenon, not
-        // something this app can prevent - and it's more likely here than in
-        // a typical single-canvas page since this runs THREE simultaneous
-        // contexts continuously. Without handling it, a loss silently and
-        // confusingly breaks rendering for that layer with no visible cause,
-        // which looks exactly like "worked fine for a while, then broke on
-        // its own." preventDefault() is required for the browser to even
-        // attempt automatic restoration; when it fires, every GL object
-        // (shader, buffers, texture) needs recreating from scratch, since
-        // none of them survive the loss even though the context/canvas does.
+        // WebGL contexts can be reclaimed by the browser/GPU driver under
+        // resource pressure. preventDefault() lets the browser restore it;
+        // every GL object (program, buffers, tile textures) must then be
+        // recreated, which the lazy tile cache does on the next render.
         canvas.addEventListener('webglcontextlost', (e) => {
             e.preventDefault();
             console.warn(`WebGL context lost for ${canvasId}`);
@@ -909,38 +966,171 @@
         });
         canvas.addEventListener('webglcontextrestored', () => {
             initGLResources(ctx);
-            if (currentDEM && (canvasId === 'glCanvas' || canvasId === 'glCanvasSlope')) {
-                ctx.gl.bindTexture(ctx.gl.TEXTURE_2D, ctx.texture);
-                ctx.gl.getExtension('OES_texture_float');
-                ctx.gl.getExtension('OES_texture_float_linear');
-                ctx.gl.texImage2D(ctx.gl.TEXTURE_2D, 0, ctx.gl.LUMINANCE, demWidth, demHeight, 0, ctx.gl.LUMINANCE, ctx.gl.FLOAT, currentDEM);
-                renderGLLayer(ctx);
-                document.getElementById('status').innerText = 'Graphics context recovered - Hillshade/Slope restored automatically.';
-            } else {
-                document.getElementById('status').innerText = 'Graphics context recovered. Re-run Settlement Likelihood if that layer looks blank.';
-            }
+            ctx.rendered = null;
+            renderGLLayer(ctx);
+            document.getElementById('status').innerText = 'Graphics context recovered - terrain layers restored automatically.';
         });
-
         return ctx;
     }
 
-    // Root cause of the earlier layering saga (confirmed by actually executing
-    // Leaflet's code, not just reading it): .leaflet-map-pane gets a live CSS
-    // transform applied by Leaflet itself to track panning, and a transform
-    // ALONE creates a stacking context, independent of z-index - so a canvas
-    // sitting OUTSIDE that pane can never correctly interleave with tiles/
-    // markers/popups trapped inside it by z-index alone. Both layers below are
-    // created as genuine sibling panes inside it for exactly that reason: tiles
-    // 200 < hillshade 450 < slope 451 < shadows/markers/tooltips/popups
-    // 500-700 < controls 800/1000.
+    // Swaps the raster a layer draws (a new DTM download, a settlement scan)
+    // and frees the GPU tiles of the previous one.
+    function setLayerSource(ctx, src) {
+        if (ctx.gl) for (const t of ctx.tiles.values()) ctx.gl.deleteTexture(t.tex);
+        ctx.tiles = new Map();
+        ctx.source = src;
+        ctx.rendered = null;
+        renderGLLayer(ctx);
+    }
+
+    function getGLTile(ctx, L, level, tx, ty) {
+        const key = `${ctx.source.id}/${L}/${tx}/${ty}`;
+        let t = ctx.tiles.get(key);
+        if (t) { ctx.tiles.delete(key); ctx.tiles.set(key, t); return t; } // LRU touch
+        const gl = ctx.gl;
+        const x0 = tx * GL_TILE - GL_BORDER, y0 = ty * GL_TILE - GL_BORDER;
+        const tw = Math.min(GL_TILE, level.w - tx * GL_TILE) + 2 * GL_BORDER;
+        const th = Math.min(GL_TILE, level.h - ty * GL_TILE) + 2 * GL_BORDER;
+        const buf = new Float32Array(tw * th);
+        for (let r = 0; r < th; r++) {
+            const sr = Math.min(level.h - 1, Math.max(0, y0 + r)) * level.w;
+            for (let c = 0; c < tw; c++) buf[r * tw + c] = level.data[sr + Math.min(level.w - 1, Math.max(0, x0 + c))];
+        }
+        const tex = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, tw, th, 0, gl.LUMINANCE, gl.FLOAT, buf);
+        t = { tex, x0, y0, tw, th };
+        ctx.tiles.set(key, t);
+        while (ctx.tiles.size > GL_MAX_TILES) {
+            const [oldKey, old] = ctx.tiles.entries().next().value;
+            gl.deleteTexture(old.tex);
+            ctx.tiles.delete(oldKey);
+        }
+        return t;
+    }
+
+    function renderGLLayer(ctx) {
+        const gl = ctx.gl;
+        if (!gl || !ctx.visible) return;
+        const src = ctx.source;
+        if (!src) { ctx.canvas.style.visibility = 'hidden'; return; }
+        const b = src.bounds;
+
+        // Render rectangle, in layer points: the viewport plus half a
+        // viewport of margin on each side, clipped to the raster's footprint.
+        const size = map.getSize();
+        const pad = 0.5;
+        const vTL = map.containerPointToLayerPoint([-pad * size.x, -pad * size.y]);
+        const vBR = map.containerPointToLayerPoint([(1 + pad) * size.x, (1 + pad) * size.y]);
+        const nw = map.latLngToLayerPoint([b.n, b.w]), se = map.latLngToLayerPoint([b.s, b.e]);
+        const rx0 = Math.floor(Math.max(vTL.x, nw.x)), ry0 = Math.floor(Math.max(vTL.y, nw.y));
+        const rx1 = Math.ceil(Math.min(vBR.x, se.x)), ry1 = Math.ceil(Math.min(vBR.y, se.y));
+        if (rx1 <= rx0 || ry1 <= ry0) { ctx.canvas.style.visibility = 'hidden'; ctx.rendered = null; return; }
+        ctx.canvas.style.visibility = 'visible';
+        const rw = rx1 - rx0, rh = ry1 - ry0;
+
+        // Backing store at device pixel density, capped to what the GPU
+        // can draw (and to ~24 Mpx, which keeps big 4K screens responsive).
+        const dpr = Math.min(2, window.devicePixelRatio || 1);
+        let scale = dpr;
+        scale = Math.min(scale, ctx.maxDim / rw, ctx.maxDim / rh, Math.sqrt(24e6 / (rw * rh)));
+        const cw = Math.max(1, Math.round(rw * scale)), ch = Math.max(1, Math.round(rh * scale));
+        ctx.canvas.style.left = rx0 + 'px';
+        ctx.canvas.style.top = ry0 + 'px';
+        ctx.canvas.style.width = rw + 'px';
+        ctx.canvas.style.height = rh + 'px';
+        if (ctx.canvas.width !== cw || ctx.canvas.height !== ch) { ctx.canvas.width = cw; ctx.canvas.height = ch; }
+        ctx.rendered = { x0: rx0, y0: ry0, x1: rx1, y1: ry1 };
+
+        gl.viewport(0, 0, cw, ch);
+        gl.clearColor(0, 0, 0, 0);
+        gl.clear(gl.COLOR_BUFFER_BIT);
+
+        // Pyramid level: the coarsest one that still has at least one
+        // raster cell per device pixel.
+        const srcPxPerDevPx = (src.w / Math.max(1e-9, se.x - nw.x)) / scale;
+        const L = Math.max(0, Math.min(14, Math.floor(Math.log2(Math.max(1, srcPxPerDevPx)))));
+        const level = sourceLevel(src, L);
+        const pixelRes = (6371000 * (b.e - b.w) * Math.PI / 180 * Math.cos((b.n + b.s) / 2 * Math.PI / 180)) / level.w;
+
+        // Visible range in this level's pixel coordinates
+        const tl = map.layerPointToLatLng([rx0, ry0]), br = map.layerPointToLatLng([rx1, ry1]);
+        const colOf = (lon) => (lon - b.w) / (b.e - b.w) * level.w;
+        const rowOf = (lat) => (b.n - lat) / (b.n - b.s) * level.h;
+        const c0 = Math.max(0, Math.floor(colOf(tl.lng))), c1 = Math.min(level.w, Math.ceil(colOf(br.lng)));
+        const r0 = Math.max(0, Math.floor(rowOf(tl.lat))), r1 = Math.min(level.h, Math.ceil(rowOf(br.lat)));
+        if (c1 <= c0 || r1 <= r0) return;
+
+        gl.uniform1i(ctx.u.tex, 0);
+        gl.uniform1f(ctx.u.pixelRes, pixelRes);
+        gl.uniform1f(ctx.u.sunAz, parseFloat(document.getElementById('sunAz').value));
+        gl.uniform1f(ctx.u.sunAlt, parseFloat(document.getElementById('sunAlt').value));
+        gl.uniform1f(ctx.u.zExag, parseFloat(document.getElementById('zExag').value));
+        gl.uniform1f(ctx.u.multiDir, document.getElementById('multiDirectional').checked ? 1.0 : 0.0);
+        gl.uniform1f(ctx.u.displayMode, ctx.displayModeValue);
+        gl.bindBuffer(gl.ARRAY_BUFFER, ctx.vbo);
+        gl.enableVertexAttribArray(ctx.aClip);
+        gl.enableVertexAttribArray(ctx.aPx);
+        gl.vertexAttribPointer(ctx.aClip, 2, gl.FLOAT, false, 16, 0);
+        gl.vertexAttribPointer(ctx.aPx, 2, gl.FLOAT, false, 16, 8);
+        gl.activeTexture(gl.TEXTURE0);
+
+        // Each tile is drawn as a strip subdivided along its rows: the data
+        // is linear in latitude but the map is Web Mercator, so placing every
+        // row band through latLngToLayerPoint keeps large downloads exactly
+        // registered with the basemap instead of drifting mid-tile.
+        const SEG = 16;
+        const verts = new Float32Array((SEG + 1) * 2 * 4);
+        for (let ty = Math.floor(r0 / GL_TILE); ty <= Math.floor((r1 - 1) / GL_TILE); ty++) {
+            for (let tx = Math.floor(c0 / GL_TILE); tx <= Math.floor((c1 - 1) / GL_TILE); tx++) {
+                const t = getGLTile(ctx, L, level, tx, ty);
+                const px0 = tx * GL_TILE, px1 = Math.min(level.w, px0 + GL_TILE);
+                const py0 = ty * GL_TILE, py1 = Math.min(level.h, py0 + GL_TILE);
+                const lon0 = b.w + px0 / level.w * (b.e - b.w), lon1 = b.w + px1 / level.w * (b.e - b.w);
+                for (let k = 0; k <= SEG; k++) {
+                    const py = py0 + (py1 - py0) * k / SEG;
+                    const lat = b.n - py / level.h * (b.n - b.s);
+                    const pa = map.latLngToLayerPoint([lat, lon0]), pb = map.latLngToLayerPoint([lat, lon1]);
+                    const o = k * 8;
+                    verts[o] = (pa.x - rx0) / rw * 2 - 1; verts[o+1] = 1 - (pa.y - ry0) / rh * 2; verts[o+2] = px0; verts[o+3] = py;
+                    verts[o+4] = (pb.x - rx0) / rw * 2 - 1; verts[o+5] = 1 - (pb.y - ry0) / rh * 2; verts[o+6] = px1; verts[o+7] = py;
+                }
+                gl.bindTexture(gl.TEXTURE_2D, t.tex);
+                gl.uniform2f(ctx.u.texOrigin, t.x0, t.y0);
+                gl.uniform2f(ctx.u.texSize, t.tw, t.th);
+                gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
+                gl.drawArrays(gl.TRIANGLE_STRIP, 0, (SEG + 1) * 2);
+            }
+        }
+    }
+    function renderAllGLLayers() { renderGLLayer(hillshadeGL); renderGLLayer(slopeGL); renderGLLayer(settlementGL); }
+
+    // Canvas stacking: each canvas lives in its own Leaflet pane inside
+    // .leaflet-map-pane (which carries Leaflet's pan transform), so it
+    // interleaves with tiles/markers/popups by z-index: tiles 200 <
+    // hillshade 450 < slope 451 < settlement 452 < markers/popups 600-700.
     const hillshadeGL = setupGLLayer('glCanvas', 'lidarPane', 450, 0.0);
     const slopeGL = setupGLLayer('glCanvasSlope', 'slopePane', 451, 1.0);
     const settlementGL = setupGLLayer('glCanvasSettlement', 'settlementPane', 452, 2.0);
-    if (settlementGL.gl) {
-        settlementGL.gl.bindTexture(settlementGL.gl.TEXTURE_2D, settlementGL.texture);
-        settlementGL.gl.getExtension('OES_texture_float');
-        settlementGL.gl.texImage2D(settlementGL.gl.TEXTURE_2D, 0, settlementGL.gl.LUMINANCE, 1, 1, 0, settlementGL.gl.LUMINANCE, settlementGL.gl.FLOAT, new Float32Array([-9999]));
-    }
+
+    // Re-render when a pan/zoom finishes, and mid-pan as soon as the view
+    // leaves the pre-rendered margin, so dragging never exposes a blank edge.
+    map.on('moveend resize', () => { renderAllGLLayers(); });
+    map.on('move', () => {
+        const size = map.getSize();
+        const tl = map.containerPointToLayerPoint([0, 0]), br = map.containerPointToLayerPoint([size.x, size.y]);
+        for (const ctx of [hillshadeGL, slopeGL, settlementGL]) {
+            if (!ctx.visible || !ctx.source || !ctx.rendered) continue;
+            const r = ctx.rendered, b = ctx.source.bounds;
+            const nw = map.latLngToLayerPoint([b.n, b.w]), se = map.latLngToLayerPoint([b.s, b.e]);
+            const needL = Math.max(tl.x, nw.x), needT = Math.max(tl.y, nw.y), needR = Math.min(br.x, se.x), needB = Math.min(br.y, se.y);
+            if (needL < r.x0 - 1 || needT < r.y0 - 1 || needR > r.x1 + 1 || needB > r.y1 + 1) { scheduleRenderAllGLLayers(); break; }
+        }
+    });
 
     // Lightweight Leaflet layers wrapping each canvas, so the basemap layers
     // menu's checkboxes can add/remove them independently and simultaneously -
@@ -950,7 +1140,7 @@
     // layer is always current rather than needing to catch up.
     const GLOverlayLayer = L.Layer.extend({
         initialize: function (ctx) { this._ctx = ctx; },
-        onAdd: function () { this._ctx.visible = true; this._ctx.canvas.style.display = 'block'; if (currentDEM) renderGLLayer(this._ctx); },
+        onAdd: function () { this._ctx.visible = true; this._ctx.canvas.style.display = 'block'; renderGLLayer(this._ctx); },
         onRemove: function () { this._ctx.visible = false; this._ctx.canvas.style.display = 'none'; }
     });
     const hillshadeLayer = new GLOverlayLayer(hillshadeGL);
@@ -995,93 +1185,105 @@
         if(currentDEM) scheduleRenderAllGLLayers();
     }
 
+    let downloadAbort = null;
+    function cancelDownload() { if (downloadAbort) downloadAbort.abort(); }
+
+    // Downloads the whole map view (see planDownload) as parallel tiles and
+    // stitches them into one DTM. Nothing is committed until every tile has
+    // arrived, so a failed or cancelled download leaves the previously
+    // loaded DTM exactly as it was.
     async function fetchDEM() {
-        const status = document.getElementById("status");
-        const downloadBtn = document.getElementById("downloadBtn");
-        // Disabled for the duration so a second click can't fire an overlapping
-        // request - without this, two in-flight downloads can complete out of
-        // order, and whichever finishes LAST wins regardless of which one was
-        // requested last, silently leaving demBounds/currentDEM matched to the
-        // wrong one of the two attempts.
-        downloadBtn.disabled = true;
-        status.innerText = "Downloading USGS DEM...";
-
-        const bounds = map.getBounds();
-        const n = bounds.getNorth(), s = bounds.getSouth(), e = bounds.getEast(), w = bounds.getWest();
-
-        // East-west ground distance needs a cos(latitude) correction: a degree of
-        // longitude covers less real distance the further you are from the
-        // equator (~18% less at 35N). Without it, effRes (m/px) comes out ~22%
-        // too large here, inflating every diameter/area/volume estimate
-        // downstream and making the Min/Max Diameter filter reject real features
-        // that are actually within range. North-south distance doesn't need this
-        // correction - a degree of latitude is ~constant everywhere on Earth.
-        const midLatRad = (n + s) / 2 * Math.PI / 180;
-        const width_m = 6371000 * (e - w) * Math.PI / 180 * Math.cos(midLatRad);
-        const height_m = 6371000 * (n - s) * Math.PI / 180;
-        // Requested pixel budget now scales to maximize resolution for whatever
-        // aspect ratio the current view has, instead of the old reqWidth=width_m
-        // coupling - that set the requested pixel count numerically equal to the
-        // meter width, which capped EVERY download at exactly 1m/px no matter how
-        // far in you zoomed. Re-downloading after zooming in could only ever make
-        // things worse (once the area outgrew the pixel cap) or stay the same,
-        // never better. The larger of the two dimensions is scaled to exactly hit
-        // the user-set Download Detail cap (see the live preview next to that
-        // slider), and the other dimension uses the SAME pixels-per-meter ratio -
-        // that keeps pixels square, which every distance/area/volume calculation
-        // downstream assumes (one uniform effRes in both directions). There is no
-        // setting that gives fine resolution over an unlimited area at once - that
-        // trade-off is fundamental to any one download (bandwidth, browser memory,
-        // and how long the scan algorithms take on the resulting grid all scale
-        // with pixel count) - so this is exposed directly rather than hidden
-        // behind a fixed number, with a live estimate of what your CURRENT view
-        // will actually get before you download.
-        const RES_CAP = parseInt(document.getElementById('resCap').value);
-        const pxPerMeter = RES_CAP / Math.max(width_m, height_m);
-        const reqWidth = Math.max(10, Math.round(width_m * pxPerMeter));
-        const reqHeight = Math.max(10, Math.round(height_m * pxPerMeter));
-
-        // adjustAspectRatio defaults to true on this service: if the requested
-        // pixel aspect ratio doesn't exactly match the bbox's own aspect ratio,
-        // ArcGIS silently EXPANDS the bbox so pixels aren't distorted, and
-        // returns an image covering more ground than requested - while
-        // demBounds below still records the original, smaller bbox used to
-        // position the render on screen. That mismatch is what was showing up
-        // as the lidar layer and basemap not lining up. Forcing this off makes
-        // the server honor the exact requested bbox, so demBounds stays accurate.
-        const url = `https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox=${w},${s},${e},${n}&bboxSR=4326&size=${reqWidth},${reqHeight}&imageSR=4326&format=tiff&pixelType=F32&adjustAspectRatio=false&f=image`;
-
-        try {
-            const resp = await fetch(url);
-            if (!resp.ok) throw new Error(`Server returned ${resp.status} ${resp.statusText}`);
-            const tiff = await GeoTIFF.fromArrayBuffer(await resp.arrayBuffer());
-            const image = await tiff.getImage();
-            const newWidth = image.getWidth();
-            const newHeight = image.getHeight();
-            const newDEM = (await image.readRasters())[0];
-            if (!newWidth || !newHeight || !newDEM || newDEM.length === 0) throw new Error("Server returned an empty or unreadable image");
-
-            // Only commit state once the download is confirmed fully valid -
-            // if anything above throws, none of this runs, and the app is
-            // left exactly as it was before the attempt: old DEM (if any)
-            // still loaded, still correctly positioned, still scannable.
-            // Previously demBounds was overwritten unconditionally before the
-            // fetch even started, so a failed re-download after an earlier
-            // success left the OLD terrain data positioned at the NEW
-            // (failed) bounds - silently wrong hillshade placement, and any
-            // scan run afterward would geolocate its results using the wrong
-            // bounds entirely.
-            commitDEM(newDEM, newWidth, newHeight, { n, s, e, w }, width_m,
-                "Bare-earth DTM loaded. GPU renderer active. Note: 3DEP serves the best LiDAR available at each spot; where only coarser source data exists, finer pixels are interpolated and won't add real detail.");
-
-        } catch(err) {
-            status.innerText = currentDEM
-                ? `Download failed (${err.message || 'unknown error'}) - your previously loaded DEM is untouched, try again or zoom in slightly.`
-                : `Download failed (${err.message || 'unknown error'}) - try again, or zoom in slightly for a smaller area.`;
-            console.error(err);
-        } finally {
-            downloadBtn.disabled = false;
+        if (downloadAbort) return;
+        if (scanInProgress) { document.getElementById('status').innerText = 'Wait for the scan to finish before downloading.'; return; }
+        const status = document.getElementById('status');
+        const plan = planDownload();
+        if (plan.overBudget) {
+            status.innerText = `The whole view at ${plan.res.toFixed(2)} m/px is ${(plan.px / 1e6).toFixed(0)} Mpx, over the ${plan.budget / 1e6} Mpx memory budget. Choose a coarser resolution or a larger budget, or zoom in.`;
+            return;
         }
+        const downloadBtn = document.getElementById('downloadBtn');
+        const bar = document.getElementById('dlProgressBar');
+        downloadBtn.disabled = true;
+        document.getElementById('dlProgressWrap').style.display = 'block';
+        bar.style.width = '0%';
+        const ctrl = new AbortController();
+        downloadAbort = ctrl;
+
+        const { W, H, bounds } = plan;
+        const out = new Float32Array(W * H);
+        const jobs = [];
+        for (let r0 = 0; r0 < H; r0 += DL_TILE_PX) for (let c0 = 0; c0 < W; c0 += DL_TILE_PX)
+            jobs.push({ r0, c0, h: Math.min(DL_TILE_PX, H - r0), w: Math.min(DL_TILE_PX, W - c0) });
+        const total = jobs.length;
+        let done = 0;
+        status.innerText = `Downloading ${total} tile(s) at ${plan.res.toFixed(2)} m/px...`;
+        const worker = async () => {
+            while (jobs.length) {
+                const job = jobs.shift();
+                await fetchDEMTile(plan, job, out, ctrl.signal);
+                done++;
+                bar.style.width = (100 * done / total).toFixed(1) + '%';
+                status.innerText = `Downloading tiles: ${done} / ${total} (${plan.res.toFixed(2)} m/px, ${(plan.px / 1e6).toFixed(1)} Mpx)...`;
+            }
+        };
+        try {
+            await Promise.all(Array.from({ length: Math.min(DL_PARALLEL, total) }, worker));
+            const width_m = plan.width_m;
+            commitDEM(out, W, H, bounds, width_m,
+                `Whole view loaded: ${W.toLocaleString()} x ${H.toLocaleString()} px at ${plan.res.toFixed(2)} m/px from ${total} tile(s). ` +
+                `3DEP serves the best LiDAR available at each spot; where only coarser source data exists, finer pixels are interpolated and won't add real detail.`);
+        } catch (err) {
+            ctrl.abort(); // stop the other workers too
+            const why = err.name === 'AbortError' ? 'Download cancelled' : `Download failed (${err.message || 'unknown error'})`;
+            status.innerText = currentDEM ? `${why}. Your previously loaded DTM is untouched.` : `${why}. Try again, or use a coarser resolution.`;
+            if (err.name !== 'AbortError') console.error(err);
+        } finally {
+            downloadAbort = null;
+            downloadBtn.disabled = false;
+            document.getElementById('dlProgressWrap').style.display = 'none';
+        }
+    }
+
+    // One tile of the shared download grid. interpolation=Bilinear matters:
+    // the service's default is nearest-neighbour, which turns any pixel finer
+    // than the source into flat stair-stepped blocks (the blocky "video game
+    // terrain" look). adjustAspectRatio=false keeps the returned image
+    // exactly on the requested bbox, which is what lets tiles abut
+    // seamlessly. Retries with backoff; LZ77 compression is dropped on the
+    // last attempts in case a server node rejects it.
+    async function fetchDEMTile(plan, job, out, signal) {
+        const b = plan.bounds;
+        const dLon = (b.e - b.w) / plan.W, dLat = (b.n - b.s) / plan.H;
+        const w = b.w + job.c0 * dLon, e = b.w + (job.c0 + job.w) * dLon;
+        const n = b.n - job.r0 * dLat, s2 = b.n - (job.r0 + job.h) * dLat;
+        let lastErr = null;
+        for (let attempt = 0; attempt < 4; attempt++) {
+            if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+            const url = `https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage?bbox=${w},${s2},${e},${n}&bboxSR=4326` +
+                `&size=${job.w},${job.h}&imageSR=4326&format=tiff&pixelType=F32&interpolation=RSP_BilinearInterpolation` +
+                `${attempt < 2 ? '&compression=LZ77' : ''}&adjustAspectRatio=false&f=image`;
+            try {
+                const resp = await fetch(url, { signal });
+                if (!resp.ok) throw new Error(`server returned ${resp.status} ${resp.statusText}`);
+                const tiff = await GeoTIFF.fromArrayBuffer(await resp.arrayBuffer());
+                const image = await tiff.getImage();
+                if (image.getWidth() !== job.w || image.getHeight() !== job.h) throw new Error(`tile came back ${image.getWidth()}x${image.getHeight()}, expected ${job.w}x${job.h}`);
+                const data = (await image.readRasters())[0];
+                for (let r = 0; r < job.h; r++) {
+                    const o = (job.r0 + r) * plan.W + job.c0;
+                    for (let c = 0; c < job.w; c++) {
+                        const v = data[r * job.w + c];
+                        out[o + c] = (Number.isFinite(v) && v > -1000) ? v : -9999;
+                    }
+                }
+                return;
+            } catch (err) {
+                if (err.name === 'AbortError') throw err;
+                lastErr = err;
+                await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
+            }
+        }
+        throw new Error(`a tile failed after 4 attempts: ${lastErr && lastErr.message}`);
     }
 
     // Commits a validated DTM (from the 3DEP download or a local GeoTIFF) as
@@ -1094,25 +1296,21 @@
         effRes = width_m / demWidth;
         currentDEM = newDEM;
         cachedFlow = null; // stale - tied to the PREVIOUS DEM's terrain, now replaced
-        lastMetricRaster = null;
+        lastMetricRaster = null; lastMetricGrid = null;
         markersLayer.clearLayers();
         polygonsLayer.clearLayers();
         detectedFeatures = [];
         document.getElementById("exportShpBtn").style.display = "none";
 
-        // Each context has its own texture object - a WebGL texture is tied
-        // to the GL context that created it, so this uploads the same DEM
-        // data to both independently rather than trying to share one.
-        // Contexts that failed to initialize (see setupGLLayer) are
-        // skipped - that layer just stays inactive rather than the whole
-        // download failing because of one unrelated context.
-        for (const ctx of [hillshadeGL, slopeGL]) {
-            if (!ctx.gl) continue;
-            ctx.gl.bindTexture(ctx.gl.TEXTURE_2D, ctx.texture);
-            ctx.gl.getExtension('OES_texture_float');
-            ctx.gl.getExtension('OES_texture_float_linear');
-            ctx.gl.texImage2D(ctx.gl.TEXTURE_2D, 0, ctx.gl.LUMINANCE, demWidth, demHeight, 0, ctx.gl.LUMINANCE, ctx.gl.FLOAT, currentDEM);
-        }
+        fullDemGrid = { data: currentDEM, w: demWidth, h: demHeight, bounds: demBounds, res: effRes };
+        // Hillshade and Slope share one pyramid (built once); each GL
+        // context keeps its own tile textures, since textures can't be
+        // shared across contexts.
+        const demSource = buildRasterSource(currentDEM, demWidth, demHeight, demBounds);
+        setLayerSource(hillshadeGL, demSource);
+        setLayerSource(slopeGL, demSource);
+        setLayerSource(settlementGL, null);
+        lastSettlementRasters = null;
 
         lastExportRaster = null; last3DOverlay = null; lastViewshedCtx = null;
         if (viewshedOverlay) { map.removeLayer(viewshedOverlay); layerControl.removeLayer(viewshedOverlay); viewshedOverlay = null; }
@@ -1120,12 +1318,12 @@
         renderAllGLLayers();
         const badge = document.getElementById('dtmResBadge');
         badge.style.display = 'block';
-        if (effRes <= 1.0 + 1e-6) {
+        if (effRes <= 1.005) {
             badge.style.background = '#dcfce7'; badge.style.color = '#166534';
             badge.innerText = `Bare-earth DTM loaded: ${effRes.toFixed(2)} m/px (meets the 1 m minimum)`;
         } else {
             badge.style.background = '#fee2e2'; badge.style.color = '#991b1b';
-            badge.innerText = `Bare-earth DTM loaded: ${effRes.toFixed(2)} m/px, below the 1 m minimum. Zoom in and download again.`;
+            badge.innerText = `Bare-earth DTM loaded: ${effRes.toFixed(2)} m/px, below the 1 m minimum. Raise the memory budget or zoom in, then download again.`;
         }
         document.getElementById('status').innerText = statusMsg;
         document.getElementById("scanBtn").style.display = "block";
@@ -1140,6 +1338,7 @@
         const file = fileInput.files[0];
         fileInput.value = '';
         if (!file) return;
+        if (scanInProgress) { document.getElementById('status').innerText = 'Wait for the scan to finish before loading a new DTM.'; return; }
         const status = document.getElementById('status');
         status.innerText = `Reading ${file.name}...`;
         try {
@@ -1152,7 +1351,7 @@
             const [minX, minY, maxX, maxY] = image.getBoundingBox();
             if (!(minX >= -180 && maxX <= 180 && minY >= -90 && maxY <= 90)) throw new Error('its bounds are not lon/lat degrees');
             const W = image.getWidth(), H = image.getHeight();
-            if (W * H > 40e6) throw new Error(`it is ${W}x${H} pixels, too large for the browser. Clip it to a smaller area first`);
+            if (W * H > 256e6) throw new Error(`it is ${W}x${H} pixels, too large for the browser. Clip it to a smaller area first`);
             const raw = (await image.readRasters())[0];
             const nodata = image.getGDALNoData();
             const dem = new Float32Array(W * H);
@@ -1202,59 +1401,6 @@
         reader.readAsText(file);
     }
 
-    function renderGLLayer(ctx) {
-        if (!currentDEM || !ctx.gl) return; // !ctx.gl: this specific context failed to initialize (see setupGLLayer) - skip it, other layers are unaffected
-
-        // Layer points (unlike container points) are stable under plain panning -
-        // they're defined relative to the pane's own coordinate space, the same
-        // space Leaflet's transform shifts as a whole. Sizing and positioning the
-        // canvas to exactly the DEM's footprint here means no scissor rectangle
-        // is needed at all: the whole canvas simply IS the DEM's extent, and
-        // resizing width/height always fully clears the WebGL buffer, so there's
-        // no way for stale pixels from a previous render to linger anywhere.
-        const nwLP = map.latLngToLayerPoint([demBounds.n, demBounds.w]);
-        const seLP = map.latLngToLayerPoint([demBounds.s, demBounds.e]);
-        const w = Math.max(1, Math.round(seLP.x - nwLP.x));
-        const h = Math.max(1, Math.round(seLP.y - nwLP.y));
-
-        ctx.canvas.style.left = nwLP.x + 'px';
-        ctx.canvas.style.top = nwLP.y + 'px';
-        // canvas.width/height are special: ASSIGNING them always clears and
-        // reallocates the backing store (and, for a WebGL canvas, resets the
-        // GPU drawing buffer) even when set to the exact same value as
-        // before - a browser-spec behavior, not a missed optimization on
-        // the browser's part. This function runs on every shader-parameter
-        // change too (sun azimuth/altitude/exaggeration), none of which
-        // affect canvas size at all - only pan/zoom does - so unconditionally
-        // resizing here meant rapid slider dragging forced a full GPU buffer
-        // reset on all three canvases dozens of times per second for no
-        // reason, which is real, avoidable GPU pressure under fast dragging.
-        if (ctx._lastW !== w || ctx._lastH !== h) {
-            ctx.canvas.width = w;
-            ctx.canvas.height = h;
-            ctx.canvas.style.width = w + 'px';
-            ctx.canvas.style.height = h + 'px';
-            ctx._lastW = w; ctx._lastH = h;
-        }
-
-        ctx.gl.viewport(0, 0, w, h);
-        ctx.gl.clearColor(0.0, 0.0, 0.0, 0.0);
-        ctx.gl.clear(ctx.gl.COLOR_BUFFER_BIT);
-
-        ctx.gl.uniform2f(ctx.uRes, demWidth, demHeight);
-        ctx.gl.uniform1f(ctx.uSunAz, parseFloat(document.getElementById('sunAz').value));
-        ctx.gl.uniform1f(ctx.uSunAlt, parseFloat(document.getElementById('sunAlt').value));
-        ctx.gl.uniform1f(ctx.uZExag, parseFloat(document.getElementById('zExag').value));
-        ctx.gl.uniform1f(ctx.uMultiDir, document.getElementById('multiDirectional').checked ? 1.0 : 0.0);
-        ctx.gl.uniform1f(ctx.uPixelRes, effRes);
-        ctx.gl.uniform1f(ctx.uDisplayMode, ctx.displayModeValue);
-
-        ctx.gl.drawArrays(ctx.gl.TRIANGLES, 0, 6);
-    }
-    // Renders both layers regardless of current visibility - cheap (one draw
-    // call each) and means a hidden layer is always caught up the instant it's
-    // switched back on, rather than needing its own dirty-tracking.
-    function renderAllGLLayers() { renderGLLayer(hillshadeGL); renderGLLayer(slopeGL); renderGLLayer(settlementGL); }
 
     // --- 4. GEOMORPHOMETRIC GIS SCANNER ---
     // Real depression-filling (karst/doline detection) and a Local Relief Model
@@ -1749,7 +1895,19 @@
     // say "this is a mound" without a Mounds scan needing to already be in
     // memory - exactly the Russell Cave case, where the last scan might have
     // been Caves/Sinkholes, or no scan at all.
+    // r/c are cells of the full DTM. On a download too large to process
+    // whole, the check runs on a 2048 px window around the clicked point.
     async function confirmMissedFeature(mode, r, c) {
+        if (!currentDEM || scanInProgress) return;
+        const g = fullDemGrid;
+        if (g.w * g.h <= SCAN_MAX_PX) return confirmMissedFeatureOnGrid(mode, r, c);
+        const half = 1024;
+        const r0 = Math.max(0, r - half), c0 = Math.max(0, c - half), r1 = Math.min(g.h, r + half), c1 = Math.min(g.w, c + half);
+        scanInProgress = true;
+        try { await withGrid(cropGrid(g, r0, c0, r1, c1), () => confirmMissedFeatureOnGrid(mode, r - r0, c - c0)); }
+        finally { scanInProgress = false; }
+    }
+    async function confirmMissedFeatureOnGrid(mode, r, c) {
         if (!currentDEM) return;
         map.closePopup();
         const status = document.getElementById('status');
@@ -1873,12 +2031,10 @@
         const list = trainingData.settlement.examples;
         const dupIdx = list.findIndex(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
         let waterDistM = null, hand = null, slopeDeg = null;
-        if (lastSettlementRasters && lastSettlementRasters.demWidth === demWidth && lastSettlementRasters.demHeight === demHeight) {
-            const row = Math.round(((demBounds.n - lat) / (demBounds.n - demBounds.s)) * demHeight);
-            const col = Math.round(((lon - demBounds.w) / (demBounds.e - demBounds.w)) * demWidth);
-            if (row >= 0 && row < demHeight && col >= 0 && col < demWidth) {
-                const i = row * demWidth + col;
-                waterDistM = lastSettlementRasters.waterwayDist[i] * effRes;
+        if (lastSettlementRasters) {
+            const i = gridIndexAt(lastSettlementRasters.grid, lat, lon);
+            if (i >= 0) {
+                waterDistM = lastSettlementRasters.waterwayDist[i] * lastSettlementRasters.grid.res;
                 hand = lastSettlementRasters.hand[i];
                 slopeDeg = lastSettlementRasters.slopeDegRaster[i];
             }
@@ -2950,7 +3106,7 @@
                 return { html, boost };
             }
         };
-        lastViewshedCtx = { denoised, slope, accum: flow.accum, channelCells, W, H };
+        lastViewshedCtx = { denoised, slope, accum: flow.accum, channelCells, W, H, grid: gridInfo(true) };
         return { metricRaster, candidateMask, modeCtx };
     }
     // Highest candidate cell within the component's own footprint radius of
@@ -2974,7 +3130,10 @@
     function showViewshedOverlay(r0, c0, ev) {
         if (ev) { ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); }
         const v = lastViewshedCtx;
-        if (!v || v.W !== demWidth || v.H !== demHeight) { document.getElementById('status').innerText = 'Run a Hunt Camp scan on this DTM first.'; return; }
+        if (!v) { document.getElementById('status').innerText = 'Run a Hunt Camp scan on this DTM first.'; return; }
+        withGridSync(v.grid, () => drawViewshedOverlay(v, r0, c0)); // r0/c0 are in that scan's grid
+    }
+    function drawViewshedOverlay(v, r0, c0) {
         const radiusM = readNum('hcViewRadiusM'), observerM = readNum('hcObserverM');
         const visible = new Uint8Array(v.W * v.H);
         const nRays = Math.min(8192, Math.max(720, Math.ceil(2 * Math.PI * radiusM / effRes)));
@@ -3331,9 +3490,10 @@
     // sort) only has to run once even across several scans/threshold changes.
     // Also caches filled/dir alongside accum, since HAND (below) needs those
     // same two intermediate rasters and there's no reason to recompute them.
-    let cachedFlow = null, cachedFlowW = 0, cachedFlowH = 0;
+    let cachedFlow = null, cachedFlowKey = '';
     async function getFlowData() {
-        if (cachedFlow && cachedFlowW === demWidth && cachedFlowH === demHeight) return cachedFlow;
+        const flowKey = `${demWidth}x${demHeight}@${demBounds.n},${demBounds.w},${demBounds.s},${demBounds.e}`; // a cropped scan grid is a different terrain
+        if (cachedFlow && cachedFlowKey === flowKey) return cachedFlow;
         const status = document.getElementById('status');
         status.innerText = "Computing drainage network (flow accumulation)...";
         await new Promise(r => setTimeout(r, 0));
@@ -3343,7 +3503,7 @@
         const filled = fillDepressions(denoised, demWidth, demHeight, nodataThresh);
         const dir = flowDirectionD8(filled, demWidth, demHeight, nodataThresh);
         const accum = flowAccumulation(dir, filled, demWidth, demHeight, nodataThresh);
-        cachedFlow = { denoised, filled, dir, accum }; cachedFlowW = demWidth; cachedFlowH = demHeight;
+        cachedFlow = { denoised, filled, dir, accum }; cachedFlowKey = flowKey;
         return cachedFlow;
     }
 
@@ -3608,15 +3768,11 @@
         // Cached so click-to-inspect and marker confirmation can look up the
         // environmental profile at any point without a fresh scan - this IS
         // the ground truth a settlement confirmation needs to be useful.
-        lastSettlementRasters = { waterwayDist, hand, slopeDegRaster, demWidth, demHeight };
+        lastSettlementRasters = { waterwayDist, hand, slopeDegRaster, grid: gridInfo() };
 
         if (settlementGL.gl) {
-            settlementGL.gl.bindTexture(settlementGL.gl.TEXTURE_2D, settlementGL.texture);
-            settlementGL.gl.getExtension('OES_texture_float');
-            settlementGL.gl.getExtension('OES_texture_float_linear');
-            settlementGL.gl.texImage2D(settlementGL.gl.TEXTURE_2D, 0, settlementGL.gl.LUMINANCE, demWidth, demHeight, 0, settlementGL.gl.LUMINANCE, settlementGL.gl.FLOAT, rank);
             if (!settlementGL.visible) settlementLayer.addTo(map); // auto-show so the result is immediately visible
-            renderGLLayer(settlementGL);
+            setLayerSource(settlementGL, buildRasterSource(rank, demWidth, demHeight, demBounds));
         }
 
         // Discrete "best spots" markers - clustering the top-ranked fifth
@@ -3664,9 +3820,9 @@
             // they are for a sinkhole or mound.
             const ring = ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
             L.polygon(ring, { color: '#dc2626', weight: 2, fillColor: '#dc2626', fillOpacity: 0.15, interactive: false }).addTo(polygonsLayer);
-            detectedFeatures.push({ mode: 'settlement', k, lat, lon, diameter, matchScore });
+            detectedFeatures.push({ mode: 'settlement', k, lat, lon, diameter, matchScore, grid: gridInfo() });
         }
-        lastExportRaster = { data: rank, name: 'settlement_likelihood_rank', mode: 'settlement' };
+        lastExportRaster = { data: rank, name: 'settlement_likelihood_rank', mode: 'settlement', grid: gridInfo(true) };
         last3DOverlay = null;
         updateExportButtons();
 
@@ -3679,16 +3835,31 @@
     // turns the requirement off) instead of silently producing results that
     // can't resolve middens or small vestibules.
     function checkDTMResolution() {
-        if (effRes <= 1.0 + 1e-6 || !document.getElementById('enforce1m').checked) return true;
+        if (effRes <= 1.005 || !document.getElementById('enforce1m').checked) return true;
         document.getElementById('status').innerText =
             `This DTM is ~${effRes.toFixed(2)} m/px, coarser than the 1 m minimum the workflow requires for human-scale features. ` +
-            `Zoom in (or raise Download Detail) and download again, or untick "Require ≤1 m/px DTM" to scan anyway.`;
+            `Set Resolution to Auto or 1 m (raise the memory budget or zoom in if Auto can't reach 1 m) and download again, or untick "Require ≤1 m/px DTM" to scan anyway.`;
         return false;
     }
 
     async function runScanner() {
-        if (!currentDEM) return;
+        if (!currentDEM || scanInProgress || downloadAbort) return;
         if (!checkDTMResolution()) return;
+        const pick = pickScanGrid();
+        if (pick.error) { document.getElementById('status').innerText = pick.error; return; }
+        scanInProgress = true;
+        document.getElementById('downloadBtn').disabled = true;
+        try {
+            await withGrid(pick.grid, runScannerOnGrid);
+            if (pick.cropped) document.getElementById('status').innerText += ` (Scanned the ${pick.grid.w.toLocaleString()} x ${pick.grid.h.toLocaleString()} px area in view; pan and scan again for other parts of the download.)`;
+        } finally {
+            scanInProgress = false;
+            document.getElementById('downloadBtn').disabled = false;
+        }
+    }
+
+    async function runScannerOnGrid() {
+        if (!currentDEM) return;
         const mode0 = document.getElementById('scanMode').value;
         if (mode0 === 'settlement') { await runSettlementScan(); return; }
 
@@ -4025,12 +4196,13 @@
             // it's purely visual and doesn't steal clicks from the marker/map.
             const ring = ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
             L.polygon(ring, { color: '#dc2626', weight: 2, fillColor: '#dc2626', fillOpacity: 0.15, interactive: false }).addTo(polygonsLayer);
-            detectedFeatures.push({ mode, k, lat, lon, diameter, matchScore });
+            detectedFeatures.push({ mode, k, lat, lon, diameter, matchScore, grid: gridInfo() });
         }
 
-        lastMetricRaster = baseScaleMetricRaster; lastScanMode = mode; lastDemWidth = demWidth; lastDemHeight = demHeight;
-        lastExportRaster = baseScaleMetricRaster ? { data: baseScaleMetricRaster, name: `${mode}_${modeMetricLabel(mode).toLowerCase().replace(/[^a-z]+/g, '_')}_m`, mode } : null;
+        lastMetricRaster = baseScaleMetricRaster; lastScanMode = mode; lastMetricGrid = gridInfo();
+        lastExportRaster = baseScaleMetricRaster ? { data: baseScaleMetricRaster, name: `${mode}_${modeMetricLabel(mode).toLowerCase().replace(/[^a-z]+/g, '_')}_m`, mode, grid: gridInfo(true) } : null;
         last3DOverlay = modeCtx && modeCtx.overlay3D ? modeCtx.overlay3D : (lastMask ? { candidateMask: lastMask } : null);
+        if (last3DOverlay) last3DOverlay.grid = gridInfo();
         const shownCount = filtered.length - suppressedCount;
         status.innerText = `Scan complete. Found ${shownCount} candidate feature(s).` +
             (suppressedCount > 0 ? ` (${suppressedCount} more matched a location you'd already marked not real, and were skipped.)` : '') +
@@ -4077,7 +4249,9 @@
     // converted through the SAME row/col -> lat/lon transform used for marker
     // placement elsewhere, rather than re-deriving a separate meters-to-
     // degrees conversion.
-    function ellipseRingLatLon(k, numPts) {
+    function ellipseRingLatLon(k, numPts, grid) {
+        const g = grid || gridInfo();
+        const demBounds = g.bounds, demWidth = g.w, demHeight = g.h, effRes = g.res; // the grid this feature was found on
         numPts = numPts || 32;
         const elong = Math.max(1.0, k.elongation);
         const bM = Math.sqrt(k.area / (Math.PI * elong));
@@ -4246,7 +4420,7 @@
     function exportShapefile() {
         if (detectedFeatures.length === 0) return;
         const features = detectedFeatures.map(f => ({
-            ring: ellipseRingLatLon(f.k, 32),
+            ring: ellipseRingLatLon(f.k, 32, f.grid),
             attrs: {
                 type: featureTypeCode(f.mode),
                 diameter_ft: metersToFeet(f.diameter),
@@ -4300,7 +4474,7 @@
             type: 'FeatureCollection',
             features: detectedFeatures.map((f, idx) => ({
                 type: 'Feature',
-                geometry: { type: 'Polygon', coordinates: [ellipseRingLatLon(f.k, 32)] },
+                geometry: { type: 'Polygon', coordinates: [ellipseRingLatLon(f.k, 32, f.grid)] },
                 properties: {
                     id: idx + 1,
                     type: featureTypeCode(f.mode),
@@ -4311,7 +4485,7 @@
                     elongation: +f.k.elongation.toFixed(3),
                     match_pct: f.matchScore,
                     lat: +f.lat.toFixed(6), lon: +f.lon.toFixed(6),
-                    dtm_res_m: +effRes.toFixed(3)
+                    dtm_res_m: +f.grid.res.toFixed(3)
                 }
             }))
         };
@@ -4364,11 +4538,11 @@
         return u8;
     }
     function exportMetricGeoTIFF() {
-        if (!lastExportRaster || !currentDEM) return;
-        const src = lastExportRaster.data;
-        const out = new Float32Array(demWidth * demHeight);
-        for (let i = 0; i < out.length; i++) out[i] = (currentDEM[i] < -100 || !(src[i] > -9000)) ? -9999 : src[i];
-        downloadBlob(new Blob([buildGeoTIFF(out, demWidth, demHeight, demBounds)], { type: 'image/tiff' }), `${lastExportRaster.name}.tif`);
+        if (!lastExportRaster) return;
+        const src = lastExportRaster.data, g = lastExportRaster.grid;
+        const out = new Float32Array(g.w * g.h);
+        for (let i = 0; i < out.length; i++) out[i] = (g.data[i] < -100 || !(src[i] > -9000)) ? -9999 : src[i];
+        downloadBlob(new Blob([buildGeoTIFF(out, g.w, g.h, g.bounds)], { type: 'image/tiff' }), `${lastExportRaster.name}.tif`);
     }
 
     // --- 5c. 3D WEBGL FLY-THROUGH (Phase 5) ---
@@ -4411,7 +4585,7 @@
             <canvas id="view3dCanvas" style="width:100%;height:100%;display:block;"></canvas>
             <div style="position:absolute;top:10px;left:10px;right:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;color:#e2e8f0;font:12px sans-serif;pointer-events:none;">
                 <div style="background:rgba(15,23,42,0.8);padding:8px 10px;border-radius:8px;pointer-events:auto;max-width:560px;line-height:1.4;">
-                    <b>3D Fly-Through</b> (bare-earth DTM, ${effRes.toFixed(2)} m/px)<br>
+                    <b>3D Fly-Through</b> (bare-earth DTM in view, ${fullDemGrid.res.toFixed(2)} m/px)<br>
                     Drag to look &middot; W/A/S/D or arrows to fly &middot; Q/E down/up &middot; Shift = fast &middot; wheel = forward/back<br>
                     <span style="color:#f87171">&#9632;</span> scan candidates &nbsp;<span style="color:#fbbf24">&#9632;</span> ${last3DOverlay && last3DOverlay.highlightMask ? 'pipeline context (bluff faces / choke points / sinking streams)' : 'run a karst workflow scan to add context'} &nbsp;<span style="color:#f472b6">&#9679;</span> markers
                     <div style="margin-top:4px;">Vertical exaggeration <input id="view3dExag" type="range" min="1" max="5" step="0.25" value="1.5" style="vertical-align:middle;width:120px;"> <span id="view3dExagVal">1.5x</span></div>
@@ -4428,44 +4602,63 @@
         if (!gl) { overlay.remove(); document.getElementById('status').innerText = 'Could not start WebGL for the 3D view (WebGL unavailable or too many contexts). Close other graphics-heavy tabs and try again.'; return; }
         const uintExt = gl.getExtension('OES_element_index_uint');
 
-        // ---- Mesh ----
-        const W = demWidth, H = demHeight, nd = -100;
-        const maxGrid = uintExt ? 700 : 255;
-        const step = Math.max(1, Math.ceil(Math.max(W, H) / maxGrid));
-        const gw = Math.floor((W - 1) / step) + 1, gh = Math.floor((H - 1) / step) + 1;
-        let minZ = Infinity, maxZ = -Infinity;
-        for (let i = 0; i < currentDEM.length; i++) { const z = currentDEM[i]; if (z >= nd) { if (z < minZ) minZ = z; if (z > maxZ) maxZ = z; } }
-        const cx = (W - 1) * effRes / 2, cz = (H - 1) * effRes / 2;
-        const zAt = (r, c) => { const z = currentDEM[Math.min(H-1, Math.max(0, r)) * W + Math.min(W-1, Math.max(0, c))]; return z >= nd ? z - minZ : 0; };
-        const cand = last3DOverlay && last3DOverlay.candidateMask && last3DOverlay.candidateMask.length === W * H ? last3DOverlay.candidateMask : null;
-        const hi = last3DOverlay && last3DOverlay.highlightMask && last3DOverlay.highlightMask.length === W * H ? last3DOverlay.highlightMask : null;
-        const nV = gw * gh;
-        const pos = new Float32Array(nV * 3), nrm = new Float32Array(nV * 3), col = new Float32Array(nV * 3);
-        const relief = Math.max(1, maxZ - minZ);
-        for (let gr = 0; gr < gh; gr++) for (let gc = 0; gc < gw; gc++) {
-            const v = gr * gw + gc, r = gr * step, c = gc * step;
-            const z = zAt(r, c);
-            pos[v*3] = c * effRes - cx; pos[v*3+1] = z; pos[v*3+2] = r * effRes - cz;
-            const dzdx = (zAt(r, c + step) - zAt(r, c - step)) / (2 * step * effRes);
-            const dzdz = (zAt(r + step, c) - zAt(r - step, c)) / (2 * step * effRes);
-            const nl = Math.hypot(dzdx, 1, dzdz);
-            nrm[v*3] = -dzdx / nl; nrm[v*3+1] = 1 / nl; nrm[v*3+2] = -dzdz / nl;
-            // Earth-tone ramp by elevation, overridden by overlay tints
-            // (block-max over this vertex's step x step footprint, so thin
-            // bench/bluff zones aren't lost when the mesh is decimated).
-            const t = (z) / relief;
-            let R = 0.36 + 0.3 * t, G = 0.42 + 0.12 * t, B = 0.28 + 0.1 * t;
-            if (currentDEM[r * W + c] < nd) { R = G = B = 0.1; }
-            let isCand = false, isHi = false;
-            if (cand || hi) {
-                for (let rr = r; rr < Math.min(H, r + step) && !isCand; rr++) for (let cc = c; cc < Math.min(W, c + step); cc++) {
-                    const i = rr * W + cc;
-                    if (cand && cand[i]) { isCand = true; break; }
-                    if (hi && hi[i]) isHi = true;
+        // ---- Terrain region: the part of the DTM in view (all of it if smaller) ----
+        // Geometry comes from a box-averaged mesh of up to 1024 x 1024
+        // vertices; the fine detail comes from a separate high-resolution
+        // normal-map texture (up to 4096 px, mipmapped) sampled per pixel.
+        // Lighting therefore keeps the full DTM detail even where the mesh is
+        // coarser, instead of turning into large flat triangles.
+        const g = fullDemGrid, nd = -100, res = g.res;
+        const win = visibleWindow(g) || { r0: 0, r1: g.h, c0: 0, c1: g.w };
+        const RW = win.c1 - win.c0, RH = win.r1 - win.r0;
+        const rb = { n: g.bounds.n - win.r0 / g.h * (g.bounds.n - g.bounds.s), s: g.bounds.n - win.r1 / g.h * (g.bounds.n - g.bounds.s),
+                     w: g.bounds.w + win.c0 / g.w * (g.bounds.e - g.bounds.w), e: g.bounds.w + win.c1 / g.w * (g.bounds.e - g.bounds.w) };
+        // Resample the region to ow x oh cells (NoData-aware): box-average
+        // when shrinking; bilinear when (nearly) 1:1 or enlarging, because
+        // duplicating whole rows/columns there would put stair-steps into
+        // the slopes and show up as stripes in the lighting.
+        function resample(ow, oh) {
+            const out = new Float32Array(ow * oh);
+            if (RW / ow < 1.5 && RH / oh < 1.5) {
+                const at = (r, c) => g.data[(win.r0 + Math.min(RH - 1, Math.max(0, r))) * g.w + win.c0 + Math.min(RW - 1, Math.max(0, c))];
+                for (let or = 0; or < oh; or++) {
+                    const fy = (or + 0.5) * RH / oh - 0.5, y0 = Math.floor(fy), ty = fy - y0;
+                    for (let oc = 0; oc < ow; oc++) {
+                        const fx = (oc + 0.5) * RW / ow - 0.5, x0 = Math.floor(fx), tx = fx - x0;
+                        const a = at(y0, x0), b = at(y0, x0 + 1), c = at(y0 + 1, x0), d = at(y0 + 1, x0 + 1);
+                        out[or * ow + oc] = (a < nd || b < nd || c < nd || d < nd)
+                            ? (a >= nd ? a : -9999)
+                            : (a * (1 - tx) + b * tx) * (1 - ty) + (c * (1 - tx) + d * tx) * ty;
+                    }
+                }
+                return out;
+            }
+            for (let or = 0; or < oh; or++) {
+                const sr0 = win.r0 + Math.floor(or * RH / oh), sr1 = Math.max(sr0 + 1, win.r0 + Math.floor((or + 1) * RH / oh));
+                for (let oc = 0; oc < ow; oc++) {
+                    const sc0 = win.c0 + Math.floor(oc * RW / ow), sc1 = Math.max(sc0 + 1, win.c0 + Math.floor((oc + 1) * RW / ow));
+                    let sum = 0, cnt = 0;
+                    for (let r = sr0; r < sr1; r++) for (let c = sc0; c < sc1; c++) { const v = g.data[r * g.w + c]; if (v >= nd) { sum += v; cnt++; } }
+                    out[or * ow + oc] = cnt ? sum / cnt : -9999;
                 }
             }
-            if (isCand) { R = 0.95; G = 0.25; B = 0.2; } else if (isHi) { R = 0.98; G = 0.72; B = 0.15; }
-            col[v*3] = R; col[v*3+1] = G; col[v*3+2] = B;
+            return out;
+        }
+        const maxGrid = uintExt ? 1024 : 255;
+        const ms = Math.max(1, Math.max(RW, RH) / maxGrid);
+        const gw = Math.max(2, Math.round(RW / ms)), gh = Math.max(2, Math.round(RH / ms));
+        const meshZ = resample(gw, gh);
+        let minZ = Infinity, maxZ = -Infinity;
+        for (const z of meshZ) if (z >= nd) { if (z < minZ) minZ = z; if (z > maxZ) maxZ = z; }
+        if (!isFinite(minZ)) { minZ = 0; maxZ = 1; }
+        const relief = Math.max(1, maxZ - minZ);
+        const sizeX = RW * res, sizeZ = RH * res, cx = sizeX / 2, cz = sizeZ / 2;
+        const nV = gw * gh;
+        const pos = new Float32Array(nV * 3), uv = new Float32Array(nV * 2);
+        for (let gr = 0; gr < gh; gr++) for (let gc = 0; gc < gw; gc++) {
+            const v = gr * gw + gc, z = meshZ[v];
+            pos[v*3] = gc / (gw - 1) * sizeX - cx; pos[v*3+1] = z >= nd ? z - minZ : 0; pos[v*3+2] = gr / (gh - 1) * sizeZ - cz;
+            uv[v*2] = gc / (gw - 1); uv[v*2+1] = gr / (gh - 1);
         }
         const nIdx = (gw - 1) * (gh - 1) * 6;
         const idx = nV > 65535 ? new Uint32Array(nIdx) : new Uint16Array(nIdx);
@@ -4474,54 +4667,121 @@
             const a = gr * gw + gc, b = a + 1, c2 = a + gw, d = c2 + 1;
             idx[k++] = a; idx[k++] = c2; idx[k++] = b; idx[k++] = b; idx[k++] = c2; idx[k++] = d;
         }
+
+        // ---- Normal + colour textures (power-of-two, so they can be mipmapped) ----
+        const maxTex = Math.min(4096, gl.getParameter(gl.MAX_TEXTURE_SIZE));
+        const pot = (x) => Math.min(maxTex, Math.pow(2, Math.max(6, Math.round(Math.log2(Math.max(1, x))))));
+        let tw = pot(RW), th = pot(RH);
+        while (tw * th > 16e6) { if (tw >= th) tw /= 2; else th /= 2; }
+        const texZ = resample(tw, th);
+        const dxM = sizeX / tw, dzM = sizeZ / th;
+        const nrmPx = new Uint8Array(tw * th * 4), albPx = new Uint8Array(tw * th * 4);
+        const ov = last3DOverlay && last3DOverlay.grid ? last3DOverlay : null;
+        const maskAny = (mask, og, lat0, lat1, lon0, lon1) => {
+            // any set cell of `mask` (on grid og) inside this lat/lon box
+            const b = og.bounds;
+            const r0 = Math.max(0, Math.floor((b.n - lat0) / (b.n - b.s) * og.h)), r1 = Math.min(og.h, Math.ceil((b.n - lat1) / (b.n - b.s) * og.h));
+            const c0 = Math.max(0, Math.floor((lon0 - b.w) / (b.e - b.w) * og.w)), c1 = Math.min(og.w, Math.ceil((lon1 - b.w) / (b.e - b.w) * og.w));
+            for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) if (mask[r * og.w + c]) return true;
+            return false;
+        };
+        const zT = (r, c) => { const v = texZ[Math.min(th - 1, Math.max(0, r)) * tw + Math.min(tw - 1, Math.max(0, c))]; return v; };
+        for (let r = 0; r < th; r++) {
+            const lat0 = rb.n - r / th * (rb.n - rb.s), lat1 = rb.n - (r + 1) / th * (rb.n - rb.s);
+            for (let c = 0; c < tw; c++) {
+                const i = r * tw + c, z = texZ[i], o = i * 4;
+                if (z < nd) { nrmPx.set([128, 255, 128, 255], o); albPx.set([25, 25, 28, 255], o); continue; }
+                const zl = zT(r, c - 1), zr = zT(r, c + 1), zu = zT(r - 1, c), zd = zT(r + 1, c);
+                const dzdx = ((zr >= nd ? zr : z) - (zl >= nd ? zl : z)) / (2 * dxM);
+                const dzds = ((zd >= nd ? zd : z) - (zu >= nd ? zu : z)) / (2 * dzM); // toward the south (+z)
+                const nl = Math.hypot(dzdx, 1, dzds);
+                nrmPx[o] = (-dzdx / nl * 0.5 + 0.5) * 255; nrmPx[o+1] = (1 / nl * 0.5 + 0.5) * 255; nrmPx[o+2] = (-dzds / nl * 0.5 + 0.5) * 255; nrmPx[o+3] = 255;
+                // Natural colouring: soil/leaf-litter on gentle ground, grey
+                // limestone on steep faces, slightly lighter with elevation.
+                const slopeDeg = Math.atan(Math.hypot(dzdx, dzds)) * 180 / Math.PI;
+                const rock = Math.min(1, Math.max(0, (slopeDeg - 28) / 20));
+                const t = (z - minZ) / relief;
+                let R = (0.40 + 0.08 * t) * (1 - rock) + 0.58 * rock, G = (0.40 + 0.06 * t) * (1 - rock) + 0.56 * rock, B = (0.27 + 0.05 * t) * (1 - rock) + 0.52 * rock;
+                if (ov) {
+                    const lon0 = rb.w + c / tw * (rb.e - rb.w), lon1 = rb.w + (c + 1) / tw * (rb.e - rb.w);
+                    if (ov.candidateMask && maskAny(ov.candidateMask, ov.grid, lat0, lat1, lon0, lon1)) { R = 0.95; G = 0.25; B = 0.2; }
+                    else if (ov.highlightMask && maskAny(ov.highlightMask, ov.grid, lat0, lat1, lon0, lon1)) { R = 0.98; G = 0.72; B = 0.15; }
+                }
+                albPx[o] = R * 255; albPx[o+1] = G * 255; albPx[o+2] = B * 255; albPx[o+3] = 255;
+            }
+        }
+        const mkTex = (px) => {
+            const t = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, t);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tw, th, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            gl.generateMipmap(gl.TEXTURE_2D);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            const aniso = gl.getExtension('EXT_texture_filter_anisotropic');
+            if (aniso) gl.texParameterf(gl.TEXTURE_2D, aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(8, gl.getParameter(aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
+            return t;
+        };
+        const texNrm = mkTex(nrmPx), texAlb = mkTex(albPx);
+
         // Markers for the current scan's features: a vertical stalk plus a
         // point on top, so they're findable from a distance.
-        const extent = Math.max(W, H) * effRes;
+        const extent = Math.max(sizeX, sizeZ);
         const stalk = Math.max(10, relief * 0.15);
         const mk = [];
         for (const f of detectedFeatures) {
-            const r = Math.round(((demBounds.n - f.lat) / (demBounds.n - demBounds.s)) * H);
-            const c = Math.round(((f.lon - demBounds.w) / (demBounds.e - demBounds.w)) * W);
-            const x = c * effRes - cx, zz = r * effRes - cz, y = zAt(r, c);
+            if (f.lat > rb.n || f.lat < rb.s || f.lon < rb.w || f.lon > rb.e) continue;
+            const fr = (rb.n - f.lat) / (rb.n - rb.s), fc = (f.lon - rb.w) / (rb.e - rb.w);
+            const zi = meshZ[Math.min(gh - 1, Math.round(fr * (gh - 1))) * gw + Math.min(gw - 1, Math.round(fc * (gw - 1)))];
+            const x = fc * sizeX - cx, zz = fr * sizeZ - cz, y = zi >= nd ? zi - minZ : 0;
             mk.push(x, y, zz, x, y + stalk, zz);
         }
         const markerPos = new Float32Array(mk);
 
         // ---- Shaders ----
-        const vs = `attribute vec3 a_pos; attribute vec3 a_nrm; attribute vec3 a_col;
+        const vs = `attribute vec3 a_pos; attribute vec2 a_uv;
             uniform mat4 u_mvp; uniform float u_zScale; uniform vec3 u_eye; uniform float u_pointSize;
-            varying vec3 v_nrm; varying vec3 v_col; varying float v_dist;
+            varying vec2 v_uv; varying float v_dist;
             void main() {
                 vec3 p = vec3(a_pos.x, a_pos.y * u_zScale, a_pos.z);
                 gl_Position = u_mvp * vec4(p, 1.0);
                 gl_PointSize = u_pointSize;
-                v_nrm = normalize(vec3(a_nrm.x, a_nrm.y / max(u_zScale, 0.01), a_nrm.z));
-                v_col = a_col; v_dist = distance(p, u_eye);
+                v_uv = a_uv; v_dist = distance(p, u_eye);
             }`;
         const fs = `precision mediump float;
-            varying vec3 v_nrm; varying vec3 v_col; varying float v_dist;
-            uniform vec3 u_sun; uniform float u_flat; uniform vec3 u_flatColor; uniform float u_fogFar;
+            varying vec2 v_uv; varying float v_dist;
+            uniform sampler2D u_nrm; uniform sampler2D u_alb;
+            uniform vec3 u_sun; uniform float u_nScale; uniform float u_flat; uniform vec3 u_flatColor; uniform float u_fogFar;
             void main() {
                 if (u_flat > 0.5) { gl_FragColor = vec4(u_flatColor, 1.0); return; }
-                float d = max(dot(normalize(v_nrm), u_sun), 0.0);
-                vec3 c = v_col * (0.28 + 0.72 * d);
-                float fog = clamp(v_dist / u_fogFar, 0.0, 1.0) * 0.55;
-                gl_FragColor = vec4(mix(c, vec3(0.043, 0.071, 0.125), fog), 1.0);
+                vec3 n = texture2D(u_nrm, v_uv).xyz * 2.0 - 1.0;
+                n = normalize(vec3(n.x * u_nScale, n.y, n.z * u_nScale)); // vertical exaggeration steepens the normal
+                vec3 alb = texture2D(u_alb, v_uv).rgb;
+                float d = max(dot(n, u_sun), 0.0);
+                float sky = 0.25 + 0.15 * n.y;              // soft skylight, less in steep hollows
+                vec3 c = alb * (sky + 0.75 * d);
+                float fog = clamp(v_dist / u_fogFar, 0.0, 1.0) * 0.5;
+                gl_FragColor = vec4(mix(c, vec3(0.55, 0.62, 0.72), fog), 1.0);
             }`;
         const prog = gl.createProgram();
         gl.attachShader(prog, createShader(gl, gl.VERTEX_SHADER, vs));
         gl.attachShader(prog, createShader(gl, gl.FRAGMENT_SHADER, fs));
         gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) console.error('3D view shader link failed:', gl.getProgramInfoLog(prog));
         gl.useProgram(prog);
         const loc = (n2) => gl.getAttribLocation(prog, n2), uni = (n2) => gl.getUniformLocation(prog, n2);
-        const aPos = loc('a_pos'), aNrm = loc('a_nrm'), aCol = loc('a_col');
+        const aPos = loc('a_pos'), aUv = loc('a_uv');
+        const uNScale = uni('u_nScale');
         const mkBuf = (data, target) => { const b = gl.createBuffer(); gl.bindBuffer(target || gl.ARRAY_BUFFER, b); gl.bufferData(target || gl.ARRAY_BUFFER, data, gl.STATIC_DRAW); return b; };
-        const bPos = mkBuf(pos), bNrm = mkBuf(nrm), bCol = mkBuf(col), bIdx = mkBuf(idx, gl.ELEMENT_ARRAY_BUFFER), bMk = mkBuf(markerPos.length ? markerPos : new Float32Array(3));
+        const bPos = mkBuf(pos), bUv = mkBuf(uv), bIdx = mkBuf(idx, gl.ELEMENT_ARRAY_BUFFER), bMk = mkBuf(markerPos.length ? markerPos : new Float32Array(3));
         const uMvp = uni('u_mvp'), uZ = uni('u_zScale'), uEye = uni('u_eye'), uSun = uni('u_sun'), uFlat = uni('u_flat'), uFlatColor = uni('u_flatColor'), uFog = uni('u_fogFar'), uPt = uni('u_pointSize');
+        gl.uniform1i(uni('u_nrm'), 0); gl.uniform1i(uni('u_alb'), 1);
         gl.enable(gl.DEPTH_TEST);
 
         // ---- Camera ----
         const cam = { x: 0, y: relief * 1.5 + extent * 0.15, z: cz * 1.15, yaw: 0, pitch: -0.35 };
+        gl.clearColor(0.55, 0.62, 0.72, 1); // hazy sky, matching the distance fog
         const held = new Set();
         let zScale = 1.5, last = performance.now(), raf = 0, dragging = null;
         const onKey = (e, down) => {
@@ -4569,29 +4829,30 @@
             const cw = Math.round(canvas.clientWidth * dpr), ch = Math.round(canvas.clientHeight * dpr);
             if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
             gl.viewport(0, 0, cw, ch);
-            gl.clearColor(0.043, 0.071, 0.125, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
             const eye = [cam.x, cam.y, cam.z];
             const dir = [Math.cos(cam.pitch) * Math.sin(cam.yaw), Math.sin(cam.pitch), -Math.cos(cam.pitch) * Math.cos(cam.yaw)];
             const view = mat4LookAt(eye, [eye[0] + dir[0], eye[1] + dir[1], eye[2] + dir[2]], [0, 1, 0]);
             const proj = mat4Perspective(Math.PI / 3, cw / Math.max(1, ch), Math.max(0.5, extent / 5000), extent * 6);
             gl.uniformMatrix4fv(uMvp, false, mat4Mul(proj, view));
-            gl.uniform1f(uZ, zScale); gl.uniform3fv(uEye, eye); gl.uniform1f(uFog, extent * 2.5);
+            gl.uniform1f(uZ, zScale); gl.uniform1f(uNScale, zScale); gl.uniform3fv(uEye, eye); gl.uniform1f(uFog, extent * 2.5);
             const az = parseFloat(document.getElementById('sunAz').value) * Math.PI / 180;
             const alt = parseFloat(document.getElementById('sunAlt').value) * Math.PI / 180;
             gl.uniform3f(uSun, Math.sin(az) * Math.cos(alt), Math.sin(alt), -Math.cos(az) * Math.cos(alt));
 
             // Terrain
             gl.uniform1f(uFlat, 0); gl.uniform1f(uPt, 1);
+            gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texNrm);
+            gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texAlb);
             gl.bindBuffer(gl.ARRAY_BUFFER, bPos); gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
-            gl.bindBuffer(gl.ARRAY_BUFFER, bNrm); gl.enableVertexAttribArray(aNrm); gl.vertexAttribPointer(aNrm, 3, gl.FLOAT, false, 0, 0);
-            gl.bindBuffer(gl.ARRAY_BUFFER, bCol); gl.enableVertexAttribArray(aCol); gl.vertexAttribPointer(aCol, 3, gl.FLOAT, false, 0, 0);
+            gl.bindBuffer(gl.ARRAY_BUFFER, bUv); gl.enableVertexAttribArray(aUv); gl.vertexAttribPointer(aUv, 2, gl.FLOAT, false, 0, 0);
             gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, bIdx);
             gl.drawElements(gl.TRIANGLES, nIdx, idx instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT, 0);
 
             // Feature markers
             if (markerPos.length) {
-                gl.disableVertexAttribArray(aNrm); gl.disableVertexAttribArray(aCol);
+                gl.disableVertexAttribArray(aUv);
                 gl.bindBuffer(gl.ARRAY_BUFFER, bMk); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
                 gl.uniform1f(uFlat, 1); gl.uniform3f(uFlatColor, 0.96, 0.45, 0.71);
                 gl.drawArrays(gl.LINES, 0, markerPos.length / 3);
@@ -4635,20 +4896,20 @@
             html = `<b>No elevation data at this point</b> (NoData gap)`;
         } else {
             html = `<b>Elevation:</b> ${metersToFeetInches(elev)}`;
-            const sameGrid = lastMetricRaster && lastDemWidth === demWidth && lastDemHeight === demHeight;
-            if (sameGrid) {
-                const metricVal = lastMetricRaster[i];
+            const mi = lastMetricRaster && lastMetricGrid ? gridIndexAt(lastMetricGrid, e.latlng.lat, e.latlng.lng) : -1;
+            if (mi >= 0) {
+                const metricVal = lastMetricRaster[mi];
                 const minMetric = feetToMeters(parseFloat(document.getElementById('minHeight').value));
                 const label = (lastScanMode === 'caves' || lastScanMode === 'ceremonial') ? 'Fill Depth' : modeMetricLabel(lastScanMode).replace(/^Max /, '');
                 const passes = metricVal >= minMetric;
                 html += `<br><b>${label}:</b> ${metersToFeetInches(metricVal)} (threshold: ${metersToFeetInches(minMetric)}) &mdash; ${passes ? 'meets threshold &#10003;' : 'below threshold'}`;
                 html += `<br><span style="font-size:0.75rem;color:#64748b">From the last ${modeFeatureName(lastScanMode)} scan.</span>`;
             } else {
-                html += `<br><span style="font-size:0.75rem;color:#64748b">Run a scan to see fill depth / relief at this point.</span>`;
+                html += `<br><span style="font-size:0.75rem;color:#64748b">Run a scan ${lastMetricRaster ? 'over this spot ' : ''}to see fill depth / relief at this point.</span>`;
             }
-            const sameSettlementGrid = lastSettlementRasters && lastSettlementRasters.demWidth === demWidth && lastSettlementRasters.demHeight === demHeight;
-            if (sameSettlementGrid) {
-                html += `<br><b>Settlement Likelihood:</b> ${metersToFeetInches(lastSettlementRasters.waterwayDist[i]*effRes)} from water, ${metersToFeetInches(lastSettlementRasters.hand[i])} above drainage, ${lastSettlementRasters.slopeDegRaster[i].toFixed(1)}&deg; slope`;
+            const si = lastSettlementRasters ? gridIndexAt(lastSettlementRasters.grid, e.latlng.lat, e.latlng.lng) : -1;
+            if (si >= 0) {
+                html += `<br><b>Settlement Likelihood:</b> ${metersToFeetInches(lastSettlementRasters.waterwayDist[si] * lastSettlementRasters.grid.res)} from water, ${metersToFeetInches(lastSettlementRasters.hand[si])} above drainage, ${lastSettlementRasters.slopeDegRaster[si].toFixed(1)}&deg; slope`;
             }
             // Trains the algorithm on a feature it missed entirely, independent
             // of which mode was last scanned - each button checks for its own
