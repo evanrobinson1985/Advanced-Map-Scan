@@ -187,6 +187,11 @@
             </optgroup>
         </select>
         <div id="modeDescription" style="font-size:0.72rem; color:#475569; margin-top:6px; line-height:1.4;"></div>
+        <button id="autoTuneBtn" onclick="autoDetectSettings()" style="background:#0f766e; color:white; border:none; cursor:pointer;">Auto-Detect Best Settings for This Area</button>
+        <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem; margin-top:6px;">
+            <input type="checkbox" id="autoTuneOnDownload" checked> Auto-detect after each download
+        </label>
+        <div id="autoTuneReport" style="display:none; font-size:0.72rem; color:#334155; background:#f0fdfa; border:1px solid #99f6e4; border-radius:6px; padding:6px 8px; margin-top:6px; line-height:1.4;"></div>
     </div>
 
     <div class="control-group">
@@ -1328,6 +1333,8 @@
         document.getElementById('status').innerText = statusMsg;
         document.getElementById("scanBtn").style.display = "block";
         document.getElementById("view3dBtn").style.display = "block";
+        document.getElementById('autoTuneReport').style.display = 'none';
+        if (document.getElementById('autoTuneOnDownload').checked) setTimeout(autoDetectSettings, 50);
     }
 
     // Loads a local bare-earth DTM GeoTIFF instead of the 3DEP download: your
@@ -3843,6 +3850,7 @@
     }
 
     async function runScanner() {
+        if (autoTuneRunning) await autoTuneRunning; // use the settings detected for this area
         if (!currentDEM || scanInProgress || downloadAbort) return;
         if (!checkDTMResolution()) return;
         const pick = pickScanGrid();
@@ -4444,6 +4452,219 @@
         a.href = url; a.download = 'detected_features_shapefile.zip';
         a.click();
         URL.revokeObjectURL(url);
+    }
+
+    // --- AUTO-DETECT SCAN SETTINGS ---
+    // Measures the terrain that will actually be scanned (the whole DTM, or
+    // the part in view for downloads over SCAN_MAX_PX) and sets every scan
+    // slider from it. Everything stays adjustable afterwards. The rules are
+    // deliberately simple and each one is reported, so a result can be
+    // checked and overridden rather than trusted blindly.
+    //
+    // Measured at full resolution (sampled): LiDAR noise and slope
+    // distribution. Measured on a <=2 Mpx block-averaged copy (fast, and
+    // these measures don't depend on fine resolution): local relief of bluff
+    // zones, drainage network, distance to channels.
+    const M2FT = 3.28084;
+    function setSliderValue(id, v) {
+        const el = document.getElementById(id);
+        if (!el) return NaN;
+        el.value = v;                        // range inputs clamp and step-snap this themselves
+        el.dispatchEvent(new Event('input')); // runs the slider's own readout handler
+        return parseFloat(el.value);
+    }
+    function percentile(values, p) {
+        if (!values.length) return NaN;
+        const a = Float64Array.from(values).sort();
+        return a[Math.min(a.length - 1, Math.floor(p / 100 * a.length))];
+    }
+
+    // One run at a time; a scan started meanwhile waits for it (runScanner).
+    let autoTuneRunning = null;
+    function autoDetectSettings() {
+        if (autoTuneRunning) return autoTuneRunning;
+        autoTuneRunning = autoDetectSettingsNow().finally(() => { autoTuneRunning = null; });
+        return autoTuneRunning;
+    }
+    async function autoDetectSettingsNow() {
+        if (!currentDEM || scanInProgress || downloadAbort) return;
+        const status = document.getElementById('status');
+        const btn = document.getElementById('autoTuneBtn');
+        scanInProgress = true;
+        btn.disabled = true;
+        document.getElementById('scanBtn').disabled = true;
+        try {
+            const g = fullDemGrid, nd = -100, res = g.res;
+            const win = g.w * g.h <= SCAN_MAX_PX ? { r0: 0, r1: g.h, c0: 0, c1: g.w } : (visibleWindow(g) || { r0: 0, r1: g.h, c0: 0, c1: g.w });
+            const RW = win.c1 - win.c0, RH = win.r1 - win.r0;
+            status.innerText = 'Auto-detect: measuring noise and slopes...';
+            await new Promise(r => setTimeout(r, 0));
+
+            // 1. Full-resolution samples (deterministic pseudo-random, so the
+            //    same area always gives the same settings)
+            let seed = 12345;
+            const rand = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 4294967296;
+            const noise = [], slopes = [];
+            for (let k = 0; k < 150000 && RW > 2 && RH > 2; k++) {
+                const r = win.r0 + 1 + Math.floor(rand() * (RH - 2)), c = win.c0 + 1 + Math.floor(rand() * (RW - 2));
+                let sum = 0, bad = false;
+                for (let dr = -1; dr <= 1 && !bad; dr++) for (let dc = -1; dc <= 1; dc++) {
+                    const v = g.data[(r + dr) * g.w + c + dc];
+                    if (v < nd) { bad = true; break; }
+                    sum += v;
+                }
+                if (bad) continue;
+                const i = r * g.w + c;
+                noise.push(Math.abs(g.data[i] - sum / 9));
+                const dzdx = (g.data[i + 1] - g.data[i - 1]) / (2 * res), dzdy = (g.data[i + g.w] - g.data[i - g.w]) / (2 * res);
+                slopes.push(Math.atan(Math.hypot(dzdx, dzdy)) * 180 / Math.PI);
+            }
+            if (slopes.length < 1000) throw new Error('too little valid elevation data in this area');
+            // residual of white noise vs its 3x3 mean has std 0.943 sigma; the
+            // median absolute value is 0.6745 std
+            const noiseSigma = percentile(noise, 50) / 0.6745 / 0.943;
+            const slopeP50 = percentile(slopes, 50), slopeP95 = percentile(slopes, 95), slopeP98 = percentile(slopes, 98);
+
+            // 2. Block-averaged analysis grid
+            status.innerText = 'Auto-detect: analysing relief and drainage...';
+            await new Promise(r => setTimeout(r, 0));
+            const f = Math.max(1, Math.ceil(Math.sqrt(RW * RH / 2e6)));
+            const dw = Math.max(8, Math.floor(RW / f)), dh = Math.max(8, Math.floor(RH / f));
+            const d = new Float32Array(dw * dh);
+            for (let r = 0; r < dh; r++) for (let c = 0; c < dw; c++) {
+                let sum = 0, cnt = 0;
+                for (let rr = 0; rr < f; rr++) for (let cc = 0; cc < f; cc++) {
+                    const v = g.data[(win.r0 + r * f + rr) * g.w + win.c0 + c * f + cc];
+                    if (v >= nd) { sum += v; cnt++; }
+                }
+                d[r * dw + c] = cnt ? sum / cnt : -9999;
+            }
+            const b = g.bounds, dLat = (b.n - b.s) / g.h, dLon = (b.e - b.w) / g.w;
+            const dg = { data: d, w: dw, h: dh, res: res * f,
+                         bounds: { n: b.n - win.r0 * dLat, s: b.n - (win.r0 + dh * f) * dLat, w: b.w + win.c0 * dLon, e: b.w + (win.c0 + dw * f) * dLon } };
+            const m = await withGrid(dg, async () => {
+                const dres = effRes, n = dw * dh;
+                const slope = computeSlopeDegrees(d, dw, dh, dres, nd);
+                // Local relief (max - min within 25 m) in steep zones = typical bluff height
+                const R = Math.max(1, Math.round(25 / dres));
+                const hiIn = new Float32Array(n), loIn = new Float32Array(n);
+                for (let i = 0; i < n; i++) { const ok = d[i] >= nd; hiIn[i] = ok ? d[i] : -Infinity; loIn[i] = ok ? d[i] : Infinity; }
+                const hi = extremeFilter2D(hiIn, dw, dh, R, true), lo = extremeFilter2D(loIn, dw, dh, R, false);
+                const steepRelief = [], allRelief = [], elev = [];
+                for (let i = 0; i < n; i++) {
+                    if (d[i] < nd || !isFinite(hi[i]) || !isFinite(lo[i])) continue;
+                    const rel = hi[i] - lo[i];
+                    allRelief.push(rel); elev.push(d[i]);
+                    if (slope[i] >= 20) steepRelief.push(rel);
+                }
+                const bluffH = steepRelief.length >= 50 ? percentile(steepRelief, 50) : 0.5 * percentile(allRelief, 90);
+                // Drainage network
+                const filled = fillDepressions(boxSmooth(d, dw, dh, 1, nd), dw, dh, nd);
+                const dir = flowDirectionD8(filled, dw, dh, nd);
+                const acc = flowAccumulation(dir, filled, dw, dh, nd);
+                const cellAc = dres * dres / 4046.86;
+                const accAc = [];
+                let maxAc = 0;
+                for (let i = 0; i < n; i++) if (d[i] >= nd) { const a = acc[i] * cellAc; accAc.push(a); if (a > maxAc) maxAc = a; }
+                const channelAc = Math.min(20, Math.max(0.5, percentile(accAc, 97)));
+                const chan = new Uint8Array(n);
+                for (let i = 0; i < n; i++) if (acc[i] * cellAc >= channelAc) chan[i] = 1;
+                const dist = distanceToMask(chan, dw, dh);
+                const gentleDist = [];
+                for (let i = 0; i < n; i++) if (d[i] >= nd && slope[i] < 10 && isFinite(dist[i])) gentleDist.push(dist[i] * dres);
+                return { bluffH, maxAc, channelAc, gentleDistMed: percentile(gentleDist, 50),
+                         elevRange: percentile(elev, 99) - percentile(elev, 1),
+                         widthM: dw * dres, heightM: dh * dres, steepFrac: steepRelief.length / Math.max(1, allRelief.length) };
+            });
+
+            // 3. Derive settings
+            const applied = [];
+            const note = (label, value) => applied.push(`<li>${label}: <b>${value}</b></li>`);
+            const minDetM = Math.max(0.1, 5 * noiseSigma);                 // smallest real relief distinguishable from noise
+            const minDiamFt = Math.ceil(3 * res * M2FT);                  // ~3 cells across
+
+            // Phase 2 - base camps
+            const bluffSlope = setSliderValue('bcBluffSlope', slopeP98 >= 45 ? 40 : Math.max(25, Math.min(40, Math.round(slopeP98 - 5))));
+            note('Min bluff face slope', `${bluffSlope}&deg;`);
+            const faceWidth = m.bluffH / Math.tan(bluffSlope * Math.PI / 180);
+            const tpiR = setSliderValue('bcTpiRadiusM', Math.max(10, Math.min(50, Math.round(2 * faceWidth + 10))));
+            note('Base-camp TPI radius', `${tpiR} m`);
+            note('LRM smoothing radius', `${setSliderValue('bcLrmRadiusM', Math.max(10, Math.min(40, Math.round(tpiR * 0.6))))} m`);
+            const benchSlope = setSliderValue('bcBenchSlope', slopeP50 > 20 ? 15 : slopeP50 < 5 ? 8 : 12);
+            note('Max bench slope', `${benchSlope}&deg;`);
+            note('Midden mounding flag', `${setSliderValue('bcMiddenM', Math.max(0.3, Math.round(4 * noiseSigma / 0.05) * 0.05)).toFixed(2)} m`);
+            let perennial = 100, waterNote = '';
+            if (m.maxAc < 100) {
+                perennial = Math.max(5, Math.round(m.maxAc * 0.5 / 5) * 5);
+                waterNote = ` (no stream in this area drains the usual 100 acres, so it was lowered to count the largest drainage here; check that it really runs year-round)`;
+            }
+            note('Year-round stream min drainage', `${setSliderValue('perennialAcres', perennial)} ac${waterNote}`);
+            // 100-yr flood depth grows with stream size; never more than half the local relief
+            let flood = m.maxAc < 500 ? 1.5 : m.maxAc < 10000 ? 3 : 5;
+            flood = Math.max(0.5, Math.min(flood, m.elevRange / 2));
+            flood = setSliderValue('floodHandM', flood);
+            note('100-yr floodplain cutoff', `${flood.toFixed(2)} m above drainage`);
+
+            // Phase 3 - hunt camps
+            note('Min outcrop slope', `${setSliderValue('hcOutcropSlope', Math.max(25, Math.min(45, Math.round(slopeP95 - 5))))}&deg;`);
+            const viewR = setSliderValue('hcViewRadiusM', Math.max(300, Math.min(1500, Math.round(0.5 * Math.min(m.widthM, m.heightM) / 50) * 50)));
+            note('Viewshed radius', `${viewR} m`);
+            note('Min visible valley floor', `${setSliderValue('hcMinViewHa', Math.max(0.5, Math.min(50, Math.round(0.016 * Math.PI * viewR * viewR / 1e4 * 2) / 2))).toFixed(1)} ha`);
+
+            // Drainage thresholds shared by several modes
+            const chanAc = setSliderValue('waterwayThreshold', Math.round(m.channelAc * 10) / 10);
+            note('Waterway / channel threshold', `${chanAc.toFixed(1)} ac`);
+            note('Sinking stream min drainage', `${setSliderValue('sinkStreamAcres', Math.max(0.5, Math.min(50, Math.round(chanAc * 2 * 2) / 2))).toFixed(1)} ac`);
+
+            // Rockshelters and settlement
+            note('Shelter min cliff slope', `${setSliderValue('shelterCliffSlope', Math.max(35, Math.min(60, Math.round(slopeP98 - 2))))}&deg;`);
+            const handMinFt = setSliderValue('handMinFt', Math.round(flood * M2FT * 2) / 2);
+            setSliderValue('handMaxFt', Math.max(handMinFt + 10, 26));
+            note('Settlement flood-safety band', `${handMinFt}&ndash;${document.getElementById('handMaxFt').value} ft above drainage`);
+            if (isFinite(m.gentleDistMed)) note('Settlement water-distance decay', `${setSliderValue('waterDecayFt', Math.max(200, Math.min(1500, Math.round(m.gentleDistMed * M2FT / 25) * 25)))} ft`);
+
+            // Geometric thresholds per mode: noise-aware minimum depth/relief
+            // and a resolution-aware minimum diameter. Confirmed training
+            // examples are then re-applied, so a threshold is never narrower
+            // than a site you have already confirmed.
+            const ftQ = (mft) => Math.round(mft * 4) / 4;
+            const geo = {
+                caves: { minHeight: Math.max(1, ftQ(0.8 * minDetM * M2FT)) },
+                ceremonial: { minHeight: Math.max(2, ftQ(1.2 * minDetM * M2FT)) },
+                huntcamp: { minHeight: Math.max(2, ftQ(0.8 * minDetM * M2FT)) },
+                basecamp: { minHeight: Math.max(6, Math.min(15, ftQ(0.4 * m.bluffH * M2FT))) },
+                shelter: { minHeight: Math.max(6, Math.min(15, ftQ(0.4 * m.bluffH * M2FT))) },
+            };
+            for (const [mode, o] of Object.entries(geo)) {
+                const base = defaultModeThresholds(mode);
+                trainingData[mode].thresholds = { ...base, ...o, minDiameter: Math.max(base.minDiameter, minDiamFt) };
+                for (const ex of trainingData[mode].examples) maybeWidenThresholds(mode, ex);
+            }
+            saveTrainingData();
+            applyModeThresholds(activeThresholdMode);
+            note('Min depth (caves / ceremonial sinks)', `${trainingData.caves.thresholds.minHeight} ft / ${trainingData.ceremonial.thresholds.minHeight} ft`);
+            note('Min bluff height (base camps / shelters)', `${trainingData.basecamp.thresholds.minHeight} ft`);
+            note('Min outcrop prominence', `${trainingData.huntcamp.thresholds.minHeight} ft`);
+            note('Min feature diameter', `${Math.max(defaultModeThresholds('caves').minDiameter, minDiamFt)} ft or more`);
+
+            const detected = `<b>Detected</b> (${(m.widthM / 1000).toFixed(1)} &times; ${(m.heightM / 1000).toFixed(1)} km${g.w * g.h > SCAN_MAX_PX ? ', the part in view' : ''}): ` +
+                `LiDAR noise &plusmn;${noiseSigma.toFixed(2)} m, relief ${Math.round(m.elevRange)} m, median slope ${slopeP50.toFixed(0)}&deg; (steepest 2%: ${slopeP98.toFixed(0)}&deg;+), ` +
+                `typical bluff ${m.bluffH.toFixed(1)} m, largest stream in view drains ${m.maxAc >= 10 ? Math.round(m.maxAc).toLocaleString() : m.maxAc.toFixed(1)} ac` +
+                `${m.maxAc > 0 ? ' (only drainage that falls inside the download is counted)' : ''}.`;
+            const trained = GEOMETRIC_MODES.some(md => trainingData[md].examples.length) ? ' Thresholds were re-widened to include your confirmed examples.' : '';
+            const rep = document.getElementById('autoTuneReport');
+            rep.innerHTML = `${detected}<details style="margin-top:4px;"><summary>Settings applied (${applied.length})</summary><ul style="margin:4px 0; padding-left:18px;">${applied.join('')}</ul></details>` +
+                `<div style="color:#64748b; margin-top:2px;">Mound shape presets are unchanged. Adjust any slider by hand if needed.${trained}</div>`;
+            rep.style.display = 'block';
+            status.innerText = 'Scan settings auto-detected for this area. See the summary under Feature Detection; every slider can still be adjusted.';
+        } catch (err) {
+            status.innerText = `Could not auto-detect settings: ${err.message || err}.`;
+            console.error(err);
+        } finally {
+            scanInProgress = false;
+            btn.disabled = false;
+            document.getElementById('scanBtn').disabled = false;
+        }
     }
 
     // --- 5b. OPTIMIZED OUTPUTS: GeoJSON + GeoTIFF (Phase 5) ---
