@@ -801,9 +801,14 @@
     `;
 
     const fsSource = `
+        #ifdef GL_FRAGMENT_PRECISION_HIGH
         precision highp float;
+        #else
+        precision mediump float;
+        #endif
         varying vec2 v_px;
         uniform sampler2D u_tex;
+        uniform float u_heightOffset;  // tile's base height (textures hold height above it)
         uniform vec2 u_texOrigin;      // level-pixel coordinate of this texture's (0,0) texel edge
         uniform vec2 u_texSize;
         uniform float u_pixelRes;      // ground meters per level pixel
@@ -813,7 +818,17 @@
         uniform float u_displayMode;   // 0 = hillshade, 1 = slope, 2 = settlement rank
         uniform float u_multiDirectional;
 
-        float fetchH(vec2 ij) { return texture2D(u_tex, (ij + 0.5) / u_texSize).r; }
+        // Heights are packed as exact 24-bit millimetres above the tile's
+        // lowest point in RGB (alpha 0 = NoData). Float textures are not
+        // used on purpose: many phone GPUs silently store them as 16-bit
+        // floats, which at a few hundred metres of elevation can only step
+        // in 0.25-0.5 m increments and turn slopes into jagged terraces.
+        float fetchH(vec2 ij) {
+            vec4 t = texture2D(u_tex, (ij + 0.5) / u_texSize);
+            if (t.a < 0.5) return -9999.0;
+            vec3 b = floor(t.rgb * 255.0 + 0.5);
+            return (b.r * 65536.0 + b.g * 256.0 + b.b) * 0.001;
+        }
         vec4 rowVals(vec2 b, float c) {
             vec4 v = vec4(fetchH(b), fetchH(b + vec2(1.0, 0.0)), fetchH(b + vec2(2.0, 0.0)), fetchH(b + vec2(3.0, 0.0)));
             return mix(v, vec4(c), step(v, vec4(-100.0))); // NoData neighbours take the centre value
@@ -850,7 +865,7 @@
             float centre = fetchH(floor(local));
             if (centre < -100.0) { gl_FragColor = vec4(0.0); return; }
             if (u_displayMode > 1.5) {
-                vec4 s = suitability(clamp(centre, 0.0, 1.0));
+                vec4 s = suitability(clamp(centre + u_heightOffset, 0.0, 1.0));
                 gl_FragColor = vec4(s.rgb * s.a, s.a); // premultiplied alpha
                 return;
             }
@@ -927,8 +942,9 @@
     // buffers for one layer. Tile textures are created lazily per render.
     function initGLResources(ctx) {
         const gl = ctx.gl;
-        if (!gl.getExtension('OES_texture_float')) {
-            document.getElementById('status').innerText = 'This GPU/browser lacks float textures (OES_texture_float), so the terrain layers cannot be drawn.';
+        const hp = gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+        if (!hp || hp.precision < 23) {
+            document.getElementById('status').innerText = 'This GPU lacks full-precision fragment shaders, so terrain shading may show banding.';
         }
         const prog = gl.createProgram();
         gl.attachShader(prog, createShader(gl, gl.VERTEX_SHADER, vsSource));
@@ -940,7 +956,7 @@
         ctx.aClip = gl.getAttribLocation(prog, 'a_clip');
         ctx.aPx = gl.getAttribLocation(prog, 'a_px');
         const u = (n) => gl.getUniformLocation(prog, n);
-        ctx.u = { tex: u('u_tex'), texOrigin: u('u_texOrigin'), texSize: u('u_texSize'), pixelRes: u('u_pixelRes'),
+        ctx.u = { tex: u('u_tex'), texOrigin: u('u_texOrigin'), texSize: u('u_texSize'), pixelRes: u('u_pixelRes'), heightOffset: u('u_heightOffset'),
                   sunAz: u('u_sunAzimuth'), sunAlt: u('u_sunAltitude'), zExag: u('u_zExaggeration'),
                   displayMode: u('u_displayMode'), multiDir: u('u_multiDirectional') };
         ctx.tiles = new Map();
@@ -1273,8 +1289,19 @@
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, tw, th, 0, gl.LUMINANCE, gl.FLOAT, buf);
-        t = { tex, x0, y0, tw, th, smoothKey: smoothedBuf ? skey : null };
+        // Pack as 24-bit millimetres above the tile minimum (see fetchH)
+        let base = Infinity;
+        for (let i = 0; i < buf.length; i++) if (buf[i] >= -100 && buf[i] < base) base = buf[i];
+        if (!isFinite(base)) base = 0;
+        const px = new Uint8Array(tw * th * 4);
+        for (let i = 0; i < buf.length; i++) {
+            const v = buf[i];
+            if (!(v >= -100)) continue; // NoData: alpha stays 0
+            const q = Math.min(16777215, Math.max(0, Math.round((v - base) * 1000)));
+            px[i*4] = q >>> 16; px[i*4+1] = (q >>> 8) & 255; px[i*4+2] = q & 255; px[i*4+3] = 255;
+        }
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, tw, th, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        t = { tex, x0, y0, tw, th, base, smoothKey: smoothedBuf ? skey : null };
         ctx.tiles.set(key, t);
         while (ctx.tiles.size > GL_MAX_TILES) {
             const [oldKey, old] = ctx.tiles.entries().next().value;
@@ -1373,6 +1400,7 @@
                 gl.bindTexture(gl.TEXTURE_2D, t.tex);
                 gl.uniform2f(ctx.u.texOrigin, t.x0, t.y0);
                 gl.uniform2f(ctx.u.texSize, t.tw, t.th);
+                gl.uniform1f(ctx.u.heightOffset, t.base);
                 gl.bufferData(gl.ARRAY_BUFFER, verts, gl.DYNAMIC_DRAW);
                 gl.drawArrays(gl.TRIANGLE_STRIP, 0, (SEG + 1) * 2);
             }
