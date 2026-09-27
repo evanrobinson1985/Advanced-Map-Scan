@@ -741,6 +741,22 @@
         last3DOverlays = [];
         updateDetectionLegend();
     }
+    // Removes one mode's results only (map layer, feature list, 3D tint),
+    // leaving every other completed scan in place.
+    function clearModeDetections(mode) {
+        if (modeLayers[mode]) { modeLayers[mode].clearLayers(); detectedFeaturesLayer.addLayer(modeLayers[mode]); }
+        detectedFeatures = detectedFeatures.filter(f => f.mode !== mode);
+        last3DOverlays = last3DOverlays.filter(o => o.mode !== mode);
+        if (mode === 'settlement' && settlementGL.visible) map.removeLayer(settlementLayer);
+        updateDetectionLegend();
+        if (typeof updateExportButtons === 'function') updateExportButtons();
+    }
+    function clearAllDetectionsByUser() {
+        clearDetections();
+        if (settlementGL.visible) map.removeLayer(settlementLayer);
+        updateExportButtons();
+        document.getElementById('status').innerText = 'All detected features cleared.';
+    }
     function modeVisible(mode) { return !modeLayers[mode] || detectedFeaturesLayer.hasLayer(modeLayers[mode]); }
     function toggleModeLayer(mode, on) {
         const lyr = modeLayer(mode);
@@ -763,12 +779,15 @@
         for (const f of detectedFeatures) counts[f.mode] = (counts[f.mode] || 0) + 1;
         const modes = SCAN_ALL_ORDER.filter(m => counts[m]);
         if (!modes.length) { div.style.display = 'none'; return; }
-        div.innerHTML = `<b>Detected features</b> (${detectedFeatures.length})` + modes.map(m => {
+        div.innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px;"><b>Detected features (${detectedFeatures.length})</b>` +
+            `<a href="#" onclick="event.preventDefault(); clearAllDetectionsByUser();" style="color:#b91c1c;font-size:11px;">Clear all</a></div>` + modes.map(m => {
             const st = MODE_STYLE[m];
-            return `<label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+            return `<div style="display:flex;align-items:center;gap:6px;margin-top:4px;">
+                <label style="display:flex;align-items:center;gap:6px;cursor:pointer;flex:1;">
                 <input type="checkbox" ${modeVisible(m) ? 'checked' : ''} onchange="toggleModeLayer('${m}', this.checked)" style="margin:0;">
                 <span style="background:${st.color};color:#fff;border-radius:50%;width:16px;height:16px;font:bold 10px/16px sans-serif;text-align:center;flex:none;">${st.letter}</span>
-                <span>${st.label}: <b>${counts[m]}</b></span></label>`;
+                <span>${st.label}: <b>${counts[m]}</b></span></label>
+                <a href="#" title="Remove these results" onclick="event.preventDefault(); clearModeDetections('${m}');" style="color:#64748b;text-decoration:none;font-weight:bold;padding:0 2px;">&#10005;</a></div>`;
         }).join('');
         div.style.display = 'block';
     }
@@ -4413,7 +4432,7 @@
         lastSettlementRasters = { waterwayDist, hand, slopeDegRaster, grid: gridInfo() };
 
         if (settlementGL.gl) {
-            if (!settlementGL.visible && !scanAllActive) settlementLayer.addTo(map); // auto-show (not during Scan All, where it would cover the other results)
+            if (!settlementGL.visible && !scanAllActive && !detectedFeatures.some(f => f.mode !== 'settlement')) settlementLayer.addTo(map); // auto-show only when it won't cover other results
             setLayerSource(settlementGL, buildRasterSource(rank, demWidth, demHeight, demBounds));
         }
 
@@ -4427,7 +4446,7 @@
         // worded for what a settlement confirmation actually requires.
         status.innerText = "Finding top candidate areas...";
         await new Promise(r => setTimeout(r, 0));
-        if (!scanAllActive) clearDetections();
+        clearModeDetections('settlement');
         const hotspotPercent = parseFloat(document.getElementById('hotspotPercent').value);
         const hotspotRankThreshold = 1 - hotspotPercent / 100;
         const hotspotMask = new Uint8Array(demWidth * demHeight);
@@ -4518,7 +4537,6 @@
         btns.forEach(b => b.disabled = true);
         cancelBtn.disabled = false; cancelBtn.innerText = 'Stop Scan All';
         wrap.style.display = 'block'; bar.style.width = '0%';
-        clearDetections();
         const counts = [];
         const t0 = Date.now();
         try {
@@ -4562,7 +4580,6 @@
         const status = document.getElementById("status");
         const scanBtn = document.getElementById("scanBtn");
         scanBtn.disabled = true;
-        if (!scanAllActive) clearDetections(); // Scan All keeps every mode's results
 
         const mode = document.getElementById('scanMode').value;
         // Sliders are entered in feet; the algorithm itself stays in meters
@@ -4855,6 +4872,9 @@
         }
         finalists.sort((x, y) => y.matchScore - x.matchScore);
         heldBackCount += Math.max(0, finalists.length - maxResults);
+        // New results for this mode replace only this mode's previous ones;
+        // other modes' completed scans stay on the map.
+        clearModeDetections(mode);
         for (const { k, lat, lon, diameter, extra, matchScore } of finalists.slice(0, maxResults)) {
             const volume = k.sumMetric * effRes * effRes;
 
@@ -4950,7 +4970,8 @@
             (droppedCount ? `; ${droppedCount} failed a required check` : '') +
             (heldBackCount ? `; ${heldBackCount} lower-ranked candidate(s) held back (raise Max results per mode to see them)` : '') +
             (suppressedCount > 0 ? `; ${suppressedCount} matched a spot you marked not real` : '') + '.' +
-            (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '');
+            (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '') +
+            (!scanAllActive && detectedFeatures.some(f => f.mode !== mode) ? ' Results from your other scans are still shown (see the legend, top left).' : '');
         updateExportButtons();
         scanBtn.disabled = false;
     }
