@@ -593,6 +593,13 @@
         <button id="exportShpBtn" onclick="exportShapefile()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Shapefile (.zip)</button>
         <button id="exportGeoJsonBtn" onclick="exportGeoJSON()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Candidates (GeoJSON)</button>
         <button id="exportTiffBtn" onclick="exportMetricGeoTIFF()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Analysis Raster (GeoTIFF)</button>
+        <div id="gpxRow" style="display:none; margin-top:6px;">
+            <label style="font-size:0.8rem; display:block; margin-bottom:3px;">GPX file name (all detected features, one waypoint each)</label>
+            <div style="display:flex; gap:6px; align-items:center;">
+                <input type="text" id="gpxFileName" value="detected_features" style="flex:1; min-width:0; padding:8px; border:1px solid #cbd5e1; border-radius:6px; font-size:0.9rem;">
+                <button onclick="exportGPX()" style="width:auto; margin-top:0; background:#0f766e; color:white; border:none; cursor:pointer;">Export GPX</button>
+            </div>
+        </div>
         <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">
             Caves: Priority-Flood depression fill (closed-basin/doline detection). Mounds: Local Relief Model via morphological opening (regional-trend removal, radius set by Trend Radius above), scanned at three scales and merged since one radius alone can't see both small and large mounds well. Shelters: flags flat ground at the base of a real nearby cliff - not the overhang itself, which no bare-earth elevation model can see, the same reason a horizontal cave mouth can't be seen either. Waterways are derived straight from the DEM (flow accumulation, same technique as ArcGIS/QGIS hydrology tools) and excluded unless a candidate is an obviously deep pit or large opening despite the overlap - real sites still get a modest boost for sitting near (not on) a waterway, since they cluster near water. All results are algorithmic candidates &mdash; verify in the field. Click the map any time to inspect elevation, depth/relief, and to confirm a feature it did or didn't find.
         </div>
@@ -2539,12 +2546,7 @@
     }
 
     function exportTrainingData() {
-        const blob = new Blob([JSON.stringify(trainingData, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'lidar-scanner-training-data.json';
-        a.click();
-        URL.revokeObjectURL(url);
+        downloadBlob(new Blob([JSON.stringify(trainingData, null, 2)], { type: 'application/json' }), 'lidar-scanner-training-data.json');
     }
     function importTrainingData(fileInput) {
         const file = fileInput.files[0];
@@ -5285,12 +5287,7 @@
             { name: 'detected_features.dbf', data: dbf },
             { name: 'detected_features.prj', data: new TextEncoder().encode(prj) },
         ]);
-        const blob = new Blob([zipBytes], { type: 'application/zip' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = 'detected_features_shapefile.zip';
-        a.click();
-        URL.revokeObjectURL(url);
+        downloadBlob(new Blob([zipBytes], { type: 'application/zip' }), 'detected_features_shapefile.zip');
     }
 
     // --- AUTO-DETECT SCAN SETTINGS ---
@@ -5520,13 +5517,104 @@
         document.getElementById('exportShpBtn').style.display = hasFeatures ? 'block' : 'none';
         document.getElementById('exportGeoJsonBtn').style.display = hasFeatures ? 'block' : 'none';
         document.getElementById('exportTiffBtn').style.display = lastExportRaster ? 'block' : 'none';
+        document.getElementById('gpxRow').style.display = hasFeatures ? 'block' : 'none';
     }
-    function downloadBlob(blob, filename) {
+    // Saves a file. Where the browser supports the File System Access API
+    // (desktop Chrome / Edge), a Save dialog lets you pick the folder and
+    // file name. Elsewhere it falls back to a normal download under the
+    // given name (Android Chrome then offers to save or rename it).
+    async function downloadBlob(blob, filename) {
+        if (window.showSaveFilePicker) {
+            try {
+                const ext = (filename.match(/\.[^.]+$/) || ['.bin'])[0];
+                const handle = await window.showSaveFilePicker({
+                    suggestedName: filename,
+                    types: [{ description: ext.slice(1).toUpperCase() + ' file', accept: { [blob.type || 'application/octet-stream']: [ext] } }]
+                });
+                const w = await handle.createWritable();
+                await w.write(blob);
+                await w.close();
+                document.getElementById('status').innerText = `Saved ${handle.name}.`;
+                return;
+            } catch (e) {
+                if (e && e.name === 'AbortError') return; // user cancelled the dialog
+                console.warn('Save dialog unavailable, falling back to download', e);
+            }
+        }
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url; a.download = filename;
+        document.body.appendChild(a);
         a.click();
+        a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    // ---- GPX export ----
+    // One waypoint per detected feature. Types are told apart three ways,
+    // so they show distinctly in whatever app/device opens the file:
+    //  - <sym>: a standard Garmin-style symbol name, which Garmin devices,
+    //    BaseCamp, Gaia GPS, CalTopo, OsmAnd and most GPX apps map to icons
+    //  - <type> and a name prefix (type letter + number, e.g. "E03 ...")
+    //  - OsmAnd colour extension matching the app's marker colours
+    const GPX_SYMBOLS = {
+        basecamp: 'Campground', huntcamp: 'Hunting Area', ceremonial: 'Tunnel', entrance: 'Mine',
+        caves: 'Pin, Blue', mounds: 'Summit', shelter: 'Block, Red', settlement: 'Residence'
+    };
+    const GPX_TYPE_NAMES = {
+        basecamp: 'Base camp', huntcamp: 'Hunt camp', ceremonial: 'Ceremonial karst', entrance: 'Cave entrance setting',
+        caves: 'Cave or sinkhole', mounds: 'Mound', shelter: 'Rockshelter', settlement: 'Settlement hotspot'
+    };
+    const xmlEsc = (v) => String(v).replace(/[<>&"']/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[ch]));
+    function buildGPX(features, title) {
+        const now = new Date().toISOString();
+        const order = (m) => { const i = SCAN_ALL_ORDER.indexOf(m); return i < 0 ? 99 : i; };
+        const sorted = features.slice().sort((a, b) => order(a.mode) - order(b.mode) || b.matchScore - a.matchScore);
+        const counters = {};
+        const wpts = sorted.map((f) => {
+            counters[f.mode] = (counters[f.mode] || 0) + 1;
+            const st = MODE_STYLE[f.mode] || { letter: '?', color: '#475569' };
+            const typeName = GPX_TYPE_NAMES[f.mode] || f.mode;
+            const name = `${st.letter}${String(counters[f.mode]).padStart(2, '0')} ${typeName}`;
+            let ele = '';
+            if (fullDemGrid) {
+                const i = gridIndexAt(fullDemGrid, f.lat, f.lon);
+                if (i >= 0 && fullDemGrid.data[i] >= -100) ele = `<ele>${fullDemGrid.data[i].toFixed(1)}</ele>`;
+            }
+            const confirmed = trainingData[f.mode] && trainingData[f.mode].examples &&
+                trainingData[f.mode].examples.some(ex => approxMetersBetween(ex.lat, ex.lon, f.lat, f.lon) < 20);
+            const desc = `${typeName} - algorithmic candidate, verify in the field. Match score ${f.matchScore}%. ` +
+                (f.mode === 'settlement' ? '' : `${modeMetricLabel(f.mode)}: ${(f.k.maxMetric * M2FT).toFixed(1)} ft. `) +
+                `About ${Math.round(f.diameter * M2FT)} ft across.` + (confirmed ? ' Confirmed real by you.' : '');
+            return `  <wpt lat="${f.lat.toFixed(7)}" lon="${f.lon.toFixed(7)}">
+    ${ele}<time>${now}</time>
+    <name>${xmlEsc(name)}</name>
+    <cmt>${xmlEsc(`${typeName}, match ${f.matchScore}%`)}</cmt>
+    <desc>${xmlEsc(desc)}</desc>
+    <sym>${xmlEsc(GPX_SYMBOLS[f.mode] || 'Flag, Blue')}</sym>
+    <type>${xmlEsc(typeName)}</type>
+    <extensions><osmand:color>${st.color}</osmand:color><osmand:background>circle</osmand:background></extensions>
+  </wpt>`;
+        });
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="LiDAR Karst Archaeology GIS Platform" xmlns="http://www.topografix.com/GPX/1/1"
+     xmlns:osmand="https://osmand.net" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:schemaLocation="http://www.topografix.com/GPX/1/1 http://www.topografix.com/GPX/1/1/gpx.xsd">
+  <metadata>
+    <name>${xmlEsc(title)}</name>
+    <desc>${xmlEsc(`${features.length} detected feature(s). Algorithmic leads only - verify in the field. Archaeological and cave sites may be protected (ARPA / NAGPRA / state law): keep this file confidential.`)}</desc>
+    <time>${now}</time>
+  </metadata>
+${wpts.join('\n')}
+</gpx>
+`;
+    }
+    function exportGPX() {
+        if (!detectedFeatures.length) return;
+        let fname = (document.getElementById('gpxFileName').value || '').trim().replace(/[\\/:*?"<>|]+/g, '_') || 'detected_features';
+        if (!/\.gpx$/i.test(fname)) fname += '.gpx';
+        const gpx = buildGPX(detectedFeatures, fname.replace(/\.gpx$/i, ''));
+        downloadBlob(new Blob([gpx], { type: 'application/gpx+xml' }), fname);
     }
     function exportGeoJSON() {
         if (detectedFeatures.length === 0) return;

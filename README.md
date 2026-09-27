@@ -18,6 +18,15 @@ Terrain is drawn with bicubic height interpolation and exact per-pixel lighting 
 
 **Scan All.** Runs every scan mode on the area, one after another: the three karst phases, caves, mounds, rockshelters and settlement likelihood. Each mode uses its own thresholds. All detections stay on the map with a coloured, lettered marker per mode, and a legend lets you show or hide each type. They also appear in the 3D fly-through in the same colours, and every export includes them all.
 
+**GPX export.** Every detected feature, of every type, becomes a waypoint in a GPX file saved under a name you choose. Desktop Chrome/Edge open a Save dialog so you can pick the folder; other browsers download under that name. Types are told apart by:
+
+- **Symbol:** a standard Garmin-style `<sym>` (Campground, Hunting Area, Tunnel, Mine, Pin Blue, Summit, Block Red, Residence);
+- **Type:** a `<type>` field;
+- **Name:** a lettered prefix such as `E03 Cave entrance setting`;
+- **Colour:** an OsmAnd colour.
+
+Each waypoint also carries its elevation, match score, depth or height, and size.
+
 **Auto-detected scan settings.** After each download (or when you click *Auto-Detect Best Settings for This Area*), the app measures the area to be scanned and sets the scan sliders from what it finds:
 
 - **LiDAR noise:** minimum depth and relief thresholds, and the midden flag.
