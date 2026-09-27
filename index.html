@@ -2442,13 +2442,13 @@
             // Same multi-scale detrending as the scan: try each size class's
             // radius and use the first in which this point is a closed high
             const i0 = r * W + c;
-            let resid = null, height = null;
+            let resid = null, height = null, groundSlope = null;
             for (const p of presets) for (const scaleM of moundScalesM(p)) {
-                const trend = boxSmooth(denoised, W, H, Math.max(2, Math.round(scaleM / effRes)), nd);
+                const { trend, slopeDeg } = moundTrend(denoised, W, H, Math.max(2, Math.round(scaleM / effRes)), nd, effRes);
                 const rs = new Float32Array(n);
                 for (let i = 0; i < n; i++) rs[i] = (denoised[i] < nd || trend[i] < nd) ? -9999 : denoised[i] - trend[i];
                 const hh = iMoundHeights(rs, W, H, nd);
-                if (!height || (hh[i0] > thr && !(height[i0] > thr))) { resid = rs; height = hh; }
+                if (!height || (hh[i0] > thr && !(height[i0] > thr))) { resid = rs; height = hh; groundSlope = slopeDeg; }
                 if (height[i0] > thr && hh === height) break;
             }
             const lines = [];
@@ -2463,7 +2463,7 @@
             const comp = traceOneComponent(mask, height, denoised, W, H, effRes, nd, new Uint8Array(n), new Int32Array(n), new Int32Array(n), r, c, null, slopeDeg);
             if (!comp) return;
             const diam = 2 * Math.sqrt(comp.area / Math.PI);
-            const gs = computeSlopeDegrees(boxSmooth(denoised, W, H, Math.max(1, Math.round(15 / effRes)), nd), W, H, effRes, nd)[rcIndex(comp)];
+            const gs = groundSlope[rcIndex(comp)];
             const tm = moundTemplateMatch(height, W, H, comp);
             const persist = moundPersistence(resid, W, H, nd, comp, i0, parseInt(document.getElementById('moundRuns').value), Math.max(0.1, noiseSigma), Math.max(1, Math.round(3 / effRes)), thr);
             const chk = (ok, text) => `<tr style="${ok ? 'background:#dcfce7' : 'background:#fee2e2'}"><td>${ok ? '&#10003;' : '&#10007;'}</td><td>${text}</td></tr>`;
@@ -4020,7 +4020,7 @@
     //    2019): size / compactness filters, then correlation with idealised
     //    mound profiles; conic, radially symmetric shape is the strongest
     //    single discriminator of burial mounds (Sensors 20:1192, 2020).
-    // Inputs are detrended first (DTM minus a broad moving mean), so a mound
+    // Inputs are detrended first (DTM minus a local quadratic surface), so a mound
     // on a hilltop or terrace edge is still its own closed high.
     const IMOUND_OFFSET = 10000; // keeps inverted values far from the NoData sentinel
     // Detrending radii (m) used for a size class: ~0.75x its largest mound,
@@ -4029,6 +4029,101 @@
     function moundScalesM(preset) {
         const big = Math.max(40, 0.75 * feetToMeters(preset.maxDiameter));
         return feetToMeters(preset.minDiameter) < 20 ? [...new Set([30, big])] : [big];
+    }
+
+    // Local quadratic trend surface (2D Savitzky-Golay): least-squares fit of
+    // z = a + bx + cy + dx^2 + ey^2 + fxy over the (2R+1)^2 window around each
+    // cell. Returns the fitted value a (trend) and the fitted ground slope in
+    // degrees. A flat moving mean gets dragged upward next to a hillside, so
+    // a mound at the foot of a slope (Cottonpatch Mound at Russell Cave)
+    // disappeared into it; a curved surface follows the concave slope foot
+    // and leaves the mound standing out, and its slope is the ground the
+    // mound sits on rather than the hill beside it. For a square window the
+    // fit reduces to separable sliding window moments. Edges mirror; NoData
+    // is pre-filled with the local mean.
+    function quadTrend(dem, W, H, R, nd, cellM) {
+        const n = W * H;
+        let z = dem, mean = 0, cntV = 0;
+        for (let i = 0; i < n; i++) if (dem[i] >= nd) { mean += dem[i]; cntV++; }
+        mean = cntV ? mean / cntV : 0;
+        if (cntV < n) {
+            const sq = buildSAT(dem, W, H, nd);
+            z = new Float32Array(n);
+            for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+                const i = r * W + c;
+                if (dem[i] >= nd) { z[i] = dem[i]; continue; }
+                const r0 = Math.max(0, r - R), r1 = Math.min(H, r + R + 1), c0 = Math.max(0, c - R), c1 = Math.min(W, c + R + 1);
+                const A = r0 * sq.w1 + c0, B = r0 * sq.w1 + c1, Cc = r1 * sq.w1 + c0, D = r1 * sq.w1 + c1;
+                const cnt = sq.cnt[D] - sq.cnt[B] - sq.cnt[Cc] + sq.cnt[A];
+                z[i] = cnt > 0 ? (sq.sat[D] - sq.sat[B] - sq.sat[Cc] + sq.sat[A]) / cnt : mean;
+            }
+        }
+        // Normal equations for (a, d, e); b, c and f decouple in a symmetric window.
+        // a = alpha*S00 + beta*(Sxx + Syy)
+        const m = 2 * R + 1;
+        let s2 = 0, s4 = 0;
+        for (let x = -R; x <= R; x++) { s2 += x * x; s4 += x ** 4; }
+        const N = m * m, A2 = m * s2, A4 = m * s4, X22 = s2 * s2;
+        const det = N * (A4 * A4 - X22 * X22) - A2 * (A2 * A4 - X22 * A2) + A2 * (A2 * X22 - A4 * A2);
+        const alpha = (A4 * A4 - X22 * X22) / det;
+        const beta = -(A2 * A4 - X22 * A2) / det;
+        const gDen = m * s2;
+        const mir = (i, len) => { if (len === 1) return 0; const p = 2 * (len - 1); i = ((i % p) + p) % p; return i < len ? i : p - i; };
+        // Sliding window moments S0 = sum v, S1 = sum x v, S2 = sum x^2 v; moving
+        // the centre one cell on re-indexes every kept sample x -> x-1
+        const slide = (s, out, inn) => {
+            const s0 = s[0], s1 = s[1];
+            s[2] = s[2] - 2 * s1 + s0 - (R + 1) * (R + 1) * out + R * R * inn;
+            s[1] = s1 - s0 + (R + 1) * out + R * inn;
+            s[0] = s0 - out + inn;
+        };
+        // Row pass: P = alpha*S0 + beta*Sxx, H0 = S0, H1 = Sx
+        const P = new Float32Array(n), H0 = new Float32Array(n), H1 = new Float32Array(n);
+        const buf = new Float64Array(Math.max(W, H) + 2 * R), s = new Float64Array(3);
+        for (let r = 0; r < H; r++) {
+            for (let j = 0; j < W + 2 * R; j++) buf[j] = z[r * W + mir(j - R, W)] - mean;
+            s.fill(0);
+            for (let x = -R; x <= R; x++) { const v = buf[R + x]; s[0] += v; s[1] += x * v; s[2] += x * x * v; }
+            for (let c = 0; c < W; c++) {
+                const i = r * W + c;
+                P[i] = alpha * s[0] + beta * s[2]; H0[i] = s[0]; H1[i] = s[1];
+                if (c + 1 < W) slide(s, buf[c], buf[c + 2 * R + 1]);
+            }
+        }
+        // Column pass: trend = colsum(P) + beta*Syy, gradient from Sx and Sy
+        const trend = new Float32Array(n), slopeDeg = new Float32Array(n);
+        const colP = new Float64Array(H + 2 * R), colX = new Float64Array(H + 2 * R);
+        for (let c = 0; c < W; c++) {
+            for (let j = 0; j < H + 2 * R; j++) { const i = mir(j - R, H) * W + c; colP[j] = P[i]; buf[j] = H0[i]; colX[j] = H1[i]; }
+            let sP = 0, sX = 0;
+            s.fill(0);
+            for (let y = -R; y <= R; y++) { sP += colP[R + y]; sX += colX[R + y]; const v = buf[R + y]; s[0] += v; s[1] += y * v; s[2] += y * y * v; }
+            for (let r = 0; r < H; r++) {
+                const i = r * W + c;
+                if (dem[i] < nd) trend[i] = dem[i];
+                else {
+                    trend[i] = mean + sP + beta * s[2];
+                    slopeDeg[i] = Math.atan(Math.hypot(sX, s[1]) / gDen / cellM) * 180 / Math.PI;
+                }
+                if (r + 1 < H) {
+                    sP += colP[r + 2 * R + 1] - colP[r]; sX += colX[r + 2 * R + 1] - colX[r];
+                    slide(s, buf[r], buf[r + 2 * R + 1]);
+                }
+            }
+        }
+        return { trend, slopeDeg };
+    }
+    // Mound detrending surface: the LOWER of the moving mean and the local
+    // quadratic. In concave ground (slope feet, valley floors) the mean
+    // rides up the neighbouring slope and the quadratic follows the floor;
+    // in convex ground (hill crests, clusters of natural knobs) the
+    // quadratic would bend over the bump itself and slice it into
+    // mound-sized pieces, so the mean is kept there as before.
+    function moundTrend(dem, W, H, R, nd, cellM) {
+        const q = quadTrend(dem, W, H, R, nd, cellM);
+        const box = boxSmooth(dem, W, H, R, nd);
+        for (let i = 0; i < q.trend.length; i++) if (dem[i] >= nd && box[i] < q.trend[i]) q.trend[i] = box[i];
+        return q;
     }
 
     function invertForFill(resid, n, nd) {
@@ -4859,12 +4954,12 @@
             const noiseSigma = estimateNoiseFloor(currentDEM, denoised, nodataThresh);
             const candidateThreshold = Math.max(0.05, 5 * noiseSigma);
             const moundSlopeDegRaster = computeSlopeDegrees(denoised, W, H, effRes, nodataThresh);
-            // Ground slope around each candidate (~30 m footprint): mounds were
-            // built on terraces, floodplains and ridge tops, not hillsides
-            const groundSlope = computeSlopeDegrees(boxSmooth(denoised, W, H, Math.max(1, Math.round(15 / effRes)), nodataThresh), W, H, effRes, nodataThresh);
+            // Ground slope under each candidate comes from the same quadratic
+            // trend surface: mounds were built on terraces, floodplains, slope
+            // feet and ridge tops, not on hillsides
             const maxGroundSlope = parseFloat(document.getElementById('moundMaxGroundSlope').value);
 
-            // 1-3. Per size preset (multi-scale): detrend with a moving mean of
+            // 1-3. Per size preset (multi-scale): detrend with a local quadratic surface of
             //      ~0.75x the preset's largest mound, run iMound, trace the
             //      closed highs and apply that preset's morphometric filters
             //      and template matching. A small radius lets a mound on a
@@ -4878,10 +4973,12 @@
             const rmse = Math.max(0.1, noiseSigma);          // 3DEP QL2 vertical accuracy is ~0.1 m RMSE
             const rangePx = Math.max(1, Math.round(3 / effRes)); // error correlation length ~3 m
             const pre = [];
+            const trendCache = new Map();
             for (const preset of presetsToRun) for (const scaleM of moundScalesM(preset)) {
                 await tick0(`Mounds (${preset.name}, ${Math.round(scaleM)} m scale): detrending and iMound inverted-DEM fill...`);
                 const trendR = Math.max(2, Math.round(scaleM / effRes));
-                const trend = boxSmooth(denoised, W, H, trendR, nodataThresh);
+                if (!trendCache.has(trendR)) trendCache.set(trendR, moundTrend(denoised, W, H, trendR, nodataThresh, effRes));
+                const { trend, slopeDeg: groundSlope } = trendCache.get(trendR);
                 const resid = new Float32Array(n);
                 for (let i = 0; i < n; i++) resid[i] = (denoised[i] < nodataThresh || trend[i] < nodataThresh) ? -9999 : denoised[i] - trend[i];
                 const height = iMoundHeights(resid, W, H, nodataThresh);

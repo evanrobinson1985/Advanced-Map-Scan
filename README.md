@@ -37,7 +37,7 @@ Each waypoint also carries its elevation, match score, depth or height, and size
 
 A summary lists what was detected and every value set, and all sliders stay adjustable. Confirmed training examples are re-applied afterwards, so thresholds never exclude a site you've confirmed.
 
-**Mound detection (iMound).** The Native Mounds scan uses the published inverted-DEM **iMound** method (Freeland et al. 2016). The terrain is detrended at several scales and flipped upside down, and the "pits" a fill has to raise are the mounds, measured from their own base contour. Only closed highs qualify, so hillside bulges and ridge noses don't. Candidates must then pass:
+**Mound detection (iMound).** The Native Mounds scan uses the published inverted-DEM **iMound** method (Freeland et al. 2016). The terrain is detrended at several scales , using is the lower of a moving mean and a local quadratic (curved) surface fit, and flipped upside down. The curved fit means a mound tucked against the foot of a hillside, such as Cottonpatch Mound at Russell Cave, isn't swallowed by the slope beside it. The "pits" a fill has to raise are the mounds, measured from their own base contour. Only closed highs qualify, so hillside bulges and ridge noses don't. Candidates must then pass:
 
 - **Persistence** in repeated fills with random 3DEP-grade LiDAR error added (stochastic depression analysis, Lindsay & Creed 2006);
 - **Size, height and shape limits** for the conical or platform class, including height-to-width, elongation, solidity and level surrounding ground;
