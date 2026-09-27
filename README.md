@@ -28,6 +28,13 @@ Terrain is drawn with bicubic height interpolation and exact per-pixel lighting 
 
 A summary lists what was detected and every value set, and all sliders stay adjustable. Confirmed training examples are re-applied afterwards, so thresholds never exclude a site you've confirmed.
 
+**Horizontal Cave Entrances.** A walk-in cave mouth in a bluff face can't be seen in bare-earth LiDAR. This mode finds the settings such entrances open into: gentle ground or a talus apron at the foot of a real cliff. By default a site must also show a karst drainage sign:
+
+- **A cove or amphitheater head:** the cliff wraps more than about 190° around the spot, which a straight cliff can't do.
+- **A spring-cut stream head:** a stream that begins at the bluff foot and runs straight into an incised notch.
+
+Sinks upslope, a south/southeast-facing cliff and a match in a loaded cave survey raise the score. The mode is included in Scan All.
+
 The original scan modes (caves/sinkholes, mounds, rockshelters, settlement likelihood) and training-data features are unchanged.
 
 ## Batch pipeline

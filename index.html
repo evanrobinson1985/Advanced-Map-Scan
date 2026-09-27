@@ -187,6 +187,7 @@
                 <option value="basecamp">Phase 2: Long-Term Habitation (Base Camps)</option>
                 <option value="huntcamp">Phase 3: Transient Hunt Camps</option>
                 <option value="ceremonial">Phase 4: Deep Ceremonial Karst</option>
+                <option value="entrance">Horizontal Cave Entrances (bluff settings)</option>
             </optgroup>
             <optgroup label="General Feature Scans">
                 <option value="caves">Caves / Sinkholes</option>
@@ -410,6 +411,52 @@
                 <span class="val-display" id="hcMinViewHaVal">5.0ha</span>
             </div>
             <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">Minor rock outcrops (strong positive TPI at a small radius plus a steep face) are kept only if they sit next to a natural choke point: a topographic saddle or ridgeline gap (a point that is a low point along the ridge but a high point across it), or a narrow canyon funnel (a drainage line hemmed in by steep walls on both sides). A viewshed is then run from each outcrop. An unobstructed view over a broad valley floor or a shallow river crossing marks it as a likely observation blind.</div>
+        </div>
+        <div id="entranceParamsGroup" style="display:none;">
+            <div class="slider-row">
+                <label>Min Cliff Slope</label>
+                <input type="range" id="enCliffSlope" min="35" max="80" step="1" value="50" oninput="updateThresholdVal('enCliffSlope','°',0)">
+                <span class="val-display" id="enCliffSlopeVal">50°</span>
+            </div>
+            <div class="slider-row">
+                <label>Max Apron Slope</label>
+                <input type="range" id="enFloorSlope" min="10" max="45" step="1" value="35" oninput="updateThresholdVal('enFloorSlope','°',0)">
+                <span class="val-display" id="enFloorSlopeVal">35°</span>
+            </div>
+            <div class="slider-row">
+                <label>Max Distance to Cliff</label>
+                <input type="range" id="enReachM" min="3" max="40" step="1" value="12" oninput="updateMetricLenVal('enReachM')">
+                <span class="val-display" id="enReachMVal">12m</span>
+            </div>
+            <div class="slider-row">
+                <label>Cove Search Radius</label>
+                <input type="range" id="enCoveM" min="10" max="150" step="5" value="60" oninput="updateMetricLenVal('enCoveM')">
+                <span class="val-display" id="enCoveMVal">60m</span>
+            </div>
+            <div class="slider-row">
+                <label>Stream Head Within</label>
+                <input type="range" id="enHeadM" min="5" max="150" step="5" value="40" oninput="updateMetricLenVal('enHeadM')">
+                <span class="val-display" id="enHeadMVal">40m</span>
+            </div>
+            <div class="slider-row">
+                <label>Sinks Upslope Within</label>
+                <input type="range" id="enSinkM" min="50" max="1500" step="50" value="400" oninput="updateMetricLenVal('enSinkM')">
+                <span class="val-display" id="enSinkMVal">400m</span>
+            </div>
+            <div class="slider-row">
+                <label>Preferred Aspect From</label>
+                <input type="range" id="enAspectMin" min="0" max="360" step="5" value="135" oninput="updateThresholdVal('enAspectMin','°',0)">
+                <span class="val-display" id="enAspectMinVal">135°</span>
+            </div>
+            <div class="slider-row">
+                <label>Preferred Aspect To</label>
+                <input type="range" id="enAspectMax" min="0" max="360" step="5" value="225" oninput="updateThresholdVal('enAspectMax','°',0)">
+                <span class="val-display" id="enAspectMaxVal">225°</span>
+            </div>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem; margin-bottom:4px;">
+                <input type="checkbox" id="enRequireSign" checked> Require a cove head or spring-cut stream head (sinks upslope only add score)
+            </label>
+            <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">A horizontal entrance can't be seen in bare-earth LiDAR, because the opening and the rock above it share one map position. This mode finds the setting entrances open into: gentle ground or a talus apron at the foot of a real cliff. It then looks for the drainage that forms caves: an amphitheater-shaped cove head, a stream that begins right below the cliff (a spring or resurgence), or sinks and sinking streams upslope. South/southeast-facing cliffs and known caves from a loaded cave survey (Phase 4 panel) raise the score. Min Cliff Height above sets how tall the cliff must be.</div>
         </div>
         <div id="ceremonialParamsGroup" style="display:none;">
             <div style="font-size:0.75rem; font-weight:600; color:#334155; margin-bottom:4px;">Step 1: Depression Analysis (Fill Sink)</div>
@@ -664,12 +711,13 @@
         basecamp:   { color: '#f97316', letter: 'B', label: 'Base camps (Phase 2)' },
         huntcamp:   { color: '#16a34a', letter: 'H', label: 'Hunt camps (Phase 3)' },
         ceremonial: { color: '#7c3aed', letter: 'K', label: 'Ceremonial karst (Phase 4)' },
+        entrance:   { color: '#0f766e', letter: 'E', label: 'Cave entrance settings' },
         caves:      { color: '#0284c7', letter: 'C', label: 'Caves / sinkholes' },
         mounds:     { color: '#a16207', letter: 'M', label: 'Mounds' },
         shelter:    { color: '#db2777', letter: 'R', label: 'Rockshelters' },
         settlement: { color: '#dc2626', letter: 'S', label: 'Settlement hotspots' },
     };
-    const SCAN_ALL_ORDER = ['basecamp', 'huntcamp', 'ceremonial', 'caves', 'mounds', 'shelter', 'settlement'];
+    const SCAN_ALL_ORDER = ['basecamp', 'huntcamp', 'ceremonial', 'entrance', 'caves', 'mounds', 'shelter', 'settlement'];
     const modeLayers = {};
     let scanAllActive = false, scanAllCancel = false;
     let last3DOverlays = []; // [{ mode, candidateMask, highlightMask?, grid }] tinted onto the 3D terrain
@@ -1812,6 +1860,7 @@
     const MODE_DESCRIPTIONS = {
         basecamp: '<b>Phase 2: Long-term habitation.</b> Shelters that could carry families through a hard winter: large south/southeast-facing bluff overhangs (passive solar heat) with a flat, dry dirt bench at their base, near year-round water and above the 100-year floodplain.',
         huntcamp: '<b>Phase 3: Transient hunt camps.</b> Small outcrops and overhangs facing any direction, with quick cover, placed beside game choke points (saddles, ridgeline gaps, canyon funnels) and with a commanding view over valley floors or stream crossings.',
+        entrance: '<b>Horizontal cave entrances.</b> Walk-in cave mouths in bluff faces can\'t be seen from above in LiDAR, so this finds the settings they open into: cliff feet with karst drainage signs (amphitheater coves, springs or stream heads at the bluff foot, sinks upslope). South/southeast-facing cliffs and known caves score higher.',
         ceremonial: '<b>Phase 4: Deep ceremonial karst.</b> Maps the geological "plumbing" instead of surface relief: large closed sinkholes (possible collapsed karst windows), sinking streams that drain into cave entrances, and a cross-check against known cave surveys to confirm a system deep enough for a true Dark Zone.',
         caves: 'Closed depressions (dolines/sinkholes) from Priority-Flood depression filling.',
         mounds: 'Earthen mounds from a multi-scale Local Relief Model.',
@@ -1830,6 +1879,7 @@
         document.getElementById('basecampParamsGroup').style.display = mode === 'basecamp' ? 'block' : 'none';
         document.getElementById('huntcampParamsGroup').style.display = mode === 'huntcamp' ? 'block' : 'none';
         document.getElementById('ceremonialParamsGroup').style.display = mode === 'ceremonial' ? 'block' : 'none';
+        document.getElementById('entranceParamsGroup').style.display = mode === 'entrance' ? 'block' : 'none';
         document.getElementById('modeDescription').innerHTML = MODE_DESCRIPTIONS[mode] || '';
         document.getElementById('moundPresetRow').style.display = mode === 'mounds' ? 'block' : 'none';
         document.getElementById('geometricThresholdsGroup').style.display = mode === 'settlement' ? 'none' : 'block';
@@ -1840,7 +1890,7 @@
         document.getElementById('minHeightLabel').innerText =
             (mode === 'shelter' || mode === 'basecamp') ? 'Min Bluff Height'
             : mode === 'huntcamp' ? 'Min Outcrop Prominence'
-            : mode === 'ceremonial' ? 'Min Sink Depth' : 'Min Depth/Relief';
+            : mode === 'ceremonial' ? 'Min Sink Depth' : mode === 'entrance' ? 'Min Cliff Height' : 'Min Depth/Relief';
         // Waterway Threshold always applies to Settlement mode (it always uses
         // waterway data as a scoring input) regardless of the Exclude
         // Waterways checkbox, which is specific to Caves/Mounds/Shelter filtering.
@@ -2063,12 +2113,13 @@
         if (mode === 'basecamp') return { ...base, minHeight: 10, minCircularity: 0.05, minDiameter: 10, maxDiameter: 1000 };
         if (mode === 'huntcamp') return { ...base, minHeight: 2, minCircularity: 0.05, minDiameter: 3, maxDiameter: 300 };
         if (mode === 'ceremonial') return { ...base, minHeight: 2, minCircularity: 0.2, minDiameter: 15, maxDiameter: 1000 };
+        if (mode === 'entrance') return { ...base, minHeight: 15, minCircularity: 0.05, minDiameter: 5, maxDiameter: 400 };
         if (mode === 'mounds') return { ...base, minHeight: 1.5, minCircularity: 0.15, maxDiameter: 850, minDiameter: 15, trendRadius: 55, maxFlankSlope: 70, maxElongation: 3.0 };
         return base;
     }
     // Every threshold-learning mode, in one place, so adding a mode means
     // updating this list once rather than every load/import/clear path.
-    const GEOMETRIC_MODES = ['caves', 'mounds', 'shelter', 'basecamp', 'huntcamp', 'ceremonial'];
+    const GEOMETRIC_MODES = ['caves', 'mounds', 'shelter', 'basecamp', 'huntcamp', 'ceremonial', 'entrance'];
     // Fills in anything missing - older saved/exported data predates the
     // rejected lists and the karst workflow modes - so every code path can
     // rely on trainingData[mode].examples/.thresholds/.rejected existing.
@@ -2103,14 +2154,14 @@
     function modeFeatureName(mode) {
         return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'shelter' ? 'Rockshelter / Overhang'
             : mode === 'basecamp' ? 'Base Camp Shelter (bluff-base bench)' : mode === 'huntcamp' ? 'Hunt Camp (outcrop at choke point)'
-            : mode === 'ceremonial' ? 'Ceremonial Karst Entrance' : 'Feature';
+            : mode === 'ceremonial' ? 'Ceremonial Karst Entrance' : mode === 'entrance' ? 'Horizontal Cave Entrance Setting' : 'Feature';
     }
     function modeMetricLabel(mode) {
         return (mode === 'caves' || mode === 'ceremonial') ? 'Max Depth' : (mode === 'shelter' || mode === 'basecamp') ? 'Max Bluff Height'
-            : mode === 'huntcamp' ? 'Outcrop Prominence (TPI)' : 'Max Relief';
+            : mode === 'huntcamp' ? 'Outcrop Prominence (TPI)' : mode === 'entrance' ? 'Max Cliff Height' : 'Max Relief';
     }
     function modeSignalLabel(mode) {
-        return (mode === 'caves' || mode === 'ceremonial') ? 'depression' : (mode === 'shelter' || mode === 'basecamp') ? 'nearby cliff/rise' : mode === 'huntcamp' ? 'outcrop' : 'relief';
+        return (mode === 'caves' || mode === 'ceremonial') ? 'depression' : (mode === 'shelter' || mode === 'basecamp') ? 'nearby cliff/rise' : mode === 'huntcamp' ? 'outcrop' : mode === 'entrance' ? 'cliff foot' : 'relief';
     }
 
     function approxMetersBetween(lat1, lon1, lat2, lon2) {
@@ -2185,7 +2236,7 @@
         const el = document.getElementById('trainingSummary');
         if (!el) return;
         const sigCount = ['caves', 'shelter', 'ceremonial'].reduce((n, m) => n + trainingData[m].examples.filter(e => e.significance).length, 0);
-        el.innerText = `Confirmed: ${trainingData.basecamp.examples.length} base camp, ${trainingData.huntcamp.examples.length} hunt camp, ${trainingData.ceremonial.examples.length} ceremonial karst, ${trainingData.caves.examples.length} cave/sinkhole, ${trainingData.mounds.examples.length} mound, ${trainingData.shelter.examples.length} shelter, ${trainingData.settlement.examples.length} settlement example(s)` +
+        el.innerText = `Confirmed: ${trainingData.basecamp.examples.length} base camp, ${trainingData.huntcamp.examples.length} hunt camp, ${trainingData.ceremonial.examples.length} ceremonial karst, ${trainingData.entrance.examples.length} cave entrance, ${trainingData.caves.examples.length} cave/sinkhole, ${trainingData.mounds.examples.length} mound, ${trainingData.shelter.examples.length} shelter, ${trainingData.settlement.examples.length} settlement example(s)` +
             (sigCount > 0 ? ` \u2014 ${sigCount} marked with burial/ritual significance` : '');
     }
     updateTrainingSummary();
@@ -2259,7 +2310,7 @@
     // way an individual cave or shelter usually is not.
     function markSpecialSignificance(mode, lat, lon, ev) {
         if (ev) { ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); }
-        if (mode !== 'caves' && mode !== 'shelter' && mode !== 'ceremonial') return;
+        if (mode !== 'caves' && mode !== 'shelter' && mode !== 'ceremonial' && mode !== 'entrance') return;
         const ex = trainingData[mode].examples.find(e => approxMetersBetween(e.lat, e.lon, lat, lon) < 20);
         if (!ex) { document.getElementById('status').innerText = 'This site needs to be confirmed first.'; return; }
         const typeInput = prompt(
@@ -3685,6 +3736,175 @@
         return { metricRaster, candidateMask, modeCtx };
     }
 
+    // ---- HORIZONTAL CAVE ENTRANCE SETTINGS ----
+    // A walk-in cave mouth in a bluff face can't be seen in a bare-earth DTM:
+    // ground and rock ceiling occupy the same map position, so the opening
+    // just reads as part of the cliff. What CAN be mapped is the setting
+    // such entrances open into, plus the karst drainage that forms them:
+    //   base:  a bluff foot - gentle ground or talus apron directly below a
+    //          real cliff (the entrance floor / vestibule apron)
+    //   A. amphitheater / cove head - the cliff wraps around the spot on
+    //      several sides; theater-headed coves are cut where groundwater
+    //      emerges from the bluff (spring sapping), i.e. at resurgences
+    //   B. a stream that begins at the bluff foot - a channel head just
+    //      below the cliff, suggesting a spring / resurgence
+    //   C. sinks or sinking streams upslope - water going underground on
+    //      higher ground within a few hundred meters
+    //   D. south / southeast facing cliff (the workflow's solar preference)
+    //   E. a known cave from a loaded speleological dataset
+    // By default a site needs at least one of A-C (a karst drainage sign).
+    async function computeEntranceRasters(denoised, candidateThreshold) {
+        const status = document.getElementById('status');
+        const nd = -100, W = demWidth, H = demHeight, n = W * H;
+        const tick = async (msg) => { status.innerText = msg; await new Promise(r => setTimeout(r, 0)); };
+
+        await tick('Entrances 1/4: finding bluff feet...');
+        const slope = computeSlopeDegrees(denoised, W, H, effRes, nd);
+        const aspect = computeAspectDegrees(denoised, W, H, effRes, nd);
+        const cliffSlope = readNum('enCliffSlope'), floorSlope = readNum('enFloorSlope');
+        const reachPx = Math.max(2, Math.round(readNum('enReachM') / effRes));
+        const cliffMask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) if (denoised[i] >= nd && slope[i] >= cliffSlope) cliffMask[i] = 1;
+        const { dist: cliffDist, src: cliffSrc } = distanceToMaskWithSource(cliffMask, W, H);
+        const maxNearbyElev = extremeFilter2D(denoised, W, H, reachPx + 1, true);
+        const tpiR = Math.max(2, Math.round(20 / effRes));
+        const tpi = computeTPI(denoised, W, H, Math.max(1, Math.round(tpiR / 4)), tpiR, nd);
+        const metricRaster = new Float32Array(n);
+        const candidateMask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+            if (denoised[i] < nd) continue;
+            const rise = maxNearbyElev[i] - denoised[i];
+            metricRaster[i] = rise; // cliff height above the spot
+            if (cliffMask[i] || slope[i] >= floorSlope) continue;   // on the face itself
+            if (!(cliffDist[i] <= reachPx)) continue;               // not at a cliff foot
+            if (tpi[i] > 0) continue;                                // top of the bluff, not its foot
+            if (rise <= candidateThreshold) continue;
+            candidateMask[i] = 1;
+        }
+        // Long bluff feet become site-sized segments (as for base camps)
+        const segPx = Math.max(4, Math.round(40 / effRes));
+        for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) if (r % segPx === 0 || c % segPx === 0) candidateMask[r * W + c] = 0;
+
+        await tick('Entrances 2/4: measuring coves / amphitheaters...');
+        // A: enclosure = the widest continuous arc of compass directions
+        // (out of 32) in which a cliff at least 3 m higher rises within the
+        // cove radius. A straight cliff can never wrap more than half-way
+        // round a spot at its foot (< 50%); only a cove / amphitheater head
+        // does, so enclosure above ~52% means the cliff curves around it.
+        const covePx = Math.max(3, Math.round(readNum('enCoveM') / effRes));
+        const cove = new Float32Array(n);
+        const ND = 32, hit = new Uint8Array(ND);
+        for (let i = 0; i < n; i++) {
+            if (!candidateMask[i]) continue;
+            const r0 = (i / W) | 0, c0 = i % W, z0 = denoised[i];
+            for (let d = 0; d < ND; d++) {
+                hit[d] = 0;
+                const th = d * 2 * Math.PI / ND, dx = Math.cos(th), dy = Math.sin(th);
+                for (let s = 1; s <= covePx; s++) {
+                    const r = Math.round(r0 + dy * s), c = Math.round(c0 + dx * s);
+                    if (r < 0 || r >= H || c < 0 || c >= W) break;
+                    const j = r * W + c;
+                    if (cliffMask[j] && denoised[j] > z0 + 3) { hit[d] = 1; break; }
+                }
+            }
+            let best = 0, run = 0;
+            for (let d = 0; d < 2 * ND; d++) { run = hit[d % ND] ? run + 1 : 0; if (run > best) best = run; }
+            cove[i] = Math.min(ND, best) / ND;
+        }
+
+        await tick('Entrances 3/4: springs, stream heads and sinks upslope...');
+        const flow = await getFlowData();
+        // B: channel heads (a channel cell with no channel flowing into it)
+        const chanCells = acresToCells(readNum('waterwayThreshold'));
+        const isChan = new Uint8Array(n), fed = new Uint8Array(n);
+        const dr8 = [-1,-1,-1,0,0,1,1,1], dc8 = [-1,0,1,-1,1,-1,0,1];
+        for (let i = 0; i < n; i++) if (flow.accum[i] >= chanCells) isChan[i] = 1;
+        for (let j = 0; j < n; j++) {
+            const k = flow.dir[j];
+            if (k < 0 || !isChan[j]) continue;
+            const r = (j / W) | 0, c = j % W;
+            fed[(r + dr8[k]) * W + (c + dc8[k])] = 1;
+        }
+        // Only heads that run straight into an incised valley count: a
+        // spring cuts a notch back into the bluff, whereas rivulets off a
+        // smooth cliff face start channels on open slopes. The channel must
+        // drop at least 1.5 m below the ground ~25 m around within 30 m
+        // downstream of its head.
+        const tpiV = Math.max(2, Math.round(25 / effRes));
+        const tpiValley = computeTPI(denoised, W, H, Math.max(1, Math.round(tpiV / 4)), tpiV, nd);
+        const walkSteps = Math.max(2, Math.round(30 / effRes));
+        const heads = new Uint8Array(n);
+        let headCount = 0;
+        for (let i = 0; i < n; i++) {
+            if (!isChan[i] || fed[i]) continue;
+            let j = i, incised = false;
+            for (let s = 0; s < walkSteps && j >= 0; s++) {
+                if (tpiValley[j] <= -1.5) { incised = true; break; }
+                const k = flow.dir[j];
+                if (k < 0) break;
+                const r = (j / W) | 0, c = j % W;
+                j = (r + dr8[k]) * W + (c + dc8[k]);
+            }
+            if (incised) { heads[i] = 1; headCount++; }
+        }
+        const headDist = distanceToMask(heads, W, H);
+        // C: closed depressions >= 1 m deep (sinks, swallets, karst windows)
+        const sinkMask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) if (denoised[i] >= nd && flow.filled[i] - flow.denoised[i] >= 1.0) sinkMask[i] = 1;
+        const { dist: sinkDist, src: sinkSrc } = distanceToMaskWithSource(sinkMask, W, H);
+        // Per-site peaks, gathered by the component tracer
+        const negHeadDist = new Float32Array(n), negSinkDist = new Float32Array(n);
+        for (let i = 0; i < n; i++) {
+            if (!candidateMask[i]) continue;
+            negHeadDist[i] = -headDist[i] * effRes;
+            // only sinks that sit higher than this spot count as "upslope"
+            negSinkDist[i] = (sinkSrc[i] >= 0 && flow.filled[sinkSrc[i]] > denoised[i] + 5) ? -sinkDist[i] * effRes : -Infinity;
+        }
+
+        await tick('Entrances 4/4: scoring sites...');
+        const aspFrom = readNum('enAspectMin'), aspTo = readNum('enAspectMax');
+        const headNearM = readNum('enHeadM'), sinkNearM = readNum('enSinkM');
+        const requireSign = document.getElementById('enRequireSign').checked;
+        const matchDistM = readNum('caveMatchDistM');
+        return {
+            metricRaster, candidateMask,
+            modeCtx: {
+                extraMaxRasters: [cove, negHeadDist, negSinkDist],
+                skipWaterwayExclusion: true, // resurgences sit right on the stream
+                overlay3D: { candidateMask, highlightMask: heads },
+                summary: () => `${headCount.toLocaleString()} incised stream head(s) in the area.`,
+                describe(k, lat, lon) {
+                    const i = rcIndex(k);
+                    const coveFrac = k.extraMax ? k.extraMax[0] : 0;
+                    const headM = k.extraMax ? -k.extraMax[1] : Infinity;
+                    const sinkM = k.extraMax ? -k.extraMax[2] : Infinity;
+                    const src = cliffSrc[i];
+                    const cliffAsp = src >= 0 ? aspect[src] : -1;
+                    const signs = [];
+                    let boost = 0;
+                    if (coveFrac >= 0.52) { signs.push(`amphitheater / cove head (cliff wraps ${Math.round(coveFrac * 360)}&deg; around)`); boost += 0.2; }
+                    if (headM <= headNearM) { signs.push(`an incised stream begins ${Math.round(headM)} m away (possible spring / resurgence)`); boost += 0.2; }
+                    if (requireSign && !signs.length) return { drop: true };
+                    if (sinkM <= sinkNearM) { signs.push(`sinks upslope ${Math.round(sinkM)} m away (water going underground above)`); boost += 0.1; }
+                    let html = `<b>Cliff Aspect:</b> ${compassLabel(cliffAsp)}<br>` +
+                               `<b>Cliff Enclosure:</b> ${Math.round(coveFrac * 360)}&deg; of arc (straight cliff &lt; 180&deg;)<br>`;
+                    if (aspectInWindow(cliffAsp, aspFrom, aspTo)) { html += goodBox('&#10003; South/southeast-facing cliff, which gets passive solar warmth.'); boost += 0.1; }
+                    html += signs.length
+                        ? goodBox('Karst drainage signs: ' + signs.join('; ') + '.')
+                        : warnBox('No karst drainage sign found here: this is just a cliff foot.');
+                    const cave = nearestCaveFeature(lat, lon);
+                    if (cave && cave.distM <= matchDistM) {
+                        html += `<b>Cave Survey Match:</b> ${escapeHtml(cave.feature.name || 'unnamed cave')}, ${Math.round(cave.distM)} m away<br>`;
+                        boost += 0.3;
+                    }
+                    html += `<div style="margin-top:6px;font-size:0.72rem;color:#475569;">The opening itself can't be seen in bare-earth LiDAR. This marks a setting where one is likely: check the cliff base in the field, especially behind talus.</div>` +
+                            `<div style="margin-top:4px;font-size:0.72rem;color:#7c2d12;">Caves can hold burials, mud glyphs and fragile deposits protected under ARPA / NAGPRA and state cave laws. Don't disturb them, and keep locations confidential.</div>`;
+                    return { html, boost };
+                }
+            }
+        };
+    }
+
     // ---- SPELEOLOGICAL DATASET (Phase 4, Step 3) ----
     // Kept in memory only - deliberately NOT written to localStorage or
     // anywhere else, since state cave survey data is typically distributed
@@ -3858,6 +4078,8 @@
             ({ metricRaster, candidateMask, modeCtx } = await computeBasecampRasters(denoised, candidateThreshold));
         } else if (mode === 'huntcamp') {
             ({ metricRaster, candidateMask, modeCtx } = await computeHuntcampRasters(denoised, candidateThreshold));
+        } else if (mode === 'entrance') {
+            ({ metricRaster, candidateMask, modeCtx } = await computeEntranceRasters(denoised, candidateThreshold));
         } else if (mode === 'ceremonial') {
             ({ metricRaster, candidateMask, modeCtx } = await computeCeremonialRasters(denoised, candidateThreshold));
         } else if (mode === 'caves') {
@@ -4586,7 +4808,7 @@
         //     rules out,
         //  4. show the top "Max results per mode".
         const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
-        const spacingM = { basecamp: 60, huntcamp: 60, shelter: 40, mounds: 25, caves: 10, ceremonial: 15 }[mode] || 20;
+        const spacingM = { basecamp: 60, huntcamp: 60, shelter: 40, mounds: 25, caves: 10, ceremonial: 15, entrance: 40 }[mode] || 20;
         let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0;
         const ranked = [];
         for (const k of filtered) {
@@ -4646,7 +4868,7 @@
             // shelters (matching how this was asked for), and only once the
             // site is already confirmed real - a separate, deliberate action
             // from routine confirmation, not bundled into the same checkbox.
-            const significanceHtml = (mode === 'caves' || mode === 'shelter' || mode === 'ceremonial')
+            const significanceHtml = (mode === 'caves' || mode === 'shelter' || mode === 'ceremonial' || mode === 'entrance')
                 ? (already && already.significance
                     ? `<div style="margin-top:6px;font-size:0.75rem;color:#7c2d12;background:#fef3c7;padding:4px 6px;border-radius:4px;">&#9888; Marked: ${already.significance.type} significance${already.significance.notes ? ' &mdash; ' + already.significance.notes : ''}</div>`
                     : already
@@ -5145,6 +5367,7 @@
             const geo = {
                 caves: { minHeight: Math.max(1, ftQ(0.8 * minDetM * M2FT)) },
                 ceremonial: { minHeight: Math.max(2, ftQ(1.2 * minDetM * M2FT)) },
+                entrance: { minHeight: Math.max(10, Math.min(15, ftQ(0.4 * m.bluffH * M2FT))) },
                 huntcamp: { minHeight: Math.max(2, ftQ(0.8 * minDetM * M2FT)) },
                 basecamp: { minHeight: Math.max(6, Math.min(15, ftQ(0.4 * m.bluffH * M2FT))) },
                 shelter: { minHeight: Math.max(10, Math.min(15, ftQ(0.4 * m.bluffH * M2FT))) },
@@ -5187,7 +5410,7 @@
     // scan's results drop straight into QGIS/ArcGIS or a Python pipeline.
     let lastExportRaster = null; // { data: Float32Array, name, mode } - the last scan's analysis raster
     function featureTypeCode(mode) {
-        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial' }[mode] || 'Feature';
+        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial', entrance: 'CaveEntrnc' }[mode] || 'Feature';
     }
     function updateExportButtons() {
         const hasFeatures = detectedFeatures.length > 0;
