@@ -263,11 +263,11 @@
             </div>
             <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">Method: iMound (Freeland et al. 2016). The terrain is detrended and flipped upside down, and the "pits" a fill has to raise are the mounds, measured from their own base contour, so only closed highs count, not hillside bulges or ridge noses. Each candidate is then re-tested with random 3DEP-grade LiDAR error added (stochastic depression analysis) and must persist in most runs. Finally it must correlate with an ideal conical dome or flat-topped platform (template matching, Davis et al. 2018).</div>
             <div class="slider-row" style="margin-top:6px;">
-                <label>Max ground slope</label>
+                <label>Flat-ground slope</label>
                 <input type="range" id="moundMaxGroundSlope" min="2" max="30" step="1" value="8" oninput="updateThresholdVal('moundMaxGroundSlope','°',0)">
                 <span class="val-display" id="moundMaxGroundSlopeVal">8°</span>
             </div>
-            <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">Mounds were built on terraces, floodplains and ridge tops. Candidates whose surrounding ground (~30 m around) is steeper than this are almost always natural knobs or ridge noses on a hillside, so they're dropped.</div>
+            <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">Most mounds sit on terraces, floodplains and ridge tops, but some were built on a mountainside (e.g. Cottonpatch Mound on Montague Mountain at Russell Cave). A candidate on ground steeper than this still counts, but only if it is a clean mound shape: template match &ge; 0.85, elongation &le; 1.5x and circularity &ge; 0.55, which weeds out natural hillside knobs and outcrops. Ground steeper than 35&deg; is never kept.</div>
             <div style="font-size:0.68rem; color:#94a3b8; margin-top:4px; line-height:1.35;">All Shapes runs both dedicated Conical and Platform scans and merges the results - most thorough, roughly 2x the scan time of a single shape. Broad/Any is a faster single compromise scan. Circularity/Diameter/Height/Trend Radius come from published size ranges for each type (see chat for sourcing and caveats) - a perfect square already measures ~0.79 on the Circularity scale, close to a circle's 1.0, so "round" and "square" genuinely overlap here, these bias toward one shape rather than cleanly separating them. Max Circularity and Flank Slope only flag a candidate as unusual, they don't exclude it - a real, well-built mound can legitimately be steeper or more compact than a generic rule predicts. Selecting a specific shape (not "All" or "Custom") overwrites the sliders below; your own confirmed examples remain the more reliable calibration once you have some.</div>
         </div>
         </div>
@@ -2473,7 +2473,8 @@
                 ${chk(true, `Closed high: ${metersToFeetInches(comp.maxMetric)} above its base contour, ${metersToFeetInches(diam)} across`)}
                 ${chk(!comp.incomplete, 'Fully inside the download (not clipped)')}
                 ${chk(sizeOk.length > 0, `Size/height/roundness fit a size class (${sizeOk.join(', ') || 'none'}; circularity ${comp.circularity.toFixed(2)}, elongation ${comp.elongation.toFixed(1)}x)`)}
-                ${chk(gs <= parseFloat(document.getElementById('moundMaxGroundSlope').value), `Surrounding ground slope ${gs.toFixed(1)}&deg; (max ${document.getElementById('moundMaxGroundSlope').value}&deg;)`)}
+                ${(() => { const flat = parseFloat(document.getElementById('moundMaxGroundSlope').value), why = moundSlopeRule(gs, flat, tm.score, comp);
+                    return chk(!why, gs <= flat ? `Ground slope under it ${gs.toFixed(1)}&deg; (flat ground, up to ${flat}&deg;)` : `Ground slope under it ${gs.toFixed(1)}&deg; (hillside mound${why ? ': ' + why : ', clean mound shape'})`); })()}
                 ${chk(comp.fillRatio >= 0.6, `Solid single shape (fill ratio ${comp.fillRatio.toFixed(2)}, min 0.60)`)}
                 ${chk(comp.maxMetric / diam >= parseFloat(document.getElementById('moundMinHW').value), `Height : width ${(comp.maxMetric / diam).toFixed(3)} (min ${document.getElementById('moundMinHW').value})`)}
                 ${chk(tm.score >= parseFloat(document.getElementById('moundMinTemplate').value), `Template match ${tm.score.toFixed(2)} (${tm.shape}; min ${document.getElementById('moundMinTemplate').value})`)}
@@ -4126,6 +4127,21 @@
         return q;
     }
 
+    // Ground-slope rule for a mound candidate. Flat ground: normal rules.
+    // Sloped ground (a mountainside mound): kept only with a clean mound
+    // shape, since natural hillside knobs and outcrops are irregular.
+    // Returns null when it passes, or the reason it fails.
+    const MOUND_SLOPE_HARD_MAX = 35;
+    function moundSlopeRule(groundDeg, flatMax, tmScore, k) {
+        if (groundDeg <= flatMax) return null;
+        if (groundDeg > MOUND_SLOPE_HARD_MAX) return `ground ${groundDeg.toFixed(1)}&deg; is steeper than ${MOUND_SLOPE_HARD_MAX}&deg;`;
+        const bad = [];
+        if (tmScore < 0.85) bad.push(`template ${tmScore.toFixed(2)} &lt; 0.85`);
+        if (k.elongation > 1.5) bad.push(`elongation ${k.elongation.toFixed(1)}x &gt; 1.5x`);
+        if (k.circularity < 0.55) bad.push(`circularity ${k.circularity.toFixed(2)} &lt; 0.55`);
+        return bad.length ? 'on sloped ground it needs a clean mound shape: ' + bad.join(', ') : null;
+    }
+
     function invertForFill(resid, n, nd) {
         const inv = new Float32Array(n);
         for (let i = 0; i < n; i++) inv[i] = resid[i] < nd ? -9999 : IMOUND_OFFSET - resid[i];
@@ -4988,7 +5004,8 @@
                 for (const k of raw) {
                     if (k.incomplete) continue;
                     const diameter = 2 * Math.sqrt(k.area / Math.PI);
-                    if (groundSlope[rcIndex(k)] > maxGroundSlope) continue;   // knob / ridge nose on a hillside
+                    const gsDeg = groundSlope[rcIndex(k)];
+                    if (gsDeg > MOUND_SLOPE_HARD_MAX) continue;               // cliff / steep hillside
                     if (k.fillRatio < 0.6) continue;                         // several natural bumps merged
                     if (k.maxMetric < feetToMeters(preset.minHeight) || diameter < feetToMeters(preset.minDiameter) ||
                         diameter > feetToMeters(preset.maxDiameter) || k.circularity < preset.minCircularity) continue;
@@ -4997,6 +5014,7 @@
                     if (excludeWaterways && k.waterwayFraction > 0.4 && k.maxMetric < 2.5 * feetToMeters(preset.minHeight)) continue;
                     const tm = moundTemplateMatch(height, W, H, k);
                     if (tm.score < minTemplate) continue;
+                    if (moundSlopeRule(gsDeg, maxGroundSlope, tm.score, k)) continue;   // irregular knob on a hillside
                     const flatTop = moundFlatTop(height, W, H, k);
                     tm.shape = flatTop >= 0.18 ? 'platform / flat-topped' : 'conical / dome';
                     // Label by shape: a flat-topped fit is a platform mound when

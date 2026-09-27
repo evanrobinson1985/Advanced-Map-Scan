@@ -40,7 +40,7 @@ A summary lists what was detected and every value set, and all sliders stay adju
 **Mound detection (iMound).** The Native Mounds scan uses the published inverted-DEM **iMound** method (Freeland et al. 2016). The terrain is detrended at several scales against the lower of a moving mean and a local quadratic (curved) surface fit, and flipped upside down. The curved fit means a mound tucked against the foot of a hillside, such as Cottonpatch Mound at Russell Cave, isn't swallowed by the slope beside it. The "pits" a fill has to raise are the mounds, measured from their own base contour. Only closed highs qualify, so hillside bulges and ridge noses don't. Candidates must then pass:
 
 - **Persistence** in repeated fills with random 3DEP-grade LiDAR error added (stochastic depression analysis, Lindsay & Creed 2006);
-- **Size, height and shape limits** for the conical or platform class, including height-to-width, elongation, solidity and level surrounding ground;
+- **Size, height and shape limits** for the conical or platform class, including height-to-width, elongation and solidity. A mound on a mountainside (steeper than the *Flat-ground slope* setting, 8° by default), such as Cottonpatch Mound on Montague Mountain, still counts if it has a clean mound shape (template ≥ 0.85, elongation ≤ 1.5x, circularity ≥ 0.55), which natural hillside knobs rarely have;
 - **Template matching** against an ideal conical dome and a flat-topped platform (Davis et al. 2018/2019).
 
 A flat-top measure labels each mound conical or platform. Tapping the map and choosing *This is a Mound* runs the same checks at that spot and shows which ones pass or fail.
