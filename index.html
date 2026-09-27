@@ -503,6 +503,12 @@
         </div>
 
         <button id="scanBtn" onclick="runScanner()">Scan Downloaded DEM</button>
+        <button id="scanAllBtn" onclick="runScanAll()" style="display:none; background:#7c3aed; color:white; border:none; cursor:pointer;">Scan All (every mode)</button>
+        <div id="scanAllWrap" style="display:none; margin-top:6px;">
+            <div id="scanAllProgressText" style="font-size:0.75rem; color:#334155; margin-bottom:4px;"></div>
+            <div style="height:8px; background:#e2e8f0; border-radius:4px; overflow:hidden;"><div id="scanAllBar" style="height:100%; width:0%; background:#7c3aed; transition:width 0.2s;"></div></div>
+            <button onclick="scanAllCancel = true; this.disabled = true; this.innerText = 'Stopping after this mode...';" id="scanAllCancelBtn" style="background:#fee2e2; color:#991b1b; padding:6px;">Stop Scan All</button>
+        </div>
         <button id="exportShpBtn" onclick="exportShapefile()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Shapefile (.zip)</button>
         <button id="exportGeoJsonBtn" onclick="exportGeoJSON()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Candidates (GeoJSON)</button>
         <button id="exportTiffBtn" onclick="exportMetricGeoTIFF()" style="display:none; background:#0f172a; color:white; border:none; cursor:pointer;">Export Analysis Raster (GeoTIFF)</button>
@@ -633,6 +639,76 @@
     // checks whether that exact object has itself been added to the map, not
     // whether its members happen to be visible via some other reference.
     let detectedFeaturesLayer = L.layerGroup([markersLayer, polygonsLayer]).addTo(map);
+
+    // ---- Per-mode detection layers ----
+    // Every scan mode draws into its own layer with its own colour and
+    // letter, so the results of several modes (Scan All) can sit on the
+    // map together and be shown/hidden per mode from the legend. The same
+    // colours are used in the 3D view.
+    const MODE_STYLE = {
+        basecamp:   { color: '#f97316', letter: 'B', label: 'Base camps (Phase 2)' },
+        huntcamp:   { color: '#16a34a', letter: 'H', label: 'Hunt camps (Phase 3)' },
+        ceremonial: { color: '#7c3aed', letter: 'K', label: 'Ceremonial karst (Phase 4)' },
+        caves:      { color: '#0284c7', letter: 'C', label: 'Caves / sinkholes' },
+        mounds:     { color: '#a16207', letter: 'M', label: 'Mounds' },
+        shelter:    { color: '#db2777', letter: 'R', label: 'Rockshelters' },
+        settlement: { color: '#dc2626', letter: 'S', label: 'Settlement hotspots' },
+    };
+    const SCAN_ALL_ORDER = ['basecamp', 'huntcamp', 'ceremonial', 'caves', 'mounds', 'shelter', 'settlement'];
+    const modeLayers = {};
+    let scanAllActive = false, scanAllCancel = false;
+    let last3DOverlays = []; // [{ mode, candidateMask, highlightMask?, grid }] tinted onto the 3D terrain
+    function modeLayer(mode) {
+        if (!modeLayers[mode]) { modeLayers[mode] = L.layerGroup(); detectedFeaturesLayer.addLayer(modeLayers[mode]); }
+        return modeLayers[mode];
+    }
+    function featureIcon(mode) {
+        const st = MODE_STYLE[mode] || { color: '#475569', letter: '?' };
+        return L.divIcon({
+            className: 'det-icon',
+            html: `<div style="background:${st.color};color:#fff;width:20px;height:20px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5);font:bold 11px/20px sans-serif;text-align:center;">${st.letter}</div>`,
+            iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12]
+        });
+    }
+    function clearDetections() {
+        markersLayer.clearLayers();
+        polygonsLayer.clearLayers();
+        for (const m in modeLayers) { modeLayers[m].clearLayers(); detectedFeaturesLayer.addLayer(modeLayers[m]); } // new results start visible
+        detectedFeatures = [];
+        last3DOverlays = [];
+        updateDetectionLegend();
+    }
+    function modeVisible(mode) { return !modeLayers[mode] || detectedFeaturesLayer.hasLayer(modeLayers[mode]); }
+    function toggleModeLayer(mode, on) {
+        const lyr = modeLayer(mode);
+        if (on) detectedFeaturesLayer.addLayer(lyr); else detectedFeaturesLayer.removeLayer(lyr);
+    }
+    const detectionLegend = L.control({ position: 'topleft' });
+    detectionLegend.onAdd = function () {
+        const div = L.DomUtil.create('div');
+        div.id = 'detLegend';
+        div.style.cssText = 'display:none;background:rgba(255,255,255,0.95);padding:6px 8px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.3);font:12px sans-serif;color:#1e293b;max-width:230px;';
+        L.DomEvent.disableClickPropagation(div);
+        L.DomEvent.disableScrollPropagation(div);
+        return div;
+    };
+    detectionLegend.addTo(map);
+    function updateDetectionLegend() {
+        const div = document.getElementById('detLegend');
+        if (!div) return;
+        const counts = {};
+        for (const f of detectedFeatures) counts[f.mode] = (counts[f.mode] || 0) + 1;
+        const modes = SCAN_ALL_ORDER.filter(m => counts[m]);
+        if (!modes.length) { div.style.display = 'none'; return; }
+        div.innerHTML = `<b>Detected features</b> (${detectedFeatures.length})` + modes.map(m => {
+            const st = MODE_STYLE[m];
+            return `<label style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer;">
+                <input type="checkbox" ${modeVisible(m) ? 'checked' : ''} onchange="toggleModeLayer('${m}', this.checked)" style="margin:0;">
+                <span style="background:${st.color};color:#fff;border-radius:50%;width:16px;height:16px;font:bold 10px/16px sans-serif;text-align:center;flex:none;">${st.letter}</span>
+                <span>${st.label}: <b>${counts[m]}</b></span></label>`;
+        }).join('');
+        div.style.display = 'block';
+    }
 
     // Map Sync Variables
     let currentDEM = null;
@@ -1596,9 +1672,7 @@
         currentDEM = newDEM;
         cachedFlow = null; // stale - tied to the PREVIOUS DEM's terrain, now replaced
         lastMetricRaster = null; lastMetricGrid = null;
-        markersLayer.clearLayers();
-        polygonsLayer.clearLayers();
-        detectedFeatures = [];
+        clearDetections();
         document.getElementById("exportShpBtn").style.display = "none";
 
         fullDemGrid = { data: currentDEM, w: demWidth, h: demHeight, bounds: demBounds, res: effRes };
@@ -1615,7 +1689,7 @@
         lastSettlementRasters = null;
         updateSmoothInfo();
 
-        lastExportRaster = null; last3DOverlay = null; lastViewshedCtx = null;
+        lastExportRaster = null; lastViewshedCtx = null;
         if (viewshedOverlay) { map.removeLayer(viewshedOverlay); layerControl.removeLayer(viewshedOverlay); viewshedOverlay = null; }
         updateExportButtons();
         renderAllGLLayers();
@@ -1634,6 +1708,7 @@
         }
         document.getElementById('status').innerText = statusMsg;
         document.getElementById("scanBtn").style.display = "block";
+        document.getElementById("scanAllBtn").style.display = "block";
         document.getElementById("view3dBtn").style.display = "block";
         document.getElementById('autoTuneReport').style.display = 'none';
         if (document.getElementById('autoTuneOnDownload').checked) setTimeout(autoDetectSettings, 50);
@@ -4080,7 +4155,7 @@
         lastSettlementRasters = { waterwayDist, hand, slopeDegRaster, grid: gridInfo() };
 
         if (settlementGL.gl) {
-            if (!settlementGL.visible) settlementLayer.addTo(map); // auto-show so the result is immediately visible
+            if (!settlementGL.visible && !scanAllActive) settlementLayer.addTo(map); // auto-show (not during Scan All, where it would cover the other results)
             setLayerSource(settlementGL, buildRasterSource(rank, demWidth, demHeight, demBounds));
         }
 
@@ -4094,9 +4169,7 @@
         // worded for what a settlement confirmation actually requires.
         status.innerText = "Finding top candidate areas...";
         await new Promise(r => setTimeout(r, 0));
-        markersLayer.clearLayers();
-        polygonsLayer.clearLayers();
-        detectedFeatures = [];
+        if (!scanAllActive) clearDetections();
         const hotspotPercent = parseFloat(document.getElementById('hotspotPercent').value);
         const hotspotRankThreshold = 1 - hotspotPercent / 100;
         const hotspotMask = new Uint8Array(demWidth * demHeight);
@@ -4121,18 +4194,19 @@
                                 <b>Match Score:</b> ${matchScore}%<br>
                                 <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}
                                 ${confirmHtml}`;
-            L.marker([lat, lon]).bindPopup(popupHtml).addTo(markersLayer);
+            L.marker([lat, lon], { icon: featureIcon('settlement') }).bindPopup(popupHtml).addTo(modeLayer('settlement'));
             // Same oriented-ellipse geometry and shapefile pipeline every other
             // scan mode uses, so this mode isn't the odd one out - circularity/
             // elongation here describe the exported region's actual boundary
             // shape, not a meaningful property of a probability zone the way
             // they are for a sinkhole or mound.
             const ring = ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
-            L.polygon(ring, { color: '#dc2626', weight: 2, fillColor: '#dc2626', fillOpacity: 0.15, interactive: false }).addTo(polygonsLayer);
+            L.polygon(ring, { color: MODE_STYLE.settlement.color, weight: 2, fillColor: MODE_STYLE.settlement.color, fillOpacity: 0.15, interactive: false }).addTo(modeLayer('settlement'));
             detectedFeatures.push({ mode: 'settlement', k, lat, lon, diameter, matchScore, grid: gridInfo() });
         }
         lastExportRaster = { data: rank, name: 'settlement_likelihood_rank', mode: 'settlement', grid: gridInfo(true) };
-        last3DOverlay = null;
+        // (no 3D tint for settlement: it's a broad likelihood zone, shown by its markers)
+        updateDetectionLegend();
         updateExportButtons();
 
         status.innerText = `Settlement likelihood computed - ${hotspots.length} candidate area(s) marked${hasKnownSiteData ? '' : ' (no confirmed mounds or settlement sites yet, so that factor was skipped and the other three reweighted)'}.`;
@@ -4168,6 +4242,60 @@
         }
     }
 
+    // Runs every scan mode in turn on the same area, each with its own
+    // thresholds (exactly as if selected by hand), keeping all results on
+    // the map and in the 3D view. The mode you had selected is restored.
+    async function runScanAll() {
+        if (autoTuneRunning) await autoTuneRunning;
+        if (!currentDEM || scanInProgress || downloadAbort) return;
+        if (!checkDTMResolution()) return;
+        const pick = pickScanGrid();
+        if (pick.error) { document.getElementById('status').innerText = pick.error; return; }
+        const status = document.getElementById('status');
+        const btns = ['downloadBtn', 'scanBtn', 'scanAllBtn', 'autoTuneBtn'].map(id => document.getElementById(id));
+        const wrap = document.getElementById('scanAllWrap'), bar = document.getElementById('scanAllBar'), ptext = document.getElementById('scanAllProgressText');
+        const cancelBtn = document.getElementById('scanAllCancelBtn');
+        const originalMode = scanModeEl.value;
+        scanInProgress = true; scanAllActive = true; scanAllCancel = false;
+        btns.forEach(b => b.disabled = true);
+        cancelBtn.disabled = false; cancelBtn.innerText = 'Stop Scan All';
+        wrap.style.display = 'block'; bar.style.width = '0%';
+        clearDetections();
+        const counts = [];
+        const t0 = Date.now();
+        try {
+            await withGrid(pick.grid, async () => {
+                for (let idx = 0; idx < SCAN_ALL_ORDER.length && !scanAllCancel; idx++) {
+                    const m = SCAN_ALL_ORDER[idx];
+                    ptext.innerText = `Scan All: ${idx + 1} of ${SCAN_ALL_ORDER.length} - ${MODE_STYLE[m].label}...`;
+                    scanModeEl.value = m;
+                    onScanModeChange(); // loads this mode's thresholds into the sliders
+                    const before = detectedFeatures.length;
+                    await runScannerOnGrid();
+                    counts.push([m, detectedFeatures.length - before]);
+                    bar.style.width = (100 * (idx + 1) / SCAN_ALL_ORDER.length).toFixed(0) + '%';
+                }
+            });
+        } catch (err) {
+            console.error(err);
+            status.innerText = `Scan All stopped by an error during ${MODE_STYLE[scanModeEl.value] ? MODE_STYLE[scanModeEl.value].label : 'a scan'}: ${err.message || err}`;
+        } finally {
+            scanAllActive = false; scanInProgress = false;
+            scanModeEl.value = originalMode;
+            onScanModeChange();
+            btns.forEach(b => b.disabled = false);
+            wrap.style.display = 'none';
+            updateDetectionLegend();
+            updateExportButtons();
+        }
+        const found = counts.filter(([, n]) => n > 0);
+        const total = counts.reduce((a, [, n]) => a + n, 0);
+        status.innerText = `${scanAllCancel ? 'Scan All stopped' : 'Scan All complete'} (${counts.length} of ${SCAN_ALL_ORDER.length} modes, ${Math.round((Date.now() - t0) / 1000)} s): ` +
+            (total ? `${total} feature(s) - ` + found.map(([m, n]) => `${n} ${MODE_STYLE[m].label.toLowerCase()}`).join(', ') + '. Toggle each type in the legend at the top left; all of them also show in the 3D view.'
+                   : 'nothing detected with the current settings.') +
+            (pick.cropped ? ` (Scanned the ${pick.grid.w.toLocaleString()} x ${pick.grid.h.toLocaleString()} px area in view.)` : '');
+    }
+
     async function runScannerOnGrid() {
         if (!currentDEM) return;
         const mode0 = document.getElementById('scanMode').value;
@@ -4176,9 +4304,7 @@
         const status = document.getElementById("status");
         const scanBtn = document.getElementById("scanBtn");
         scanBtn.disabled = true;
-        markersLayer.clearLayers();
-        polygonsLayer.clearLayers();
-        detectedFeatures = [];
+        if (!scanAllActive) clearDetections(); // Scan All keeps every mode's results
 
         const mode = document.getElementById('scanMode').value;
         // Sliders are entered in feet; the algorithm itself stays in meters
@@ -4403,8 +4529,8 @@
             return true;
         });
 
-        const customIcon = L.Icon.Default.extend({ options: { className: (mode === "caves" || mode === "ceremonial") ? 'cave-marker' : mode === "mounds" ? 'mound-marker' : (mode === "shelter" || mode === "basecamp") ? 'shelter-marker' : mode === "huntcamp" ? 'hunt-marker' : '' } });
-        const iconInst = new customIcon();
+        const iconInst = featureIcon(mode);
+        const modeColor = MODE_STYLE[mode].color;
 
         let suppressedCount = 0;
         for (const k of filtered) {
@@ -4497,7 +4623,7 @@
                                 <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}
                                 ${shapeWarning}${confirmHtml}${significanceHtml}`;
 
-            L.marker([lat, lon], {icon: iconInst}).bindPopup(popupHtml).addTo(markersLayer);
+            L.marker([lat, lon], {icon: iconInst}).bindPopup(popupHtml).addTo(modeLayer(mode));
             // Same oriented-ellipse geometry used for the shapefile export, so the
             // map view and the exported file always agree - an elongated feature
             // shows elongated here too, not a generic circle. Leaflet wants
@@ -4505,14 +4631,15 @@
             // convention), so each point gets swapped going in. Non-interactive so
             // it's purely visual and doesn't steal clicks from the marker/map.
             const ring = ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
-            L.polygon(ring, { color: '#dc2626', weight: 2, fillColor: '#dc2626', fillOpacity: 0.15, interactive: false }).addTo(polygonsLayer);
+            L.polygon(ring, { color: modeColor, weight: 2, fillColor: modeColor, fillOpacity: 0.15, interactive: false }).addTo(modeLayer(mode));
             detectedFeatures.push({ mode, k, lat, lon, diameter, matchScore, grid: gridInfo() });
         }
 
         lastMetricRaster = baseScaleMetricRaster; lastScanMode = mode; lastMetricGrid = gridInfo();
         lastExportRaster = baseScaleMetricRaster ? { data: baseScaleMetricRaster, name: `${mode}_${modeMetricLabel(mode).toLowerCase().replace(/[^a-z]+/g, '_')}_m`, mode, grid: gridInfo(true) } : null;
-        last3DOverlay = modeCtx && modeCtx.overlay3D ? modeCtx.overlay3D : (lastMask ? { candidateMask: lastMask } : null);
-        if (last3DOverlay) last3DOverlay.grid = gridInfo();
+        const ov3 = modeCtx && modeCtx.overlay3D ? { ...modeCtx.overlay3D } : (lastMask ? { candidateMask: lastMask } : null);
+        if (ov3) { ov3.grid = gridInfo(); ov3.mode = mode; last3DOverlays.push(ov3); }
+        updateDetectionLegend();
         const shownCount = filtered.length - suppressedCount;
         status.innerText = `Scan complete. Found ${shownCount} candidate feature(s).` +
             (suppressedCount > 0 ? ` (${suppressedCount} more matched a location you'd already marked not real, and were skipped.)` : '') +
@@ -4974,7 +5101,6 @@
     // geometry"; these two exports do exactly that from the browser, so a
     // scan's results drop straight into QGIS/ArcGIS or a Python pipeline.
     let lastExportRaster = null; // { data: Float32Array, name, mode } - the last scan's analysis raster
-    let last3DOverlay = null;    // { candidateMask, highlightMask? } - tinted onto the 3D terrain
     function featureTypeCode(mode) {
         return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial' }[mode] || 'Feature';
     }
@@ -5099,6 +5225,18 @@
         return o;
     }
 
+    // Legend for the 3D view: one swatch per visible detected mode, plus the
+    // amber pipeline context when a single karst-workflow scan provided it.
+    function legend3D() {
+        const counts = {};
+        for (const f of detectedFeatures) if (modeVisible(f.mode)) counts[f.mode] = (counts[f.mode] || 0) + 1;
+        const modes = SCAN_ALL_ORDER.filter(m => counts[m]);
+        if (!modes.length) return '<span style="color:#cbd5e1">No detected features yet. Run a scan (or Scan All) to see them here.</span>';
+        let html = modes.map(m => `<span style="color:${MODE_STYLE[m].color}">&#9632;</span> ${MODE_STYLE[m].label} (${counts[m]})`).join(' &nbsp;');
+        if (last3DOverlays.length === 1 && last3DOverlays[0].highlightMask) html += ' &nbsp;<span style="color:#fbbf24">&#9632;</span> pipeline context (bluff faces / choke points / sinking streams)';
+        return html;
+    }
+
     function open3DView() {
         if (!currentDEM || view3D) return;
         const overlay = document.createElement('div');
@@ -5110,7 +5248,7 @@
                 <div style="background:rgba(15,23,42,0.8);padding:8px 10px;border-radius:8px;pointer-events:auto;max-width:560px;line-height:1.4;">
                     <b>3D Fly-Through</b> (bare-earth DTM in view, ${fullDemGrid.res.toFixed(2)} m/px)<br>
                     Drag to look &middot; W/A/S/D or arrows to fly &middot; Q/E down/up &middot; Shift = fast &middot; wheel = forward/back<br>
-                    <span style="color:#f87171">&#9632;</span> scan candidates &nbsp;<span style="color:#fbbf24">&#9632;</span> ${last3DOverlay && last3DOverlay.highlightMask ? 'pipeline context (bluff faces / choke points / sinking streams)' : 'run a karst workflow scan to add context'} &nbsp;<span style="color:#f472b6">&#9679;</span> markers
+                    ${legend3D()}
                     <div style="margin-top:4px;">Vertical exaggeration <input id="view3dExag" type="range" min="1" max="5" step="0.25" value="1.5" style="vertical-align:middle;width:120px;"> <span id="view3dExagVal">1.5x</span></div>
                 </div>
                 <button id="view3dClose" style="margin-left:auto;width:auto;pointer-events:auto;background:#f1f5f9;">Close 3D view</button>
@@ -5199,7 +5337,10 @@
         const texZ = resample(tw, th);
         const dxM = sizeX / tw, dzM = sizeZ / th;
         const nrmPx = new Uint8Array(tw * th * 4), albPx = new Uint8Array(tw * th * 4);
-        const ov = last3DOverlay && last3DOverlay.grid ? last3DOverlay : null;
+        // Candidate areas of every visible mode, tinted in that mode's colour
+        const hexRGB = (h) => [parseInt(h.slice(1, 3), 16) / 255, parseInt(h.slice(3, 5), 16) / 255, parseInt(h.slice(5, 7), 16) / 255];
+        const ovs = last3DOverlays.filter(o => o.grid && o.candidateMask && modeVisible(o.mode)).map(o => ({ ...o, rgb: hexRGB(MODE_STYLE[o.mode].color) }));
+        const hiOv = ovs.length === 1 && ovs[0].highlightMask ? ovs[0] : null;
         const maskAny = (mask, og, lat0, lat1, lon0, lon1) => {
             // any set cell of `mask` (on grid og) inside this lat/lon box
             const b = og.bounds;
@@ -5225,10 +5366,12 @@
                 const rock = Math.min(1, Math.max(0, (slopeDeg - 28) / 20));
                 const t = (z - minZ) / relief;
                 let R = (0.40 + 0.08 * t) * (1 - rock) + 0.58 * rock, G = (0.40 + 0.06 * t) * (1 - rock) + 0.56 * rock, B = (0.27 + 0.05 * t) * (1 - rock) + 0.52 * rock;
-                if (ov) {
+                if (ovs.length) {
                     const lon0 = rb.w + c / tw * (rb.e - rb.w), lon1 = rb.w + (c + 1) / tw * (rb.e - rb.w);
-                    if (ov.candidateMask && maskAny(ov.candidateMask, ov.grid, lat0, lat1, lon0, lon1)) { R = 0.95; G = 0.25; B = 0.2; }
-                    else if (ov.highlightMask && maskAny(ov.highlightMask, ov.grid, lat0, lat1, lon0, lon1)) { R = 0.98; G = 0.72; B = 0.15; }
+                    let hit = null;
+                    for (const o of ovs) if (maskAny(o.candidateMask, o.grid, lat0, lat1, lon0, lon1)) { hit = o; break; }
+                    if (hit) { [R, G, B] = hit.rgb; }
+                    else if (hiOv && hiOv.highlightMask && maskAny(hiOv.highlightMask, hiOv.grid, lat0, lat1, lon0, lon1)) { R = 0.98; G = 0.72; B = 0.15; }
                 }
                 albPx[o] = R * 255; albPx[o+1] = G * 255; albPx[o+2] = B * 255; albPx[o+3] = 255;
             }
@@ -5252,9 +5395,14 @@
         // point on top, so they're findable from a distance.
         const extent = Math.max(sizeX, sizeZ);
         const stalk = Math.max(10, relief * 0.15);
-        const mk = [];
-        for (const f of detectedFeatures) {
+        // Grouped by mode so each group can be drawn in its mode's colour
+        const mk = [], mkGroups = [];
+        const featsSorted = detectedFeatures.filter(f => modeVisible(f.mode)).sort((a, b) => SCAN_ALL_ORDER.indexOf(a.mode) - SCAN_ALL_ORDER.indexOf(b.mode));
+        for (const f of featsSorted) {
             if (f.lat > rb.n || f.lat < rb.s || f.lon < rb.w || f.lon > rb.e) continue;
+            const grp = mkGroups[mkGroups.length - 1];
+            if (!grp || grp.mode !== f.mode) mkGroups.push({ mode: f.mode, start: mk.length / 6, count: 0, rgb: hexRGB(MODE_STYLE[f.mode].color) });
+            mkGroups[mkGroups.length - 1].count++;
             const fr = (rb.n - f.lat) / (rb.n - rb.s), fc = (f.lon - rb.w) / (rb.e - rb.w);
             const zi = meshZ[Math.min(gh - 1, Math.round(fr * (gh - 1))) * gw + Math.min(gw - 1, Math.round(fc * (gw - 1)))];
             const x = fc * sizeX - cx, zz = fr * sizeZ - cz, y = zi >= nd ? zi - minZ : 0;
@@ -5376,12 +5524,17 @@
             // Feature markers
             if (markerPos.length) {
                 gl.disableVertexAttribArray(aUv);
-                gl.bindBuffer(gl.ARRAY_BUFFER, bMk); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
-                gl.uniform1f(uFlat, 1); gl.uniform3f(uFlatColor, 0.96, 0.45, 0.71);
-                gl.drawArrays(gl.LINES, 0, markerPos.length / 3);
-                gl.uniform1f(uPt, 9 * dpr);
-                gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 24, 12); // just the top of each stalk
-                gl.drawArrays(gl.POINTS, 0, markerPos.length / 6);
+                gl.bindBuffer(gl.ARRAY_BUFFER, bMk);
+                gl.uniform1f(uFlat, 1);
+                for (const grp of mkGroups) {
+                    gl.uniform3f(uFlatColor, grp.rgb[0], grp.rgb[1], grp.rgb[2]);
+                    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 0, 0);
+                    gl.uniform1f(uPt, 1);
+                    gl.drawArrays(gl.LINES, grp.start * 2, grp.count * 2);
+                    gl.uniform1f(uPt, 11 * dpr);
+                    gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 24, 12); // just the top of each stalk
+                    gl.drawArrays(gl.POINTS, grp.start, grp.count);
+                }
             }
             raf = requestAnimationFrame(frame);
         }
