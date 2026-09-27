@@ -242,6 +242,27 @@
                 <option value="custom">Custom (use sliders below)</option>
             </select>
             <div class="slider-row" style="margin-top:6px;">
+                <label>Min template match</label>
+                <input type="range" id="moundMinTemplate" min="0" max="0.95" step="0.05" value="0.6" oninput="updateThresholdVal('moundMinTemplate','',2)">
+                <span class="val-display" id="moundMinTemplateVal">0.60</span>
+            </div>
+            <div class="slider-row">
+                <label>Min height : width</label>
+                <input type="range" id="moundMinHW" min="0" max="0.15" step="0.005" value="0.03" oninput="updateThresholdVal('moundMinHW','',3)">
+                <span class="val-display" id="moundMinHWVal">0.030</span>
+            </div>
+            <div class="slider-row">
+                <label>Error runs (persistence)</label>
+                <input type="range" id="moundRuns" min="0" max="30" step="1" value="12" oninput="updateThresholdVal('moundRuns','',0)">
+                <span class="val-display" id="moundRunsVal">12</span>
+            </div>
+            <div class="slider-row">
+                <label>Min persistence</label>
+                <input type="range" id="moundMinPersist" min="0.3" max="1" step="0.05" value="0.7" oninput="updateThresholdVal('moundMinPersist','',2)">
+                <span class="val-display" id="moundMinPersistVal">0.70</span>
+            </div>
+            <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">Method: iMound (Freeland et al. 2016). The terrain is detrended and flipped upside down, and the "pits" a fill has to raise are the mounds, measured from their own base contour, so only closed highs count, not hillside bulges or ridge noses. Each candidate is then re-tested with random 3DEP-grade LiDAR error added (stochastic depression analysis) and must persist in most runs. Finally it must correlate with an ideal conical dome or flat-topped platform (template matching, Davis et al. 2018).</div>
+            <div class="slider-row" style="margin-top:6px;">
                 <label>Max ground slope</label>
                 <input type="range" id="moundMaxGroundSlope" min="2" max="30" step="1" value="8" oninput="updateThresholdVal('moundMaxGroundSlope','°',0)">
                 <span class="val-display" id="moundMaxGroundSlopeVal">8°</span>
@@ -1915,7 +1936,7 @@
     const trendRadiusRow = document.getElementById('trendRadiusRow');
     function syncScanModeUI() {
         const mode = scanModeEl.value;
-        trendRadiusRow.style.display = mode === 'mounds' ? 'flex' : 'none';
+        trendRadiusRow.style.display = 'none'; // the iMound mound method sets its own detrending radius
         document.getElementById('maxFlankSlopeRow').style.display = mode === 'mounds' ? 'flex' : 'none';
         document.getElementById('flankSlopeWarningCaption').style.display = mode === 'mounds' ? 'block' : 'none';
         document.getElementById('maxElongationRow').style.display = mode === 'mounds' ? 'flex' : 'none';
@@ -2016,7 +2037,7 @@
             // warning, while a natural ravine-edge ridge or levee - not
             // bounded by any construction effort - can easily run
             // considerably longer relative to its width.
-            platform: { minHeight: 3, minCircularity: 0.15, maxCircularity: 0.92, minDiameter: 40, maxDiameter: 900, trendRadius: 80, maxFlankSlope: 75, maxElongation: 3.0 },
+            platform: { minHeight: 3, minCircularity: 0.45, maxCircularity: 0.92, minDiameter: 40, maxDiameter: 900, trendRadius: 80, maxFlankSlope: 75, maxElongation: 3.0 },
             // A permissive baseline spanning both shapes, for a single quick
             // scan when you don't know (or don't want to wait for both).
             // Not used by "All Shapes" - conical's and platform's own ranges
@@ -2409,69 +2430,59 @@
         const status = document.getElementById('status');
 
         if (mode === 'mounds') {
-            // Checks every scale/preset combination the real "All Shapes"
-            // scan actually runs at this exact point, reporting the measured
-            // values and precisely which filter (if any) rejects each one -
-            // built specifically to answer "why didn't the scan find the
-            // mound I know is right here," rather than guessing from
-            // synthetic scenarios that may not match what's actually on the
-            // ground at a real site.
-            const denoiseRadius = Math.max(1, Math.round(1.0 / effRes));
-            const denoised = boxSmooth(currentDEM, demWidth, demHeight, denoiseRadius, -100);
-            const candidateThreshold = Math.max(0.02, 5 * estimateNoiseFloor(currentDEM, denoised, -100));
-            const slopeDegRaster = computeSlopeDegrees(denoised, demWidth, demHeight, effRes, -100);
-            const presetDefs = moundShapePresetDefs();
-            const rows = [];
-            let bestPassing = null, bestAny = null;
-            for (const name of ['conical', 'platform']) {
-                const p = presetDefs[name];
-                const minHeightM = feetToMeters(p.minHeight), minDiameterM = feetToMeters(p.minDiameter), maxDiameterM = feetToMeters(p.maxDiameter);
-                // Same 4 scales the real scan uses - see runScanner's mounds
-                // branch for why the maxDiameter-derived one exists.
-                const scalesFt = [...new Set([p.trendRadius * 0.5, p.trendRadius, p.trendRadius * 3, p.maxDiameter / 2])];
-                for (const radiusFt of scalesFt) {
-                    const { metricRaster, candidateMask } = computeMoundsMetricFromDenoised(denoised, feetToMeters(radiusFt), candidateThreshold);
-                    const i = r * demWidth + c;
-                    if (!candidateMask[i]) {
-                        rows.push(`<tr><td>${name}</td><td>${radiusFt.toFixed(0)}ft</td><td colspan="4">no signal above the noise-adaptive threshold here</td></tr>`);
-                        continue;
-                    }
-                    const visited = new Uint8Array(demWidth * demHeight);
-                    const stR = new Int32Array(demWidth * demHeight), stC = new Int32Array(demWidth * demHeight);
-                    const comp = traceOneComponent(candidateMask, metricRaster, denoised, demWidth, demHeight, effRes, -100, visited, stR, stC, r, c, null, slopeDegRaster);
-                    if (!comp) continue;
-                    const diam = 2 * Math.sqrt(comp.area / Math.PI);
-                    const reasons = [];
-                    if (comp.incomplete) reasons.push('touches tile edge/NoData gap');
-                    if (comp.maxMetric < minHeightM) reasons.push(`height below ${p.minHeight}ft min`);
-                    if (diam < minDiameterM) reasons.push(`diameter below ${p.minDiameter}ft min`);
-                    if (diam > maxDiameterM) reasons.push(`diameter ABOVE ${p.maxDiameter}ft max`);
-                    if (comp.circularity < p.minCircularity) reasons.push(`circularity below ${p.minCircularity} min`);
-                    const passed = reasons.length === 0;
-                    if (passed && (!bestPassing || comp.maxMetric > bestPassing.comp.maxMetric)) bestPassing = { comp, diam };
-                    if (!bestAny || comp.maxMetric > bestAny.comp.maxMetric) bestAny = { comp, diam };
-                    rows.push(`<tr style="${passed ? 'background:#dcfce7;' : ''}"><td>${name}</td><td>${radiusFt.toFixed(0)}ft</td>` +
-                        `<td>${metersToFeetInches(comp.maxMetric)}</td><td>${metersToFeetInches(diam)}</td>` +
-                        `<td>${comp.circularity.toFixed(2)}</td><td>${passed ? 'PASSES' : reasons.join('; ')}</td></tr>`);
-                }
+            // Runs the same iMound pipeline as the real scan at this point and
+            // reports each check it passes or fails, to answer "why wasn't
+            // the mound I know is here found?"
+            const nd = -100, W = demWidth, H = demHeight, n = W * H;
+            const denoised = boxSmooth(currentDEM, W, H, Math.max(1, Math.round(1.0 / effRes)), nd);
+            const noiseSigma = estimateNoiseFloor(currentDEM, denoised, nd);
+            const thr = Math.max(0.05, 5 * noiseSigma);
+            const defs = moundShapePresetDefs();
+            const presets = [{ name: 'conical', ...defs.conical }, { name: 'platform', ...defs.platform }];
+            // Same multi-scale detrending as the scan: try each size class's
+            // radius and use the first in which this point is a closed high
+            const i0 = r * W + c;
+            let resid = null, height = null;
+            for (const p of presets) for (const scaleM of moundScalesM(p)) {
+                const trend = boxSmooth(denoised, W, H, Math.max(2, Math.round(scaleM / effRes)), nd);
+                const rs = new Float32Array(n);
+                for (let i = 0; i < n; i++) rs[i] = (denoised[i] < nd || trend[i] < nd) ? -9999 : denoised[i] - trend[i];
+                const hh = iMoundHeights(rs, W, H, nd);
+                if (!height || (hh[i0] > thr && !(height[i0] > thr))) { resid = rs; height = hh; }
+                if (height[i0] > thr && hh === height) break;
             }
-            const html = `<b>Diagnostic at this point (all 6 scale/shape combinations the real scan tries):</b>
-                           <table style="font-size:0.72rem;border-collapse:collapse;margin-top:6px;">
-                           <tr style="font-weight:bold;"><td>Shape</td><td>Scale</td><td>Height</td><td>Diameter</td><td>Circ.</td><td>Result</td></tr>
-                           ${rows.join('')}
-                           </table>`;
+            const lines = [];
+            if (!(height[i0] > thr)) {
+                lines.push(`<b>Not a closed high here</b> (iMound height ${height[i0].toFixed(2)} m, needs &gt; ${thr.toFixed(2)} m). The ground doesn't rise above a closed contour at this spot, so it's a slope, bulge or ridge nose rather than a free-standing mound, or the mound is lower than the LiDAR can separate from noise.`);
+                L.popup({ maxWidth: 380 }).setLatLng(map.getBounds().getCenter()).setContent(lines.join('')).openOn(map);
+                return;
+            }
+            const mask = new Uint8Array(n);
+            for (let i = 0; i < n; i++) if (height[i] > thr) mask[i] = 1;
+            const slopeDeg = computeSlopeDegrees(denoised, W, H, effRes, nd);
+            const comp = traceOneComponent(mask, height, denoised, W, H, effRes, nd, new Uint8Array(n), new Int32Array(n), new Int32Array(n), r, c, null, slopeDeg);
+            if (!comp) return;
+            const diam = 2 * Math.sqrt(comp.area / Math.PI);
+            const gs = computeSlopeDegrees(boxSmooth(denoised, W, H, Math.max(1, Math.round(15 / effRes)), nd), W, H, effRes, nd)[rcIndex(comp)];
+            const tm = moundTemplateMatch(height, W, H, comp);
+            const persist = moundPersistence(resid, W, H, nd, comp, i0, parseInt(document.getElementById('moundRuns').value), Math.max(0.1, noiseSigma), Math.max(1, Math.round(3 / effRes)), thr);
+            const chk = (ok, text) => `<tr style="${ok ? 'background:#dcfce7' : 'background:#fee2e2'}"><td>${ok ? '&#10003;' : '&#10007;'}</td><td>${text}</td></tr>`;
+            const sizeOk = presets.filter(p => comp.maxMetric >= feetToMeters(p.minHeight) && diam >= feetToMeters(p.minDiameter) && diam <= feetToMeters(p.maxDiameter) && comp.circularity >= p.minCircularity && comp.elongation <= p.maxElongation * 1.3).map(p => p.name);
+            const html = `<b>Mound check at this point (iMound pipeline)</b>
+                <table style="font-size:0.72rem;border-collapse:collapse;margin-top:6px;">
+                ${chk(true, `Closed high: ${metersToFeetInches(comp.maxMetric)} above its base contour, ${metersToFeetInches(diam)} across`)}
+                ${chk(!comp.incomplete, 'Fully inside the download (not clipped)')}
+                ${chk(sizeOk.length > 0, `Size/height/roundness fit a size class (${sizeOk.join(', ') || 'none'}; circularity ${comp.circularity.toFixed(2)}, elongation ${comp.elongation.toFixed(1)}x)`)}
+                ${chk(gs <= parseFloat(document.getElementById('moundMaxGroundSlope').value), `Surrounding ground slope ${gs.toFixed(1)}&deg; (max ${document.getElementById('moundMaxGroundSlope').value}&deg;)`)}
+                ${chk(comp.fillRatio >= 0.6, `Solid single shape (fill ratio ${comp.fillRatio.toFixed(2)}, min 0.60)`)}
+                ${chk(comp.maxMetric / diam >= parseFloat(document.getElementById('moundMinHW').value), `Height : width ${(comp.maxMetric / diam).toFixed(3)} (min ${document.getElementById('moundMinHW').value})`)}
+                ${chk(tm.score >= parseFloat(document.getElementById('moundMinTemplate').value), `Template match ${tm.score.toFixed(2)} (${tm.shape}; min ${document.getElementById('moundMinTemplate').value})`)}
+                ${chk(persist >= parseFloat(document.getElementById('moundMinPersist').value), `Persists in ${Math.round(persist * 100)}% of LiDAR-error runs (min ${Math.round(parseFloat(document.getElementById('moundMinPersist').value) * 100)}%)`)}
+                </table><div style="font-size:0.7rem;color:#64748b;margin-top:4px;">Recorded as a confirmed mound; thresholds widen to include it if needed.</div>`;
             L.popup({ maxWidth: 420 }).setLatLng(map.getBounds().getCenter()).setContent(html).openOn(map);
-            // Still records a training example using whichever reading is
-            // most complete, exactly as before - even a reading that fails
-            // every current filter is worth recording, since widening
-            // thresholds from a known-real example is exactly the mechanism
-            // meant to fix cases like this for future scans.
-            const use = bestPassing || bestAny;
-            if (use) {
-                const lat = demBounds.n - (use.comp.centroidR / demHeight) * (demBounds.n - demBounds.s);
-                const lon = demBounds.w + (use.comp.centroidC / demWidth) * (demBounds.e - demBounds.w);
-                confirmFeature(mode, use.diam, use.comp.circularity, use.comp.elongation, use.comp.maxMetric, lat, lon, null, null);
-            }
+            const lat = demBounds.n - (comp.centroidR / demHeight) * (demBounds.n - demBounds.s);
+            const lon = demBounds.w + (comp.centroidC / demWidth) * (demBounds.e - demBounds.w);
+            confirmFeature(mode, diam, comp.circularity, comp.elongation, comp.maxMetric, lat, lon, null, null);
             return;
         }
 
@@ -3991,6 +4002,144 @@
         };
     }
 
+    // ---- MOUND DETECTION: iMound + stochastic persistence + template matching ----
+    // Published, field-validated approach for earthen mounds in LiDAR:
+    //  * iMound (Freeland et al. 2016, J. Archaeological Science 69): low-pass
+    //    the DTM, invert it so mounds become pits, fill the pits, and take
+    //    filled minus inverted: what remains are the mounds, each measured as
+    //    its height above its own lowest closed contour. It outscored OBIA on
+    //    ~10,000 Tongan mounds and missed fewer low, subtle ones. Crucially,
+    //    only CLOSED highs qualify, so hillside bulges, ridge noses and bluff
+    //    edges (the main false positives of relief-model methods) don't.
+    //  * Stochastic depression analysis (Lindsay & Creed 2006; used on
+    //    inverted DEMs for mounds by Davis et al. 2018, Southeastern
+    //    Archaeology 38): repeat the fill on the DTM plus random, spatially
+    //    correlated error at the survey's accuracy, and keep features that
+    //    persist - noise bumps vanish, real mounds don't.
+    //  * Morphometric + statistical template matching (Davis et al. 2018/
+    //    2019): size / compactness filters, then correlation with idealised
+    //    mound profiles; conic, radially symmetric shape is the strongest
+    //    single discriminator of burial mounds (Sensors 20:1192, 2020).
+    // Inputs are detrended first (DTM minus a broad moving mean), so a mound
+    // on a hilltop or terrace edge is still its own closed high.
+    const IMOUND_OFFSET = 10000; // keeps inverted values far from the NoData sentinel
+    // Detrending radii (m) used for a size class: ~0.75x its largest mound,
+    // plus a fine 30 m pass for classes that include small mounds, so a
+    // small mound on a broad hill crest separates from its host hill.
+    function moundScalesM(preset) {
+        const big = Math.max(40, 0.75 * feetToMeters(preset.maxDiameter));
+        return feetToMeters(preset.minDiameter) < 20 ? [...new Set([30, big])] : [big];
+    }
+
+    function invertForFill(resid, n, nd) {
+        const inv = new Float32Array(n);
+        for (let i = 0; i < n; i++) inv[i] = resid[i] < nd ? -9999 : IMOUND_OFFSET - resid[i];
+        return inv;
+    }
+    // Height of every cell above the closed contour enclosing it (0 = not in a mound)
+    function iMoundHeights(resid, W, H, nd) {
+        const n = W * H;
+        const inv = invertForFill(resid, n, nd);
+        const filled = fillDepressions(inv, W, H, nd);
+        const h = new Float32Array(n);
+        for (let i = 0; i < n; i++) if (inv[i] > nd) h[i] = filled[i] - inv[i];
+        return h;
+    }
+    // Gaussian random numbers (Box-Muller) from a seeded generator, so a
+    // scan is repeatable
+    function makeGauss(seed) {
+        let s = seed >>> 0;
+        const u = () => ((s = (s * 1664525 + 1013904223) >>> 0) + 0.5) / 4294967296;
+        return () => Math.sqrt(-2 * Math.log(u())) * Math.cos(2 * Math.PI * u());
+    }
+    // Stochastic persistence of ONE candidate: re-runs iMound on a window
+    // around it `runs` times with correlated error (RMSE `rmse`, correlation
+    // length ~`rangePx` cells) and returns the fraction of runs in which the
+    // candidate's peak is still inside a mound at least `minH` high.
+    function moundPersistence(resid, W, H, nd, k, peakIdx, runs, rmse, rangePx, minH) {
+        if (runs <= 0) return 1;
+        const rad = Math.ceil(Math.sqrt(k.count / Math.PI) * Math.max(1, k.elongation)) ;
+        const m = Math.max(rad, 6) + rangePx * 2;
+        const r0 = Math.max(0, Math.round(k.centroidR) - rad - m), r1 = Math.min(H, Math.round(k.centroidR) + rad + m + 1);
+        const c0 = Math.max(0, Math.round(k.centroidC) - rad - m), c1 = Math.min(W, Math.round(k.centroidC) + rad + m + 1);
+        const w = c1 - c0, h = r1 - r0, n = w * h;
+        const pr = ((peakIdx / W) | 0) - r0, pc = (peakIdx % W) - c0;
+        if (pr < 0 || pr >= h || pc < 0 || pc >= w) return 0;
+        const base = new Float32Array(n);
+        for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) base[r * w + c] = resid[(r0 + r) * W + c0 + c];
+        const gauss = makeGauss(peakIdx * 2654435761 + 97);
+        let hits = 0;
+        const noise = new Float32Array(n), pert = new Float32Array(n);
+        for (let it = 0; it < runs; it++) {
+            for (let i = 0; i < n; i++) noise[i] = gauss();
+            let sm = rangePx > 0 ? boxSmooth(boxSmooth(noise, w, h, rangePx, -1e9), w, h, rangePx, -1e9) : noise;
+            let ss = 0;
+            for (let i = 0; i < n; i++) ss += sm[i] * sm[i];
+            const scale = rmse / Math.sqrt(ss / n || 1);
+            for (let i = 0; i < n; i++) pert[i] = base[i] < nd ? base[i] : base[i] + sm[i] * scale;
+            const hh = iMoundHeights(pert, w, h, nd);
+            if (hh[pr * w + pc] >= minH) hits++;
+        }
+        return hits / runs;
+    }
+    // Normalised cross-correlation of a candidate's height surface with an
+    // idealised conical dome and a flat-topped platform, both fitted to the
+    // candidate's own best-fit ellipse (size, elongation, orientation).
+    // Returns { score, shape } with score in [-1, 1].
+    // Flat-top measure: of the cells more than a quarter of the way up the
+    // mound, the share within 10% of its peak height. A cone/dome gives ~0.1
+    // (only its tip is that high); a flat-topped platform ~0.25 or more.
+    function moundFlatTop(height, W, H, k) {
+        const R = Math.ceil(Math.sqrt(k.count / Math.PI) * Math.max(1, k.elongation) * 1.5) + 1;
+        const r0 = Math.round(k.centroidR), c0 = Math.round(k.centroidC), top = k.maxMetric;
+        let hi = 0, body = 0;
+        for (let r = Math.max(0, r0 - R); r <= Math.min(H - 1, r0 + R); r++)
+            for (let c = Math.max(0, c0 - R); c <= Math.min(W - 1, c0 + R); c++) {
+                const h = height[r * W + c];
+                if (h > 0.25 * top) { body++; if (h >= 0.9 * top) hi++; }
+            }
+        return body ? hi / body : 0;
+    }
+    // The detected footprint only covers the part of the mound above the
+    // detection threshold, so the template is tried at several sizes
+    // relative to it and the best fit kept.
+    function moundTemplateMatch(height, W, H, k) {
+        let best = { score: -1, shape: 'conical / dome' };
+        for (const sc of [1.0, 1.25, 1.5, 1.8]) {
+            const r = moundTemplateMatchAt(height, W, H, k, sc);
+            if (r.score > best.score) best = r;
+        }
+        return best;
+    }
+    function moundTemplateMatchAt(height, W, H, k, sc) {
+        const aPx = sc * Math.sqrt(k.count / Math.PI * Math.max(1, k.elongation));  // semi-major (cells)
+        const bPx = Math.max(1, aPx / Math.max(1, k.elongation));                   // semi-minor
+        const th = k.orientation, ct = Math.cos(th), st = Math.sin(th);
+        const R = Math.ceil(aPx * 1.35) + 1;
+        const r0 = Math.round(k.centroidR), c0 = Math.round(k.centroidC);
+        const obs = [], dome = [], plat = [];
+        for (let r = Math.max(0, r0 - R); r <= Math.min(H - 1, r0 + R); r++) {
+            for (let c = Math.max(0, c0 - R); c <= Math.min(W - 1, c0 + R); c++) {
+                const dr = r - k.centroidR, dc = c - k.centroidC;
+                const u = dr * ct + dc * st, v = -dr * st + dc * ct;           // major/minor axis coords
+                const rho = Math.sqrt((u / aPx) ** 2 + (v / bPx) ** 2);
+                if (rho > 1.35) continue;
+                obs.push(height[r * W + c]);
+                dome.push(rho < 1 ? Math.cos(rho * Math.PI / 2) ** 2 : 0);           // smooth conical/dome profile
+                plat.push(rho < 0.55 ? 1 : rho < 1 ? (1 - rho) / 0.45 : 0);          // flat top, straight flanks
+            }
+        }
+        const ncc = (a, b) => {
+            const n = a.length; if (n < 9) return 0;
+            let ma = 0, mb = 0; for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; } ma /= n; mb /= n;
+            let sab = 0, saa = 0, sbb = 0;
+            for (let i = 0; i < n; i++) { const x = a[i] - ma, y = b[i] - mb; sab += x * y; saa += x * x; sbb += y * y; }
+            return saa > 0 && sbb > 0 ? sab / Math.sqrt(saa * sbb) : 0;
+        };
+        const d = ncc(obs, dome), p = ncc(obs, plat);
+        return d >= p ? { score: d, shape: 'conical / dome' } : { score: p, shape: 'platform / flat-topped' };
+    }
+
     // ---- SPELEOLOGICAL DATASET (Phase 4, Step 3) ----
     // Kept in memory only - deliberately NOT written to localStorage or
     // anywhere else, since state cave survey data is typically distributed
@@ -4702,145 +4851,108 @@
                 presetsToRun = [{ name: moundShapeMode, ...presetDefs[moundShapeMode] }];
             }
 
-            status.innerText = "Denoising DEM...";
-            await new Promise(r => setTimeout(r, 0));
+            const tick0 = (msg) => { status.innerText = msg; return new Promise(r => setTimeout(r, 0)); };
+            await tick0('Mounds: denoising DTM (low-pass)...');
+            const W = demWidth, H = demHeight, n = W * H;
             const denoiseRadius = Math.max(1, Math.round(1.0 / effRes));
-            denoised = boxSmooth(currentDEM, demWidth, demHeight, denoiseRadius, nodataThresh);
-            // Same adaptive, noise-aware candidate threshold used everywhere
-            // else (see estimateNoiseFloor's comment for what this fixes) -
-            // computed once per scan since denoised doesn't change across
-            // presets or scales within it.
-            const candidateThreshold = Math.max(0.02, 5 * estimateNoiseFloor(currentDEM, denoised, nodataThresh));
-            status.innerText = "Computing slope (for flank-angle plausibility check)...";
-            await new Promise(r => setTimeout(r, 0));
-            const moundSlopeDegRaster = computeSlopeDegrees(denoised, demWidth, demHeight, effRes, nodataThresh);
-            status.innerText = "Computing TPI cross-check...";
-            await new Promise(r => setTimeout(r, 0));
-            // TPI annulus scale keyed to the first preset being run - a
-            // reasonable single choice even across two differently-scaled
-            // presets in All Shapes mode, since TPI is a boost-only
-            // cross-check here, not a gate any specific scale needs to clear.
-            // Ground slope around each candidate (~30 m footprint), for the
-            // level-ground filter below
-            const groundSlope = computeSlopeDegrees(boxSmooth(denoised, demWidth, demHeight, Math.max(1, Math.round(15 / effRes)), nodataThresh), demWidth, demHeight, effRes, nodataThresh);
+            denoised = boxSmooth(currentDEM, W, H, denoiseRadius, nodataThresh);
+            const noiseSigma = estimateNoiseFloor(currentDEM, denoised, nodataThresh);
+            const candidateThreshold = Math.max(0.05, 5 * noiseSigma);
+            const moundSlopeDegRaster = computeSlopeDegrees(denoised, W, H, effRes, nodataThresh);
+            // Ground slope around each candidate (~30 m footprint): mounds were
+            // built on terraces, floodplains and ridge tops, not hillsides
+            const groundSlope = computeSlopeDegrees(boxSmooth(denoised, W, H, Math.max(1, Math.round(15 / effRes)), nodataThresh), W, H, effRes, nodataThresh);
             const maxGroundSlope = parseFloat(document.getElementById('moundMaxGroundSlope').value);
-            const tpiBaseFt = presetsToRun[0].trendRadius;
-            const tpiInnerPx = Math.max(1, Math.round(feetToMeters(tpiBaseFt) * 0.5 / effRes));
-            const tpiOuterPx = Math.max(tpiInnerPx + 1, Math.round(feetToMeters(tpiBaseFt) * 1.5 / effRes));
-            moundTPI = computeTPI(denoised, demWidth, demHeight, tpiInnerPx, tpiOuterPx, nodataThresh);
 
-            // Local Relief Model has one real limitation single-radius scanning
-            // can't get around: too small a radius partially "hugs" a large
-            // mound's own slope during erosion, badly understating its true
-            // height (validated: a 45m-radius mound measured just 34% of its
-            // true height at a 15m radius, recovering to 97% only once the
-            // radius matched the feature's own size); too large a radius risks
-            // smoothing away something genuinely small. Scanning at 0.5x/1x/3x
-            // each preset's own trend radius - the 3x figure isn't arbitrary,
-            // it's where recovery empirically plateaus - then merging
-            // same-feature detections across BOTH scales and shape presets
-            // (keeping whichever reading showed the MORE prominent relief,
-            // since under-estimation is the dominant failure mode here, not
-            // over-estimation) catches a wider size AND shape range in one
-            // scan than any single radius or single preset can.
-            let allComps = [];
-            for (const presetParams of presetsToRun) {
-                const minHeightM = feetToMeters(presetParams.minHeight);
-                const minDiameterM = feetToMeters(presetParams.minDiameter);
-                const maxDiameterM = feetToMeters(presetParams.maxDiameter);
-                // A 4th scale sized to the preset's OWN maxDiameter, in
-                // addition to the usual 0.5x/1x/3x - validated directly that
-                // this was a real gap, not just a theoretical one: a mound
-                // recovers perfectly up to a radius matching the largest
-                // scale in use, degrades right at that radius, and is
-                // MISSED ENTIRELY beyond it (tested up to 150m radius on
-                // Platform's old 73m-radius ceiling, which is well within
-                // what Platform's own 700ft Max Diameter setting implies
-                // should be detectable - the scan was structurally
-                // incapable of reaching a size range it claimed to support).
-                // Deduplicated since for Conical the gap is small enough
-                // that this can coincide with 3x already.
-                const scalesFt = [...new Set([presetParams.trendRadius * 0.5, presetParams.trendRadius, presetParams.trendRadius * 3, presetParams.maxDiameter / 2])];
-                for (const radiusFt of scalesFt) {
-                    status.innerText = `Computing Local Relief Model (${presetParams.name}, trend radius ${radiusFt.toFixed(0)}ft)...`;
-                    await new Promise(r => setTimeout(r, 0));
-                    const { metricRaster, candidateMask } = computeMoundsMetricFromDenoised(denoised, feetToMeters(radiusFt), candidateThreshold);
-                    if (presetsToRun.length === 1 && radiusFt === presetParams.trendRadius) baseScaleMetricRaster = metricRaster; // the one matching the slider - used for click-to-inspect below
-                    status.innerText = `Tracing candidate regions (${presetParams.name}, ${radiusFt.toFixed(0)}ft scale)...`;
-                    await new Promise(r => setTimeout(r, 0));
-                    const scaleComps = traceComponents(candidateMask, metricRaster, denoised, demWidth, demHeight, effRes, nodataThresh, waterwayMask, moundSlopeDegRaster);
-                    // Filter each preset's own candidates against ITS OWN
-                    // thresholds right here, before merging across presets/
-                    // scales - the shared filter below is skipped entirely
-                    // for mounds, since it's already done per-preset here.
-                    for (const k of scaleComps) {
-                        if (k.incomplete) continue;
-                        if (k.maxMetric < minHeightM) continue;
-                        const diameter = 2 * Math.sqrt(k.area / Math.PI);
-                        if (diameter < minDiameterM || diameter > maxDiameterM) continue;
-                        if (k.circularity < presetParams.minCircularity) continue;
-                        if (groundSlope[rcIndex(k)] > maxGroundSlope) continue; // knob/ridge nose on a hillside
-                        if (k.fillRatio < 0.6) continue;                         // several natural bumps merged together
-                        if (excludeWaterways && k.waterwayFraction > 0.4) {
-                            const obviouslyDeepOrBig = (k.maxMetric >= minHeightM * 2.5) || (diameter >= maxDiameterM * 0.5);
-                            if (!obviouslyDeepOrBig) continue;
-                        }
-                        allComps.push({
-                            ...k,
-                            _presetName: presetParams.name,
-                            _presetMaxCircularity: presetParams.maxCircularity,
-                            _presetMaxFlankSlope: presetParams.maxFlankSlope,
-                            _presetMaxElongation: presetParams.maxElongation,
-                            _presetMinDiameterM: minDiameterM,
-                            _presetMaxDiameterM: maxDiameterM,
-                            _presetMinHeightM: minHeightM,
-                        });
-                    }
+            // 1-3. Per size preset (multi-scale): detrend with a moving mean of
+            //      ~0.75x the preset's largest mound, run iMound, trace the
+            //      closed highs and apply that preset's morphometric filters
+            //      and template matching. A small radius lets a mound on a
+            //      hill crest separate from its host hill; a large one keeps
+            //      big platform mounds whole. Candidates found at several
+            //      scales are merged afterwards.
+            const minTemplate = parseFloat(document.getElementById('moundMinTemplate').value);
+            const minHW = parseFloat(document.getElementById('moundMinHW').value);
+            const runs = parseInt(document.getElementById('moundRuns').value);
+            const minPersist = parseFloat(document.getElementById('moundMinPersist').value);
+            const rmse = Math.max(0.1, noiseSigma);          // 3DEP QL2 vertical accuracy is ~0.1 m RMSE
+            const rangePx = Math.max(1, Math.round(3 / effRes)); // error correlation length ~3 m
+            const pre = [];
+            for (const preset of presetsToRun) for (const scaleM of moundScalesM(preset)) {
+                await tick0(`Mounds (${preset.name}, ${Math.round(scaleM)} m scale): detrending and iMound inverted-DEM fill...`);
+                const trendR = Math.max(2, Math.round(scaleM / effRes));
+                const trend = boxSmooth(denoised, W, H, trendR, nodataThresh);
+                const resid = new Float32Array(n);
+                for (let i = 0; i < n; i++) resid[i] = (denoised[i] < nodataThresh || trend[i] < nodataThresh) ? -9999 : denoised[i] - trend[i];
+                const height = iMoundHeights(resid, W, H, nodataThresh);
+                const mask = new Uint8Array(n);
+                for (let i = 0; i < n; i++) if (height[i] > candidateThreshold) mask[i] = 1;
+                const raw = traceComponents(mask, height, denoised, W, H, effRes, nodataThresh, waterwayMask, moundSlopeDegRaster);
+                for (const k of raw) {
+                    if (k.incomplete) continue;
+                    const diameter = 2 * Math.sqrt(k.area / Math.PI);
+                    if (groundSlope[rcIndex(k)] > maxGroundSlope) continue;   // knob / ridge nose on a hillside
+                    if (k.fillRatio < 0.6) continue;                         // several natural bumps merged
+                    if (k.maxMetric < feetToMeters(preset.minHeight) || diameter < feetToMeters(preset.minDiameter) ||
+                        diameter > feetToMeters(preset.maxDiameter) || k.circularity < preset.minCircularity) continue;
+                    if (k.elongation > preset.maxElongation * 1.3) continue;   // levee / ridge / merged bumps: too stretched for this class
+                    if (k.maxMetric / diameter < minHW) continue;             // broad natural swell, far too low for its width
+                    if (excludeWaterways && k.waterwayFraction > 0.4 && k.maxMetric < 2.5 * feetToMeters(preset.minHeight)) continue;
+                    const tm = moundTemplateMatch(height, W, H, k);
+                    if (tm.score < minTemplate) continue;
+                    const flatTop = moundFlatTop(height, W, H, k);
+                    tm.shape = flatTop >= 0.18 ? 'platform / flat-topped' : 'conical / dome';
+                    // Label by shape: a flat-topped fit is a platform mound when
+                    // it also fits the platform size class, and vice versa
+                    let label = preset;
+                    const other = presetsToRun.find(p => p.name === (tm.shape.startsWith('platform') ? 'platform' : 'conical'));
+                    if (other && other !== preset && k.maxMetric >= feetToMeters(other.minHeight) && diameter >= feetToMeters(other.minDiameter) &&
+                        diameter <= feetToMeters(other.maxDiameter) && k.circularity >= other.minCircularity) label = other;
+                    pre.push({ k, preset: label, tm, diameter, resid, height, mask });
                 }
             }
-            // Merge: two candidates within max(diameterA,diameterB)*0.6 of each
-            // other are treated as the same physical mound seen at a different
-            // scale OR shape preset. Preference is by relief magnitude
-            // weighted by shape quality (fillRatio AND circularity together,
-            // each floored at 0.3 so a genuinely irregular but real feature
-            // isn't unfairly punished), not magnitude alone - validated
-            // directly against a real failure mode: a large trend-radius
-            // scale can merge several small, unrelated natural terrain bumps
-            // into one irregular region whose relief nearly matches a real,
-            // cleanly-shaped candidate at a smaller scale (in one tested
-            // case, 4.13m vs 4.12m - a hair's difference) while its shape is
-            // obviously worse - pure-magnitude preference picked the worse
-            // one by that hair's margin every time. fillRatio alone fixed
-            // the first version of this (5/5 real mounds, 0 false positives,
-            // versus 4/5 and 1 false positive with pure magnitude) but
-            // missed a second variant once a larger 4th scale was added for
-            // giant-mound recovery: a merged bump-cluster that happened to
-            // be solid/filled (fillRatio 0.97) despite being clearly
-            // elongated (circularity 0.40) still narrowly won (4.14 vs
-            // 4.12). Adding circularity to the weighting fixed that
-            // decisively (2.43 vs 1.66, not a hair's margin) while a truly
-            // more prominent reading - a large real mound only fully
-            // recovered at its matching larger scale - still wins outright,
-            // since its magnitude advantage is large, not marginal.
-            status.innerText = "Merging detections across scales and shapes...";
-            await new Promise(r => setTimeout(r, 0));
-            const withDiam = allComps.map(k => ({ ...k, diameter: 2 * Math.sqrt(k.area / Math.PI) }));
-            const used = new Array(withDiam.length).fill(false);
-            const mergeKey = k => k.maxMetric * Math.max(0.3, k.fillRatio) * Math.max(0.3, k.circularity);
-            const order = withDiam.map((_, i) => i).sort((a, b) => mergeKey(withDiam[b]) - mergeKey(withDiam[a]));
+            // Merge detections of the same mound across scales (keep the best-shaped, tallest)
+            pre.sort((x, y) => y.tm.score * y.k.maxMetric - x.tm.score * x.k.maxMetric);
+            const merged = [];
+            for (const c of pre) {
+                if (merged.some(o => Math.hypot(o.k.centroidR - c.k.centroidR, o.k.centroidC - c.k.centroidC) * effRes < Math.max(o.diameter, c.diameter) * 0.6)) continue;
+                merged.push(c);
+            }
+            let heightForInspect = pre.length ? pre[pre.length - 1].height : null;
+            // 4. Stochastic persistence on the survivors (tallest / best-shaped first)
             comps = [];
-            for (const i of order) {
-                if (used[i]) continue;
-                const a = withDiam[i];
-                comps.push(a);
-                used[i] = true;
-                for (const j of order) {
-                    if (used[j] || j === i) continue;
-                    const b = withDiam[j];
-                    const distM = Math.sqrt((a.centroidR - b.centroidR) ** 2 + (a.centroidC - b.centroidC) ** 2) * effRes;
-                    if (distM < Math.max(a.diameter, b.diameter) * 0.6) used[j] = true;
-                }
+            let persistChecked = 0;
+            for (const c of merged) {
+                const k = c.k;
+                if (runs > 0 && persistChecked >= 400) break; // keeps very large scans responsive
+                if (runs > 0 && persistChecked % 10 === 0) await tick0(`Mounds: stochastic persistence test ${persistChecked + 1}-${Math.min(merged.length, persistChecked + 10)} of ${Math.min(merged.length, 400)}...`);
+                // peak cell of this candidate
+                const rad = Math.ceil(Math.sqrt(k.count / Math.PI) * Math.max(1, k.elongation));
+                let peak = -1, best = -Infinity;
+                for (let r = Math.max(0, Math.round(k.centroidR) - rad); r <= Math.min(H - 1, Math.round(k.centroidR) + rad); r++)
+                    for (let cc = Math.max(0, Math.round(k.centroidC) - rad); cc <= Math.min(W - 1, Math.round(k.centroidC) + rad); cc++) {
+                        const i = r * W + cc;
+                        if (c.mask[i] && c.height[i] > best) { best = c.height[i]; peak = i; }
+                    }
+                if (peak < 0) continue;
+                const persist = moundPersistence(c.resid, W, H, nodataThresh, k, peak, runs, rmse, rangePx, candidateThreshold);
+                persistChecked++;
+                if (persist < minPersist) continue;
+                const preset = c.preset;
+                comps.push({
+                    ...k,
+                    _presetName: preset.name,
+                    _presetMaxCircularity: preset.maxCircularity,
+                    _presetMaxFlankSlope: preset.maxFlankSlope,
+                    _presetMaxElongation: preset.maxElongation,
+                    _presetMinDiameterM: feetToMeters(preset.minDiameter),
+                    _presetMaxDiameterM: feetToMeters(preset.maxDiameter),
+                    _presetMinHeightM: feetToMeters(preset.minHeight),
+                    _template: c.tm.score, _templateShape: c.tm.shape, _persist: persist,
+                });
             }
+            baseScaleMetricRaster = heightForInspect;
+            moundTPI = null;
         } else {
             const result = await computeMetricRasterForMode(mode);
             denoised = result.denoised;
@@ -4933,7 +5045,10 @@
             const scoreMinDiameter = mode === 'mounds' ? k._presetMinDiameterM : minDiameter;
             const scoreMaxDiameter = mode === 'mounds' ? k._presetMaxDiameterM : maxDiameter;
             const scoreMinMetric = mode === 'mounds' ? k._presetMinHeightM : minMetric;
-            ranked.push({ k, lat, lon, diameter, base: scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue) });
+            let base = scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue);
+            // Mounds: a good template fit that survives the error runs raises the score
+            if (mode === 'mounds' && k._template != null) base = Math.round(base + (100 - base) * Math.max(0, k._template - 0.5) * 1.2 * k._persist);
+            ranked.push({ k, lat, lon, diameter, base });
         }
         ranked.sort((x, y) => y.base - x.base || y.k.maxMetric - x.k.maxMetric);
         const preCap = maxResults * 3;
@@ -4982,7 +5097,10 @@
 
             const protectionNote = (mode === 'mounds' || mode === 'shelter' || mode === 'basecamp' || mode === 'huntcamp') ? '; these sites may be legally protected, and shelters in particular often hold stratified, easily-disturbed deposits' : '';
             const flankSlopeLine = mode === 'mounds' ? `<b>Max Flank Slope:</b> ${k.maxFlankSlope.toFixed(1)}&deg;<br>` : '';
-            const shapePresetLine = mode === 'mounds' ? `<b>Matched Shape:</b> ${k._presetName}<br>` : '';
+            const shapePresetLine = mode === 'mounds'
+                ? `<b>Size class:</b> ${k._presetName}<br>` +
+                  (k._template != null ? `<b>Template match:</b> ${k._template.toFixed(2)} (${k._templateShape})<br><b>Persistence:</b> ${Math.round(k._persist * 100)}% of LiDAR-error runs<br>` : '')
+                : '';
             let shapeWarning = '';
             if (mode === 'mounds' && k.maxFlankSlope > k._presetMaxFlankSlope) {
                 shapeWarning += `<div style="margin-top:6px;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:4px 6px;border-radius:4px;">&#9888; Steeper flank than typical (${k.maxFlankSlope.toFixed(0)}&deg; vs the ${k._presetMaxFlankSlope}&deg; guideline for ${k._presetName}) &mdash; a well-engineered platform mound with a compacted clay cap can genuinely be this steep, but so can a natural bluff or rock outcrop. Worth an extra look.</div>`;

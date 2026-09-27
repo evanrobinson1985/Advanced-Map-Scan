@@ -37,6 +37,14 @@ Each waypoint also carries its elevation, match score, depth or height, and size
 
 A summary lists what was detected and every value set, and all sliders stay adjustable. Confirmed training examples are re-applied afterwards, so thresholds never exclude a site you've confirmed.
 
+**Mound detection (iMound).** The Native Mounds scan uses the published inverted-DEM **iMound** method (Freeland et al. 2016). The terrain is detrended at several scales and flipped upside down, and the "pits" a fill has to raise are the mounds, measured from their own base contour. Only closed highs qualify, so hillside bulges and ridge noses don't. Candidates must then pass:
+
+- **Persistence** in repeated fills with random 3DEP-grade LiDAR error added (stochastic depression analysis, Lindsay & Creed 2006);
+- **Size, height and shape limits** for the conical or platform class, including height-to-width, elongation, solidity and level surrounding ground;
+- **Template matching** against an ideal conical dome and a flat-topped platform (Davis et al. 2018/2019).
+
+A flat-top measure labels each mound conical or platform. Tapping the map and choosing *This is a Mound* runs the same checks at that spot and shows which ones pass or fail.
+
 **Horizontal Cave Entrances.** A walk-in cave mouth in a bluff face can't be seen in bare-earth LiDAR. This mode finds the settings such entrances open into: gentle ground or a talus apron at the foot of a real cliff. By default a site must also show a karst drainage sign:
 
 - **A cove or amphitheater head:** the cliff wraps more than about 190° around the spot, which a straight cliff can't do.
