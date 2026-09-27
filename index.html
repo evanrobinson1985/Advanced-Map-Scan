@@ -156,6 +156,15 @@
         <label style="display:flex; align-items:center; gap:6px; font-size:0.85rem; margin-bottom:4px;">
             <input type="checkbox" id="multiDirectional" onchange="updateShaderParams()"> Multi-Directional Lighting
         </label>
+        <div class="slider-row">
+            <label>Terrain Smoothing</label>
+            <select id="terrainSmoothing" onchange="onSmoothingChange()" style="width:auto; flex-grow:1; margin:0 0 0 10px; padding:6px;">
+                <option value="auto" selected>Auto: remove data facets, keep real edges</option>
+                <option value="strong">Strong (sparse data / heavy canopy)</option>
+                <option value="off">Off (raw data)</option>
+            </select>
+        </div>
+        <div id="smoothInfo" style="font-size:0.68rem; color:#94a3b8; margin-bottom:6px; line-height:1.35;"></div>
         <div style="font-size:0.68rem; color:#94a3b8; margin-top:-4px; margin-bottom:6px; line-height:1.35;">Blends 4 lights spread around the compass (still anchored to the Azimuth slider) instead of just one, so a mound's flank facing away from the light isn't underlit or missed by eye - useful for visually sanity-checking scan results, since a real candidate should look like a coherent bump or depression from every side, not just the one the sun happens to be hitting. The classic single-light look (better for a strong sense of 3D form) is still there with this off.</div>
         <div class="slider-row">
             <label>Hillshade Opacity</label>
@@ -988,19 +997,276 @@
         renderGLLayer(ctx);
     }
 
-    function getGLTile(ctx, L, level, tx, ty) {
-        const key = `${ctx.source.id}/${L}/${tx}/${ty}`;
-        let t = ctx.tiles.get(key);
-        if (t) { ctx.tiles.delete(key); ctx.tiles.set(key, t); return t; } // LRU touch
-        const gl = ctx.gl;
-        const x0 = tx * GL_TILE - GL_BORDER, y0 = ty * GL_TILE - GL_BORDER;
-        const tw = Math.min(GL_TILE, level.w - tx * GL_TILE) + 2 * GL_BORDER;
-        const th = Math.min(GL_TILE, level.h - ty * GL_TILE) + 2 * GL_BORDER;
+    // ---- Display smoothing (map view only; scans always use the raw DTM) ----
+    // Faceted, "low-poly" hillshade usually isn't a rendering problem but is
+    // baked into the elevation data, in one of two ways:
+    //  1. Coarse source: where 3DEP only has ~3-10 m data, a finer download
+    //     is filled with flat planes between the coarse samples, which shade
+    //     as a regular grid of flat facets. detectSourceSpacing() finds this
+    //     from the periodic creases it leaves, and those cells are blurred
+    //     away first, since no real detail exists at that scale anyway.
+    //  2. TIN facets: USGS builds 1 m DEMs by triangulating LiDAR ground
+    //     returns. Under dense forest canopy the returns are sparse, so the
+    //     DEM is made of large flat triangles.
+    // Both are then cleaned with feature-preserving smoothing (after Lindsay
+    // et al. 2019, as in WhiteboxTools FeaturePreservingSmoothing). Surface
+    // normals are averaged only with neighbours facing within a threshold
+    // angle, so the small angle changes between adjacent facets are blended
+    // while large real breaks (bluff edges, sinkhole rims, mound flanks) stay
+    // sharp. Elevations are then refitted to the smoothed normals, with each
+    // cell's change capped.
+    // Runs per GPU tile, off the main thread where possible. A tile is shown
+    // raw first and swapped for its smoothed version when that is ready.
+
+    // Estimates the spacing (in DTM cells) of the source data when the
+    // download was upsampled from a coarser grid: bilinear upsampling leaves
+    // creases (second-difference spikes) at every source cell edge, so the
+    // autocorrelation of |second difference| peaks at the source spacing.
+    // Native-resolution LiDAR (and irregular TIN facets) has no such peak.
+    function detectSourceSpacing(g) {
+        const nd = -100, maxLag = 40;
+        const acf = new Float64Array(maxLag + 1);
+        const addSeries = (get, len) => {
+            const d2 = new Float64Array(len);
+            let mean = 0, cnt = 0;
+            for (let i = 1; i < len - 1; i++) {
+                const a = get(i - 1), b = get(i), c = get(i + 1);
+                if (a < nd || b < nd || c < nd) continue;
+                d2[i] = Math.abs(a - 2 * b + c); mean += d2[i]; cnt++;
+            }
+            if (cnt < 3 * maxLag) return;
+            mean /= cnt;
+            for (let i = 1; i < len - 1; i++) d2[i] = d2[i] ? d2[i] - mean : 0;
+            for (let lag = 0; lag <= maxLag; lag++) {
+                let s = 0;
+                for (let i = 1; i + lag < len - 1; i++) s += d2[i] * d2[i + lag];
+                acf[lag] += s;
+            }
+        };
+        const nLines = 150, span = 3000;
+        for (let k = 0; k < nLines; k++) {
+            const r = Math.floor((k + 0.5) / nLines * g.h), c0 = Math.max(0, Math.floor(g.w / 2 - span / 2));
+            const len = Math.min(g.w - c0, span);
+            addSeries((i) => g.data[r * g.w + c0 + i], len);
+            const c = Math.floor((k + 0.5) / nLines * g.w), r0 = Math.max(0, Math.floor(g.h / 2 - span / 2));
+            addSeries((i) => g.data[(r0 + i) * g.w + c], Math.min(g.h - r0, span));
+        }
+        if (!(acf[0] > 0)) return null;
+        const v = Array.from(acf, (a) => a / acf[0]);
+        const isPeak = (lag, min) => lag >= 2 && lag < maxLag && v[lag] > min && v[lag] >= v[lag - 1] && v[lag] >= v[lag + 1];
+        // Strongest periodic peak...
+        let best = -1;
+        for (let lag = 2; lag < maxLag; lag++) if (isPeak(lag, 0.2) && (best < 0 || v[lag] > v[best])) best = lag;
+        if (best < 0) return null;
+        // ...then its fundamental: crease strength can alternate between
+        // source cells, making a multiple of the true spacing the strongest.
+        const baseline = [...v.slice(2)].sort((a, b) => a - b)[Math.floor((v.length - 2) / 2)];
+        for (let div = best; div >= 2; div--) {
+            const f = best / div;
+            if (f >= 2 && Number.isInteger(f) && isPeak(f, Math.max(0.08, baseline + 0.08))) return f;
+        }
+        return best;
+    }
+
+    // The smoothing itself; self-contained so it can also run in a Worker.
+    // z: heights (NoData < -100); res: meters per cell; p: parameters.
+    function fpSmoothHeights(z, w, h, res, p) {
+        const nd = -100, n = w * h;
+        let src = z;
+        if (p.preBlur > 0) {
+            // Two passes of a NoData-aware separable box blur ~ a Gaussian
+            for (let pass = 0; pass < 2; pass++) {
+                for (const horiz of [true, false]) {
+                    const out = new Float32Array(n);
+                    const R = p.preBlur;
+                    for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+                        const i = r * w + c;
+                        if (src[i] < nd) { out[i] = src[i]; continue; }
+                        let s = 0, k = 0;
+                        for (let d = -R; d <= R; d++) {
+                            const rr = horiz ? r : r + d, cc = horiz ? c + d : c;
+                            if (rr < 0 || rr >= h || cc < 0 || cc >= w) continue;
+                            const v = src[rr * w + cc];
+                            if (v >= nd) { s += v; k++; }
+                        }
+                        out[i] = s / k;
+                    }
+                    src = out;
+                }
+            }
+        }
+        // Unit surface normals (x = column, y = row direction)
+        const nx = new Float32Array(n), ny = new Float32Array(n), nz = new Float32Array(n);
+        for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+            const i = r * w + c, zc = src[i];
+            if (zc < nd) continue;
+            const zl = c > 0 && src[i - 1] >= nd ? src[i - 1] : zc, zr = c < w - 1 && src[i + 1] >= nd ? src[i + 1] : zc;
+            const zu = r > 0 && src[i - w] >= nd ? src[i - w] : zc, zd = r < h - 1 && src[i + w] >= nd ? src[i + w] : zc;
+            const gx = (zr - zl) / (2 * res), gy = (zd - zu) / (2 * res);
+            const l = Math.sqrt(gx * gx + gy * gy + 1);
+            nx[i] = -gx / l; ny[i] = -gy / l; nz[i] = 1 / l;
+        }
+        // Feature-preserving normal smoothing
+        const cosT = Math.cos(p.angle * Math.PI / 180), R = p.radius;
+        const sx = new Float32Array(n), sy = new Float32Array(n), sz = new Float32Array(n);
+        for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+            const i = r * w + c;
+            if (!nz[i]) continue;
+            let ax = 0, ay = 0, az = 0;
+            for (let dr = -R; dr <= R; dr++) {
+                const rr = r + dr;
+                if (rr < 0 || rr >= h) continue;
+                for (let dc = -R; dc <= R; dc++) {
+                    const cc = c + dc;
+                    if (cc < 0 || cc >= w) continue;
+                    const j = rr * w + cc;
+                    if (!nz[j]) continue;
+                    const dot = nx[i] * nx[j] + ny[i] * ny[j] + nz[i] * nz[j];
+                    if (dot <= cosT) continue;
+                    const wt = (dot - cosT) * (dot - cosT);
+                    ax += wt * nx[j]; ay += wt * ny[j]; az += wt * nz[j];
+                }
+            }
+            const l = Math.sqrt(ax * ax + ay * ay + az * az) || 1;
+            sx[i] = ax / l; sy[i] = ay / l; sz[i] = az / l;
+        }
+        // Refit elevations to the smoothed normals (plane through each
+        // similar-facing neighbour, weighted), with each cell's change capped
+        let cur = Float32Array.from(src);
+        for (let it = 0; it < p.iterations; it++) {
+            const next = Float32Array.from(cur);
+            for (let r = 1; r < h - 1; r++) for (let c = 1; c < w - 1; c++) {
+                const i = r * w + c;
+                if (!sz[i] || cur[i] < nd) continue;
+                const a = -sx[i] / sz[i], b = -sy[i] / sz[i]; // dz per meter along columns / rows
+                let sum = 0, wsum = 0;
+                for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+                    if (!dr && !dc) continue;
+                    const j = i + dr * w + dc;
+                    if (!sz[j] || cur[j] < nd) continue;
+                    const dot = sx[i] * sx[j] + sy[i] * sy[j] + sz[i] * sz[j];
+                    if (dot <= cosT) continue;
+                    const wt = (dot - cosT) * (dot - cosT);
+                    sum += wt * (cur[j] - a * dc * res - b * dr * res);
+                    wsum += wt;
+                }
+                if (wsum > 0) next[i] = Math.min(src[i] + p.maxChange, Math.max(src[i] - p.maxChange, sum / wsum));
+            }
+            cur = next;
+        }
+        return cur;
+    }
+
+    // Worker for the smoothing, built from the function above. Falls back
+    // to main-thread chunks if Workers aren't available (e.g. some file://
+    // setups).
+    let smoothWorker = null, smoothWorkerFailed = false, smoothJobSeq = 0;
+    const smoothCallbacks = new Map();
+    function getSmoothWorker() {
+        if (smoothWorker || smoothWorkerFailed) return smoothWorker;
+        try {
+            const code = `${fpSmoothHeights.toString()}
+                onmessage = (e) => { const { id, z, w, h, res, p } = e.data;
+                    const out = fpSmoothHeights(z, w, h, res, p); postMessage({ id, out }, [out.buffer]); };`;
+            smoothWorker = new Worker(URL.createObjectURL(new Blob([code], { type: 'application/javascript' })));
+            smoothWorker.onmessage = (e) => { const cb = smoothCallbacks.get(e.data.id); smoothCallbacks.delete(e.data.id); if (cb) cb(e.data.out); };
+            smoothWorker.onerror = () => { smoothWorkerFailed = true; smoothWorker = null; for (const cb of smoothCallbacks.values()) cb(null); smoothCallbacks.clear(); };
+        } catch (e) { smoothWorkerFailed = true; smoothWorker = null; }
+        return smoothWorker;
+    }
+    function runSmoothJob(z, w, h, res, p, cb) {
+        const wk = getSmoothWorker();
+        if (wk) {
+            const id = ++smoothJobSeq;
+            smoothCallbacks.set(id, (out) => out ? cb(out) : setTimeout(() => cb(fpSmoothHeights(z, w, h, res, p)), 0));
+            wk.postMessage({ id, z, w, h, res, p });
+        } else {
+            setTimeout(() => cb(fpSmoothHeights(z, w, h, res, p)), 0);
+        }
+    }
+
+    // Smoothing parameters for a pyramid level, or null for none. Levels
+    // coarser than 2x are already block-averaged enough to hide facets.
+    function displaySmoothParams(src, L) {
+        const mode = document.getElementById('terrainSmoothing').value;
+        if (mode === 'off' || !src.isDEM || L > 1) return null;
+        const strong = mode === 'strong';
+        const k = src.sourceSpacingPx || 0;
+        const preBlur = k >= 2 ? Math.max(0, Math.round(k / 2 / Math.pow(2, L))) : (strong && L === 0 ? 1 : 0);
+        return { radius: strong ? 3 : 2, angle: strong ? 22 : 15, iterations: strong ? 8 : 5, maxChange: strong ? 2.0 : 1.0, preBlur };
+    }
+    function onSmoothingChange() {
+        for (const ctx of [hillshadeGL, slopeGL]) {
+            if (!ctx.source) continue;
+            ctx.source.smoothed = new Map();
+            ctx.source.smoothPending = new Set();
+            if (ctx.gl) for (const t of ctx.tiles.values()) ctx.gl.deleteTexture(t.tex);
+            ctx.tiles = new Map();
+        }
+        updateSmoothInfo();
+        renderAllGLLayers();
+    }
+    function updateSmoothInfo() {
+        const el = document.getElementById('smoothInfo');
+        const src = hillshadeGL.source;
+        if (!el) return;
+        if (!src || !src.isDEM) { el.innerText = ''; return; }
+        const res = fullDemGrid ? fullDemGrid.res : 1;
+        el.innerText = src.sourceSpacingPx
+            ? `Source data here looks like ~${(src.sourceSpacingPx * res).toFixed(0)} m, coarser than this ${res.toFixed(2)} m download, so its cells show up as flat facets. Smoothing blurs those away (real detail at that scale doesn't exist in the source).`
+            : `No coarse-source pattern found (native-resolution LiDAR). Smoothing removes the flat triangle facets that sparse ground returns under forest leave in LiDAR DEMs, while keeping real breaks like bluff edges sharp.`;
+    }
+
+    const GL_SMOOTH_MARGIN = 12;
+    function tileKeyFor(src, L, tx, ty, p) { return `${L}/${tx}/${ty}/${p ? JSON.stringify(p) : 'raw'}`; }
+
+    // Builds the (bordered) data buffer for one GPU tile; with smoothing,
+    // a wider margin is processed and cropped away so neighbouring tiles
+    // join seamlessly.
+    function readTileRegion(level, x0, y0, tw, th) {
         const buf = new Float32Array(tw * th);
         for (let r = 0; r < th; r++) {
             const sr = Math.min(level.h - 1, Math.max(0, y0 + r)) * level.w;
             for (let c = 0; c < tw; c++) buf[r * tw + c] = level.data[sr + Math.min(level.w - 1, Math.max(0, x0 + c))];
         }
+        return buf;
+    }
+
+    function getGLTile(ctx, L, level, tx, ty) {
+        const src = ctx.source;
+        const p = ctx.displayModeValue < 1.5 ? displaySmoothParams(src, L) : null;
+        const skey = tileKeyFor(src, L, tx, ty, p);
+        const smoothedBuf = p && src.smoothed ? src.smoothed.get(skey) : null;
+        const key = `${src.id}/${L}/${tx}/${ty}`;
+        let t = ctx.tiles.get(key);
+        if (t && (t.smoothKey === (smoothedBuf ? skey : null))) { ctx.tiles.delete(key); ctx.tiles.set(key, t); return t; } // LRU touch
+        const gl = ctx.gl;
+        const x0 = tx * GL_TILE - GL_BORDER, y0 = ty * GL_TILE - GL_BORDER;
+        const tw = Math.min(GL_TILE, level.w - tx * GL_TILE) + 2 * GL_BORDER;
+        const th = Math.min(GL_TILE, level.h - ty * GL_TILE) + 2 * GL_BORDER;
+        const buf = smoothedBuf || readTileRegion(level, x0, y0, tw, th);
+        if (p && !smoothedBuf) {
+            // Queue the smoothed version (once per tile, shared by all layers)
+            src.smoothed = src.smoothed || new Map();
+            src.smoothPending = src.smoothPending || new Set();
+            if (!src.smoothPending.has(skey)) {
+                src.smoothPending.add(skey);
+                const M = GL_SMOOTH_MARGIN + 2 * p.preBlur;
+                const mw = tw + 2 * M, mh = th + 2 * M;
+                const region = readTileRegion(level, x0 - M, y0 - M, mw, mh);
+                const levelRes = src.resM * (src.w / level.w);
+                runSmoothJob(region, mw, mh, levelRes, p, (out) => {
+                    if (!src.smoothPending || !src.smoothPending.has(skey)) return; // settings changed meanwhile
+                    src.smoothPending.delete(skey);
+                    const crop = new Float32Array(tw * th);
+                    for (let r = 0; r < th; r++) crop.set(out.subarray((r + M) * mw + M, (r + M) * mw + M + tw), r * tw);
+                    src.smoothed.set(skey, crop);
+                    while (src.smoothed.size > 40) src.smoothed.delete(src.smoothed.keys().next().value);
+                    scheduleRenderAllGLLayers();
+                });
+            }
+        }
+        if (t) { gl.deleteTexture(t.tex); ctx.tiles.delete(key); }
         const tex = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -1008,7 +1274,7 @@
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, tw, th, 0, gl.LUMINANCE, gl.FLOAT, buf);
-        t = { tex, x0, y0, tw, th };
+        t = { tex, x0, y0, tw, th, smoothKey: smoothedBuf ? skey : null };
         ctx.tiles.set(key, t);
         while (ctx.tiles.size > GL_MAX_TILES) {
             const [oldKey, old] = ctx.tiles.entries().next().value;
@@ -1312,10 +1578,14 @@
         // context keeps its own tile textures, since textures can't be
         // shared across contexts.
         const demSource = buildRasterSource(currentDEM, demWidth, demHeight, demBounds);
+        demSource.isDEM = true;
+        demSource.resM = effRes;
+        demSource.sourceSpacingPx = detectSourceSpacing(fullDemGrid); // coarse source upsampled into this download?
         setLayerSource(hillshadeGL, demSource);
         setLayerSource(slopeGL, demSource);
         setLayerSource(settlementGL, null);
         lastSettlementRasters = null;
+        updateSmoothInfo();
 
         lastExportRaster = null; last3DOverlay = null; lastViewshedCtx = null;
         if (viewshedOverlay) { map.removeLayer(viewshedOverlay); layerControl.removeLayer(viewshedOverlay); viewshedOverlay = null; }
@@ -1326,6 +1596,10 @@
         if (effRes <= 1.005) {
             badge.style.background = '#dcfce7'; badge.style.color = '#166534';
             badge.innerText = `Bare-earth DTM loaded: ${effRes.toFixed(2)} m/px (meets the 1 m minimum)`;
+            if (demSource.sourceSpacingPx && demSource.sourceSpacingPx * effRes > 1.5) {
+                badge.style.background = '#fef3c7'; badge.style.color = '#92400e';
+                badge.innerText = `Downloaded at ${effRes.toFixed(2)} m/px, but the source data here looks like ~${(demSource.sourceSpacingPx * effRes).toFixed(0)} m. Finer detail was interpolated, so small features (middens, vestibules) can't be resolved in this area.`;
+            }
         } else {
             badge.style.background = '#fee2e2'; badge.style.color = '#991b1b';
             badge.innerText = `Bare-earth DTM loaded: ${effRes.toFixed(2)} m/px, below the 1 m minimum. Raise the memory budget or zoom in, then download again.`;
