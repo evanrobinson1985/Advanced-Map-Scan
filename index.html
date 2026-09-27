@@ -412,6 +412,25 @@
             </div>
             <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">Minor rock outcrops (strong positive TPI at a small radius plus a steep face) are kept only if they sit next to a natural choke point: a topographic saddle or ridgeline gap (a point that is a low point along the ridge but a high point across it), or a narrow canyon funnel (a drainage line hemmed in by steep walls on both sides). A viewshed is then run from each outcrop. An unobstructed view over a broad valley floor or a shallow river crossing marks it as a likely observation blind.</div>
         </div>
+        <div id="sinkShapeGroup" style="display:none;">
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin-bottom:4px;">Sinkhole shape checks</div>
+            <div class="slider-row">
+                <label>Min Depth : Width</label>
+                <input type="range" id="sinkMinRatio" min="0" max="0.3" step="0.01" value="0.05" oninput="updateThresholdVal('sinkMinRatio','',2)">
+                <span class="val-display" id="sinkMinRatioVal">0.05</span>
+            </div>
+            <div class="slider-row">
+                <label>Min Wall Slope</label>
+                <input type="range" id="sinkMinWall" min="0" max="35" step="1" value="8" oninput="updateThresholdVal('sinkMinWall','°',0)">
+                <span class="val-display" id="sinkMinWallVal">8°</span>
+            </div>
+            <div class="slider-row">
+                <label>Creek Pools: drop if shallower than</label>
+                <input type="range" id="creekPoolDepth" min="0" max="10" step="0.25" value="3" oninput="updateMetricLenVal('creekPoolDepth',2)">
+                <span class="val-display" id="creekPoolDepthVal">3.00m</span>
+            </div>
+            <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">Real sinkholes are bowls, at least ~1:20 deep-to-wide with sloping walls. Broad, barely-there dips on flat ground don't qualify. A depression a creek flows straight through is almost always a pool, scour hole or road-culvert "digital dam", unless it is deeper than the last setting.</div>
+        </div>
         <div id="entranceParamsGroup" style="display:none;">
             <div class="slider-row">
                 <label>Min Cliff Slope</label>
@@ -1899,6 +1918,7 @@
         document.getElementById('huntcampParamsGroup').style.display = mode === 'huntcamp' ? 'block' : 'none';
         document.getElementById('ceremonialParamsGroup').style.display = mode === 'ceremonial' ? 'block' : 'none';
         document.getElementById('entranceParamsGroup').style.display = mode === 'entrance' ? 'block' : 'none';
+        document.getElementById('sinkShapeGroup').style.display = (mode === 'caves' || mode === 'ceremonial') ? 'block' : 'none';
         document.getElementById('modeDescription').innerHTML = MODE_DESCRIPTIONS[mode] || '';
         document.getElementById('moundPresetRow').style.display = mode === 'mounds' ? 'block' : 'none';
         document.getElementById('geometricThresholdsGroup').style.display = mode === 'settlement' ? 'none' : 'block';
@@ -2639,6 +2659,47 @@
         return filled;
     }
 
+    // Priority-Flood+epsilon (Barnes et al. 2014): the same fill, but each
+    // cell raised inside a depression is set a hair (1 micrometre) above the
+    // cell it was reached from, instead of exactly level. Filled pools then
+    // keep a tiny downhill gradient toward their outlet, so D8 flow crosses
+    // them. With a plain (level) fill, flow stops dead at every creek pool
+    // or road-culvert "digital dam", splitting streams into disconnected
+    // pieces. Used for flow routing only; depths still come from the plain
+    // fill. Float64, so the micro-steps survive at any elevation.
+    function fillDepressionsEps(dem, width, height, nodataThresh) {
+        const n = width * height, eps = 1e-6;
+        const filled = new Float64Array(n);
+        const closed = new Uint8Array(n);
+        const heap = new MinHeap();
+        const pit = new Int32Array(n);
+        let pitLen = 0, pitHead = 0;
+        const dr8 = [-1,-1,-1,0,0,1,1,1], dc8 = [-1,0,1,-1,1,-1,0,1];
+        for (let r = 0; r < height; r++) {
+            for (let c = 0; c < width; c++) {
+                const i = r*width + c;
+                if (dem[i] < nodataThresh) { closed[i] = 1; filled[i] = dem[i]; continue; }
+                let seed = (r === 0 || c === 0 || r === height-1 || c === width-1);
+                if (!seed) for (let k = 0; k < 8; k++) if (dem[(r+dr8[k])*width + (c+dc8[k])] < nodataThresh) { seed = true; break; }
+                if (seed) { filled[i] = dem[i]; closed[i] = 1; heap.push(i, dem[i]); }
+            }
+        }
+        while (heap.size() > 0 || pitHead < pitLen) {
+            const i = pitHead < pitLen ? pit[pitHead++] : heap.pop();
+            const r = (i / width) | 0, c = i % width;
+            for (let k = 0; k < 8; k++) {
+                const nr = r + dr8[k], nc = c + dc8[k];
+                if (nr < 0 || nr >= height || nc < 0 || nc >= width) continue;
+                const ni = nr*width + nc;
+                if (closed[ni]) continue;
+                closed[ni] = 1;
+                if (dem[ni] <= filled[i] + eps) { filled[ni] = filled[i] + eps; pit[pitLen++] = ni; }
+                else { filled[ni] = dem[ni]; heap.push(ni, filled[ni]); }
+            }
+        }
+        return filled;
+    }
+
     // Summed-area table -> O(1)-per-pixel box mean at ANY radius. Needed because
     // the mound pathway's trend-surface kernel can be tens of pixels wide, and a
     // naive box blur at that radius would be far too slow over a multi-megapixel
@@ -3340,7 +3401,7 @@
         const waterMask = new Uint8Array(n);
         for (let i = 0; i < n; i++) if (flow.accum[i] >= perennialCells) waterMask[i] = 1;
         const waterDist = distanceToMask(waterMask, W, H);
-        const hand = computeHANDStrict(flow.filled, flow.dir, waterMask, W, H, nd);
+        const hand = computeHANDStrict(flow.filledEps, flow.dir, waterMask, W, H, nd);
         const bufferM = readNum('bcWaterBufferM');
         const floodCut = readNum('floodHandM');
         const benchSlope = readNum('bcBenchSlope');
@@ -3696,6 +3757,10 @@
             }
             nBasins++;
         }
+        // A pool the channel merely runs through is shallow; a sink that
+        // swallows a stream is a real pit. Only basins >= 1.5 m deep count.
+        const basinDepth = new Float32Array(nBasins);
+        for (let i = 0; i < n; i++) if (basinLabel[i] >= 0) { const d = filled[i] - denoised[i]; if (d > basinDepth[basinLabel[i]]) basinDepth[basinLabel[i]] = d; }
         const basinInflow = new Float32Array(nBasins);
         const dr8 = [-1,-1,-1,0,0,1,1,1], dc8 = [-1,0,1,-1,1,-1,0,1];
         const sinkingStreamEnds = [];
@@ -3704,7 +3769,7 @@
             if (k < 0 || basinLabel[j] >= 0 || flow.accum[j] < sinkCells) continue;
             const r = (j / W) | 0, c = j % W;
             const t = (r + dr8[k]) * W + (c + dc8[k]);
-            if (basinLabel[t] < 0) continue;
+            if (basinLabel[t] < 0 || basinDepth[basinLabel[t]] < 1.5) continue;
             const ac = flow.accum[j] * effRes * effRes / 4046.86;
             if (ac > basinInflow[basinLabel[t]]) basinInflow[basinLabel[t]] = ac;
             sinkingStreamEnds.push(j);
@@ -4161,10 +4226,11 @@
         const nodataThresh = -100;
         const denoiseRadius = Math.max(1, Math.round(1.0 / effRes)); // same ~1m real-world footprint fix as computeMetricRasterForMode
         const denoised = boxSmooth(currentDEM, demWidth, demHeight, denoiseRadius, nodataThresh);
-        const filled = fillDepressions(denoised, demWidth, demHeight, nodataThresh);
-        const dir = flowDirectionD8(filled, demWidth, demHeight, nodataThresh);
-        const accum = flowAccumulation(dir, filled, demWidth, demHeight, nodataThresh);
-        cachedFlow = { denoised, filled, dir, accum }; cachedFlowKey = flowKey;
+        const filled = fillDepressions(denoised, demWidth, demHeight, nodataThresh);        // level fill: depression depths
+        const filledEps = fillDepressionsEps(denoised, demWidth, demHeight, nodataThresh);  // routed fill: flow crosses pools
+        const dir = flowDirectionD8(filledEps, demWidth, demHeight, nodataThresh);
+        const accum = flowAccumulation(dir, filledEps, demWidth, demHeight, nodataThresh);
+        cachedFlow = { denoised, filled, filledEps, dir, accum }; cachedFlowKey = flowKey;
         return cachedFlow;
     }
 
@@ -4342,7 +4408,7 @@
         scanBtn.disabled = true;
         const nodataThresh = -100;
 
-        const { denoised, filled, dir, accum } = await getFlowData();
+        const { denoised, filledEps, dir, accum } = await getFlowData();
 
         status.innerText = "Building waterway mask...";
         await new Promise(r => setTimeout(r, 0));
@@ -4354,7 +4420,7 @@
 
         status.innerText = "Computing height above drainage (HAND)...";
         await new Promise(r => setTimeout(r, 0));
-        const hand = computeHAND(filled, dir, waterwayMask, demWidth, demHeight, nodataThresh);
+        const hand = computeHAND(filledEps, dir, waterwayMask, demWidth, demHeight, nodataThresh);
 
         status.innerText = "Computing slope...";
         await new Promise(r => setTimeout(r, 0));
@@ -4592,8 +4658,9 @@
         const nodataThresh = -100;
 
         const excludeWaterways = document.getElementById('excludeWaterways').checked;
+        const sinkMode = mode === 'caves' || mode === 'ceremonial';
         let waterwayMask = null, waterwayDist = null;
-        if (excludeWaterways) {
+        if (excludeWaterways || sinkMode) {
             const { accum } = await getFlowData();
             // acres -> m^2 -> equivalent cell count at this DEM's resolution
             const thresholdAcres = parseFloat(document.getElementById('waterwayThreshold').value);
@@ -4780,10 +4847,15 @@
             lastMask = result.candidateMask;
             status.innerText = "Tracing candidate regions...";
             await new Promise(r => setTimeout(r, 0));
-            comps = traceComponents(result.candidateMask, result.metricRaster, denoised, demWidth, demHeight, effRes, nodataThresh, waterwayMask, null, modeCtx ? modeCtx.extraMaxRasters : null);
+            // Sink wall steepness is measured for caves / ceremonial sinks
+            const sinkSlope = sinkMode ? computeSlopeDegrees(denoised, demWidth, demHeight, effRes, nodataThresh) : null;
+            comps = traceComponents(result.candidateMask, result.metricRaster, denoised, demWidth, demHeight, effRes, nodataThresh, waterwayMask, sinkSlope, modeCtx ? modeCtx.extraMaxRasters : null);
         }
 
         const featureName = modeFeatureName(mode);
+        const sinkMinRatio = parseFloat(document.getElementById('sinkMinRatio').value);
+        const sinkMinWall = parseFloat(document.getElementById('sinkMinWall').value);
+        const creekPoolDepth = parseFloat(document.getElementById('creekPoolDepth').value);
         // Mounds already filtered each candidate against its own preset's
         // thresholds above (necessary once more than one preset can run in
         // a single scan) - re-filtering here against a single shared
@@ -4803,8 +4875,18 @@
             // common right at a stream) or a big opening, since real karst and
             // archaeological sites do cluster near water for practical reasons.
             if (excludeWaterways && k.waterwayFraction > 0.4 && !(modeCtx && modeCtx.skipWaterwayExclusion)) {
-                const obviouslyDeepOrBig = (k.maxMetric >= minMetric * 2.5) || (diameter >= maxDiameter * 0.5);
+                const obviouslyDeepOrBig = (k.maxMetric >= minMetric * 2.5) || (!sinkMode && diameter >= maxDiameter * 0.5);
                 if (!obviouslyDeepOrBig) return false;
+            }
+            if (sinkMode) {
+                // Real sinkholes are bowls: noticeably deep for their width,
+                // with sloping walls. Broad, barely-there dips on flat ground
+                // (field undulations, LiDAR noise) are not.
+                if (k.maxMetric / diameter < sinkMinRatio) return false;
+                if (k.maxFlankSlope < sinkMinWall) return false;
+                // A creek running through a shallow depression means a pool,
+                // scour hole or road-culvert "digital dam", not a sink.
+                if (k.waterwayFraction > 0.02 && k.maxMetric < creekPoolDepth) return false;
             }
             if (modeCtx && modeCtx.keep && !modeCtx.keep(k)) return false;
             return true;
@@ -5316,7 +5398,7 @@
                 }
                 const bluffH = steepRelief.length >= 50 ? percentile(steepRelief, 50) : 0.5 * percentile(allRelief, 90);
                 // Drainage network
-                const filled = fillDepressions(boxSmooth(d, dw, dh, 1, nd), dw, dh, nd);
+                const filled = fillDepressionsEps(boxSmooth(d, dw, dh, 1, nd), dw, dh, nd);
                 const dir = flowDirectionD8(filled, dw, dh, nd);
                 const acc = flowAccumulation(dir, filled, dw, dh, nd);
                 const cellAc = dres * dres / 4046.86;
