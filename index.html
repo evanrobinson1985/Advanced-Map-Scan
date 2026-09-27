@@ -240,6 +240,12 @@
                 <option value="broad">Broad / Any (single quick scan)</option>
                 <option value="custom">Custom (use sliders below)</option>
             </select>
+            <div class="slider-row" style="margin-top:6px;">
+                <label>Max ground slope</label>
+                <input type="range" id="moundMaxGroundSlope" min="2" max="30" step="1" value="8" oninput="updateThresholdVal('moundMaxGroundSlope','°',0)">
+                <span class="val-display" id="moundMaxGroundSlopeVal">8°</span>
+            </div>
+            <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">Mounds were built on terraces, floodplains and ridge tops. Candidates whose surrounding ground (~30 m around) is steeper than this are almost always natural knobs or ridge noses on a hillside, so they're dropped.</div>
             <div style="font-size:0.68rem; color:#94a3b8; margin-top:4px; line-height:1.35;">All Shapes runs both dedicated Conical and Platform scans and merges the results - most thorough, roughly 2x the scan time of a single shape. Broad/Any is a faster single compromise scan. Circularity/Diameter/Height/Trend Radius come from published size ranges for each type (see chat for sourcing and caveats) - a perfect square already measures ~0.79 on the Circularity scale, close to a circle's 1.0, so "round" and "square" genuinely overlap here, these bias toward one shape rather than cleanly separating them. Max Circularity and Flank Slope only flag a candidate as unusual, they don't exclude it - a real, well-built mound can legitimately be steeper or more compact than a generic rule predicts. Selecting a specific shape (not "All" or "Custom") overwrites the sliders below; your own confirmed examples remain the more reliable calibration once you have some.</div>
         </div>
         </div>
@@ -395,6 +401,9 @@
                 <input type="range" id="hcObserverM" min="0" max="5" step="0.1" value="1.6" oninput="updateMetricLenVal('hcObserverM',1)">
                 <span class="val-display" id="hcObserverMVal">1.6m</span>
             </div>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem; margin-bottom:4px;">
+                <input type="checkbox" id="hcRequireView" checked> Require a tactical viewshed (drop outcrops without one)
+            </label>
             <div class="slider-row">
                 <label>Min Visible Valley Floor</label>
                 <input type="range" id="hcMinViewHa" min="0.5" max="50" step="0.5" value="5" oninput="updateThresholdVal('hcMinViewHa','ha',1)">
@@ -502,6 +511,12 @@
             <span class="val-display" id="waterwayThresholdVal">1.0ac</span>
         </div>
 
+        <div class="slider-row">
+            <label>Max results per mode</label>
+            <input type="range" id="maxResults" min="5" max="200" step="5" value="40" oninput="updateThresholdVal('maxResults','',0)">
+            <span class="val-display" id="maxResultsVal">40</span>
+        </div>
+        <div style="font-size:0.68rem; color:#94a3b8; margin-top:-4px; margin-bottom:6px; line-height:1.35;">Candidates are ranked by Match Score, and hits closer together than a mode's minimum spacing count as one landform. Only the best are shown.</div>
         <button id="scanBtn" onclick="runScanner()">Scan Downloaded DEM</button>
         <button id="scanAllBtn" onclick="runScanAll()" style="display:none; background:#7c3aed; color:white; border:none; cursor:pointer;">Scan All (every mode)</button>
         <div id="scanAllWrap" style="display:none; margin-top:6px;">
@@ -2013,7 +2028,7 @@
         // since a bluff line's total extent can be much longer than any
         // single sinkhole or mound. maxElongation stays at the base's
         // permissive default (effectively unused) for the same reason.
-        if (mode === 'shelter') return { ...base, minHeight: 8, minCircularity: 0.05, maxDiameter: 1200 };
+        if (mode === 'shelter') return { ...base, minHeight: 10, minCircularity: 0.05, maxDiameter: 1200 };
         // Revised from generic guesses to roughly match the size range seen
         // across published Southeastern platform/burial mound examples (see
         // chat for the specific named sites and the honest confidence caveat
@@ -3435,7 +3450,14 @@
         const flow = await getFlowData();
         const channelCells = acresToCells(readNum('waterwayThreshold'));
         const halfWidthPx = Math.max(1, Math.round(readNum('hcFunnelWidthM') / 2 / effRes));
-        const funnelMask = computeFunnelMask(flow.accum, slope, W, H, channelCells, halfWidthPx, 30);
+        // Funnels must be real stream valleys (>= 10 acres of drainage) with
+        // walls at least ~3 m high, not every rill between two steep banks.
+        const funnelMask = computeFunnelMask(flow.accum, slope, W, H, Math.max(channelCells, acresToCells(10)), halfWidthPx, 30);
+        const tpiFunnel = computeTPI(denoised, W, H, Math.max(1, Math.round(halfWidthPx / 2)), Math.max(2, halfWidthPx * 2), nd);
+        for (let i = 0; i < n; i++) if (funnelMask[i] && !(tpiFunnel[i] < -3)) funnelMask[i] = 0;
+        // Outcrops must stand on a ridge or spur (above the ground ~50 m
+        // around), not on the wall of a gully or cut bank.
+        const tpiBroad = computeTPI(denoised, W, H, Math.max(1, Math.round(12 / effRes)), Math.max(2, Math.round(50 / effRes)), nd);
         const chokeMask = new Uint8Array(n);
         let saddleCount = 0, funnelCount = 0;
         for (let i = 0; i < n; i++) {
@@ -3450,7 +3472,7 @@
         for (let i = 0; i < n; i++) {
             if (denoised[i] < nd || tpi[i] < -9000) continue;
             metricRaster[i] = tpi[i]; // outcrop prominence above its surroundings
-            if (tpi[i] > tpiCut && tpi[i] > candidateThreshold && slope[i] >= outcropSlope && chokeDist[i] <= chokeDistPx) candidateMask[i] = 1;
+            if (tpi[i] > tpiCut && tpi[i] > candidateThreshold && slope[i] >= outcropSlope && chokeDist[i] <= chokeDistPx && tpiBroad[i] > 0) candidateMask[i] = 1;
         }
 
         // Step 3 runs per candidate (in describe below) since a viewshed
@@ -3460,7 +3482,8 @@
         const viewRadiusM = readNum('hcViewRadiusM'), observerM = readNum('hcObserverM'), minViewHa = readNum('hcMinViewHa');
         const isFloor = (i, z0) => slope[i] < 8 && denoised[i] < z0 - 5;
         const isCrossing = (i) => flow.accum[i] >= channelCells && slope[i] < 5;
-        const MAX_VIEWSHEDS = 150;
+        const MAX_VIEWSHEDS = 300;
+        const requireView = document.getElementById('hcRequireView').checked;
         let viewshedsRun = 0;
         const modeCtx = {
             overlay3D: { candidateMask, highlightMask: chokeMask },
@@ -3481,9 +3504,12 @@
                     if (v.floorHa >= minViewHa || v.crossingHa >= 0.05) {
                         html += goodBox(`&#10003; Clear line of sight over ${v.floorHa >= minViewHa ? 'a broad valley floor' : ''}${v.floorHa >= minViewHa && v.crossingHa >= 0.05 ? ' and ' : ''}${v.crossingHa >= 0.05 ? 'a shallow stream crossing' : ''}. That tactical value makes this a likely observation blind or hunt camp. Expect specialized cutting blades, small tool-repair debitage and atlatl weights.`);
                         boost += 0.25;
+                    } else if (requireView) {
+                        return { drop: true };
                     }
                     html += `<button style="width:auto;padding:3px 6px;font-size:0.72rem;margin-top:6px;" onclick="showViewshedOverlay(${obs.r}, ${obs.c}, event)">Show viewshed on map</button><br>`;
                 } else {
+                    if (requireView) return { drop: true };
                     html += `<span style="font-size:0.72rem;color:#64748b">Viewshed skipped (limit of ${MAX_VIEWSHEDS} per scan). Use "Show viewshed on map" to run it here.</span>
                              <br><button style="width:auto;padding:3px 6px;font-size:0.72rem;margin-top:6px;" onclick="showViewshedOverlay(${obs.r}, ${obs.c}, event)">Show viewshed on map</button><br>`;
                 }
@@ -3850,6 +3876,16 @@
             status.innerText = "Scanning for bluff/overhang shelter zones...";
             await new Promise(r => setTimeout(r, 0));
             ({ metricRaster, candidateMask } = computeShelterMetricFromDenoised(denoised, candidateThreshold));
+            // A stream bed beside its own cut bank is flat ground at the foot
+            // of a steep slope too, which is why unfiltered shelter hits
+            // trace every drainage. Drop floors within ~3 m of a channel.
+            const flow = await getFlowData();
+            const chanCells = acresToCells(parseFloat(document.getElementById('waterwayThreshold').value));
+            const chan = new Uint8Array(demWidth * demHeight);
+            for (let i = 0; i < chan.length; i++) if (flow.accum[i] >= chanCells) chan[i] = 1;
+            const chanDist = distanceToMask(chan, demWidth, demHeight);
+            const nearPx = Math.max(2, Math.round(3 / effRes));
+            for (let i = 0; i < chan.length; i++) if (candidateMask[i] && chanDist[i] <= nearPx) candidateMask[i] = 0;
         } else {
             status.innerText = "Computing Local Relief Model (morphological opening)...";
             await new Promise(r => setTimeout(r, 0));
@@ -4376,6 +4412,10 @@
             // reasonable single choice even across two differently-scaled
             // presets in All Shapes mode, since TPI is a boost-only
             // cross-check here, not a gate any specific scale needs to clear.
+            // Ground slope around each candidate (~30 m footprint), for the
+            // level-ground filter below
+            const groundSlope = computeSlopeDegrees(boxSmooth(denoised, demWidth, demHeight, Math.max(1, Math.round(15 / effRes)), nodataThresh), demWidth, demHeight, effRes, nodataThresh);
+            const maxGroundSlope = parseFloat(document.getElementById('moundMaxGroundSlope').value);
             const tpiBaseFt = presetsToRun[0].trendRadius;
             const tpiInnerPx = Math.max(1, Math.round(feetToMeters(tpiBaseFt) * 0.5 / effRes));
             const tpiOuterPx = Math.max(tpiInnerPx + 1, Math.round(feetToMeters(tpiBaseFt) * 1.5 / effRes));
@@ -4431,6 +4471,8 @@
                         const diameter = 2 * Math.sqrt(k.area / Math.PI);
                         if (diameter < minDiameterM || diameter > maxDiameterM) continue;
                         if (k.circularity < presetParams.minCircularity) continue;
+                        if (groundSlope[rcIndex(k)] > maxGroundSlope) continue; // knob/ridge nose on a hillside
+                        if (k.fillRatio < 0.6) continue;                         // several natural bumps merged together
                         if (excludeWaterways && k.waterwayFraction > 0.4) {
                             const obviouslyDeepOrBig = (k.maxMetric >= minHeightM * 2.5) || (diameter >= maxDiameterM * 0.5);
                             if (!obviouslyDeepOrBig) continue;
@@ -4532,20 +4574,31 @@
         const iconInst = featureIcon(mode);
         const modeColor = MODE_STYLE[mode].color;
 
-        let suppressedCount = 0;
+        // Ranking, de-duplication and a per-mode cap. In rugged, dissected
+        // terrain every mode's raw candidate list runs into the hundreds;
+        // most are neighbouring hits on the same landform (one bluff line
+        // or gully counted many times over) or weak matches. So:
+        //  1. score every candidate on its own shape/size/relief,
+        //  2. merge candidates closer than the mode's minimum spacing,
+        //     keeping the best-scoring one,
+        //  3. run the expensive later-pipeline checks (viewshed, cave survey,
+        //     ...) only on the survivors, and drop those a required check
+        //     rules out,
+        //  4. show the top "Max results per mode".
+        const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
+        const spacingM = { basecamp: 60, huntcamp: 60, shelter: 40, mounds: 25, caves: 10, ceremonial: 15 }[mode] || 20;
+        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0;
+        const ranked = [];
         for (const k of filtered) {
             const lat = demBounds.n - (k.centroidR / demHeight) * (demBounds.n - demBounds.s);
             const lon = demBounds.w + (k.centroidC / demWidth) * (demBounds.e - demBounds.w);
             // Skip candidates already field-checked and marked not real - a
-            // deliberate human decision (not an algorithmic guess this scan
-            // is uncertain about), so full suppression is appropriate here,
-            // unlike the shape warnings above which stay visible on purpose.
+            // deliberate human decision, so full suppression is appropriate.
             if (trainingData[mode].rejected.some(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20)) {
                 suppressedCount++;
                 continue;
             }
             const diameter = 2 * Math.sqrt(k.area / Math.PI);
-            const volume = k.sumMetric * effRes * effRes;
             const waterDistM = waterwayDist
                 ? waterwayDist[Math.min(demHeight-1, Math.max(0, Math.round(k.centroidR))) * demWidth + Math.min(demWidth-1, Math.max(0, Math.round(k.centroidC)))] * effRes
                 : Infinity;
@@ -4553,21 +4606,35 @@
                 ? moundTPI[Math.min(demHeight-1, Math.max(0, Math.round(k.centroidR))) * demWidth + Math.min(demWidth-1, Math.max(0, Math.round(k.centroidC)))]
                 : undefined;
             // Mounds score against the specific preset that actually found
-            // this candidate (relevant in "All Shapes" mode, where conical
-            // and platform candidates were found under different size
-            // ranges); other modes use the shared slider-read values as before.
+            // this candidate (relevant in "All Shapes" mode).
             const scoreMinDiameter = mode === 'mounds' ? k._presetMinDiameterM : minDiameter;
             const scoreMaxDiameter = mode === 'mounds' ? k._presetMaxDiameterM : maxDiameter;
             const scoreMinMetric = mode === 'mounds' ? k._presetMinHeightM : minMetric;
-            let matchScore = scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue);
+            ranked.push({ k, lat, lon, diameter, base: scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue) });
+        }
+        ranked.sort((x, y) => y.base - x.base || y.k.maxMetric - x.k.maxMetric);
+        const preCap = maxResults * 3;
+        const spaced = [];
+        for (const c of ranked) {
+            if (spaced.some(o => approxMetersBetween(o.lat, o.lon, c.lat, c.lon) < spacingM)) { mergedCount++; continue; }
+            if (spaced.length >= preCap) { heldBackCount++; continue; }
+            spaced.push(c);
+        }
+        const finalists = [];
+        for (const c of spaced) {
             // Karst workflow modes: evidence from later pipeline steps
             // (midden mounding, viewshed, sinking stream, cave survey match)
-            // only ever RAISES the score, same boost-only blend as above.
-            const extra = modeCtx && modeCtx.describe ? modeCtx.describe(k, lat, lon) : null;
-            if (extra && extra.boost > 0) {
-                const b = Math.min(1, extra.boost);
-                matchScore = Math.round(matchScore + (100 - matchScore) * b);
-            }
+            // raises the score; a required check that fails drops it.
+            const extra = modeCtx && modeCtx.describe ? modeCtx.describe(c.k, c.lat, c.lon) : null;
+            if (extra && extra.drop) { droppedCount++; continue; }
+            let matchScore = c.base;
+            if (extra && extra.boost > 0) matchScore = Math.round(matchScore + (100 - matchScore) * Math.min(1, extra.boost));
+            finalists.push({ ...c, extra, matchScore });
+        }
+        finalists.sort((x, y) => y.matchScore - x.matchScore);
+        heldBackCount += Math.max(0, finalists.length - maxResults);
+        for (const { k, lat, lon, diameter, extra, matchScore } of finalists.slice(0, maxResults)) {
+            const volume = k.sumMetric * effRes * effRes;
 
             const already = trainingData[mode].examples.find(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
             const confirmHtml = already
@@ -4638,11 +4705,29 @@
         lastMetricRaster = baseScaleMetricRaster; lastScanMode = mode; lastMetricGrid = gridInfo();
         lastExportRaster = baseScaleMetricRaster ? { data: baseScaleMetricRaster, name: `${mode}_${modeMetricLabel(mode).toLowerCase().replace(/[^a-z]+/g, '_')}_m`, mode, grid: gridInfo(true) } : null;
         const ov3 = modeCtx && modeCtx.overlay3D ? { ...modeCtx.overlay3D } : (lastMask ? { candidateMask: lastMask } : null);
+        if (ov3 && ov3.candidateMask) {
+            // Tint only the areas of the results actually shown, not every
+            // raw candidate cell the ranking/filters removed
+            const src = ov3.candidateMask, kept = new Uint8Array(src.length);
+            for (const { k } of finalists.slice(0, maxResults)) {
+                const rad = Math.ceil(Math.sqrt(k.count / Math.PI) * Math.max(1, k.elongation) * 1.3) + 2;
+                const r0 = Math.round(k.centroidR), c0 = Math.round(k.centroidC);
+                for (let r = Math.max(0, r0 - rad); r <= Math.min(demHeight - 1, r0 + rad); r++)
+                    for (let c = Math.max(0, c0 - rad); c <= Math.min(demWidth - 1, c0 + rad); c++) {
+                        const i = r * demWidth + c;
+                        if (src[i]) kept[i] = 1;
+                    }
+            }
+            ov3.candidateMask = kept;
+        }
         if (ov3) { ov3.grid = gridInfo(); ov3.mode = mode; last3DOverlays.push(ov3); }
         updateDetectionLegend();
-        const shownCount = filtered.length - suppressedCount;
-        status.innerText = `Scan complete. Found ${shownCount} candidate feature(s).` +
-            (suppressedCount > 0 ? ` (${suppressedCount} more matched a location you'd already marked not real, and were skipped.)` : '') +
+        const shownCount = Math.min(maxResults, finalists.length);
+        status.innerText = `Scan complete. Showing the top ${shownCount} candidate(s)` +
+            (mergedCount ? `; ${mergedCount} duplicate hit(s) on the same landforms were merged` : '') +
+            (droppedCount ? `; ${droppedCount} failed a required check` : '') +
+            (heldBackCount ? `; ${heldBackCount} lower-ranked candidate(s) held back (raise Max results per mode to see them)` : '') +
+            (suppressedCount > 0 ? `; ${suppressedCount} matched a spot you marked not real` : '') + '.' +
             (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '');
         updateExportButtons();
         scanBtn.disabled = false;
@@ -5062,7 +5147,7 @@
                 ceremonial: { minHeight: Math.max(2, ftQ(1.2 * minDetM * M2FT)) },
                 huntcamp: { minHeight: Math.max(2, ftQ(0.8 * minDetM * M2FT)) },
                 basecamp: { minHeight: Math.max(6, Math.min(15, ftQ(0.4 * m.bluffH * M2FT))) },
-                shelter: { minHeight: Math.max(6, Math.min(15, ftQ(0.4 * m.bluffH * M2FT))) },
+                shelter: { minHeight: Math.max(10, Math.min(15, ftQ(0.4 * m.bluffH * M2FT))) },
             };
             for (const [mode, o] of Object.entries(geo)) {
                 const base = defaultModeThresholds(mode);
