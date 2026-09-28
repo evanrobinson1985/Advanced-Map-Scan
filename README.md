@@ -4,7 +4,7 @@ A single-file web app (`index.html`) plus a batch Python pipeline (`pipeline/kar
 
 Open `index.html` in a browser (or serve it with GitHub Pages). No build step is needed.
 
-Terrain is drawn with bicubic height interpolation and exact per-pixel lighting from a level-of-detail texture pyramid, so it stays smooth at any zoom and large downloads render in full. Faceted, "low-poly" terrain in the data itself is removed from the map view by *Terrain Smoothing* (display only; scans always use the raw DTM). It covers two cases: coarse source data upsampled into a finer download, which the app detects and flags, and flat triangle facets left in LiDAR DEMs where sparse ground returns under forest canopy were triangulated. The smoothing is feature-preserving, so it blends facets but keeps real breaks such as bluff edges sharp.
+Terrain is drawn with bicubic height interpolation and exact per-pixel lighting from a level-of-detail texture pyramid, so it stays smooth at any zoom and large downloads render in full. Faceted, "low-poly" terrain in the data itself is removed from the map view by *Terrain Smoothing* (display only; scans always use the raw DTM). It covers two cases: coarse source data upsampled into a finer download, which the app detects and flags, and flat triangle facets left in LiDAR DEMs where sparse ground returns under forest canopy were triangulated. Smoothing is off by default (raw data); choose *Auto* or *Strong* to turn it on. It is feature-preserving, so it blends facets but keeps real breaks such as bluff edges sharp.
 
 ## How the workflow maps to the app
 
