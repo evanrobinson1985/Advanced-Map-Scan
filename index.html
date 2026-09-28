@@ -2478,11 +2478,10 @@
                     if (!k || k.area < Math.max(10 * effRes * effRes, 7)) continue;   // a noise speck, not a feature
                     const diam = 2 * Math.sqrt(k.area / Math.PI);
                     const gsHere = mt.slopeDeg[rcIndex(k)];
-                    const plane = gsHere > flatMax ? moundRingPlane(denoised, W, H, k, effRes, nd) : null;
-                    const hSlope = moundSizeHeight(k, gsHere, flatMax, denoised, W, H, effRes, nd);
-                    const hM = hSlope === null ? k.maxMetric : hSlope;
-                    const dM = plane && hSlope !== null ? Math.max(2 * Math.sqrt(k.area / Math.PI), plane.diameter) : 2 * Math.sqrt(k.area / Math.PI);
-                    found.push({ k, diam, hM, plane, rugged: hSlope === null, height: hh, resid: rs, groundSlope: mt.slopeDeg, pass, scaleM, start: sr * W + sc,
+                    const meas = moundMeasure(k, 2 * Math.sqrt(k.area / Math.PI), gsHere, flatMax, denoised, W, H, effRes, nd);
+                    const plane = meas ? meas.plane : moundRingPlane(denoised, W, H, k, effRes, nd);
+                    const hM = meas ? meas.h : k.maxMetric, dM = meas ? meas.d : 2 * Math.sqrt(k.area / Math.PI);
+                    found.push({ k, diam, hM, plane, rugged: !meas || meas.rugged, hardReject: !meas, height: hh, resid: rs, groundSlope: mt.slopeDeg, pass, scaleM, start: sr * W + sc,
                                  hostDiam: host[rcIndex(k)], fits: sizeFits(k, hM, dM), dM, tm: moundTemplateMatch(hh, W, H, k),
                                  plausible: presets.some(p => diam <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3) });
                 }
@@ -2503,7 +2502,7 @@
             const chk = (ok, text) => `<tr style="${ok ? 'background:#dcfce7' : 'background:#fee2e2'}"><td>${ok ? '&#10003;' : '&#10007;'}</td><td>${text}</td></tr>`;
             const sizeOk = best.fits;
             const planeRow = best.plane
-                ? chk(!best.rugged, `On a slope: ${metersToFeetInches(Math.max(0, best.plane.relief))} tall and ${metersToFeetInches(best.dM)} across above the fitted hillside; ground around it ${best.rugged ? 'is broken / rugged' : 'is even'} (scatter ${metersToFeetInches(best.plane.rough)}, max ${Math.round(MOUND_MAX_ROUGH * 100)}% of the height)`)
+                ? chk(!best.hardReject, `On tilted ground: ${metersToFeetInches(Math.max(0, best.plane.relief))} tall and ${metersToFeetInches(best.dM)} across above the fitted hillside; ground around it ${best.rugged ? 'is broken / rugged' + (best.hardReject ? '' : ' (allowed on gentle ground; iMound size used)') : 'is even'} (scatter ${metersToFeetInches(best.plane.rough)}, max ${Math.round(MOUND_MAX_ROUGH * 100)}% of the height)`)
                 : '';
             const hostRow = best.pass === 'spur'
                 ? chk(moundHostOk(best.hostDiam, diam), !(best.hostDiam > 1.3 * diam)
@@ -2517,8 +2516,10 @@
             // round and compact enough for a mound class, and not too big
             const tooBig = !presets.some(p => diam <= feetToMeters(p.maxDiameter) && comp.circularity >= p.minCircularity && comp.elongation <= p.maxElongation * 1.3);
             const saved = !tooBig && !comp.incomplete;
-            const cLat = demBounds.n - ((comp.centroidR + 0.5) / H) * (demBounds.n - demBounds.s);
-            const cLon = demBounds.w + ((comp.centroidC + 0.5) / W) * (demBounds.e - demBounds.w);
+            const cR = best.plane && !best.rugged && best.dM > diam && best.plane.centroidR != null ? best.plane.centroidR : comp.centroidR;
+            const cC = best.plane && !best.rugged && best.dM > diam && best.plane.centroidC != null ? best.plane.centroidC : comp.centroidC;
+            const cLat = demBounds.n - ((cR + 0.5) / H) * (demBounds.n - demBounds.s);
+            const cLon = demBounds.w + ((cC + 0.5) / W) * (demBounds.e - demBounds.w);
             const html = `<b>Mound check at this point (iMound pipeline)</b>
                 <div style="font-size:0.7rem;color:#64748b;">Measured ${best.pass === 'spur' ? 'with the spur pass (curved-surface detrend), ' : ''}at the ${Math.round(best.scaleM)} m scale; outlined in brown on the map.</div>
                 <table style="font-size:0.72rem;border-collapse:collapse;margin-top:6px;">
@@ -2537,12 +2538,15 @@
                     ? 'Recorded as a confirmed mound.'
                     : comp.incomplete ? '<b>Not saved as training:</b> the feature runs off the edge of the download. Download a larger area around it and try again.'
                     : `<b>Not saved as training:</b> the closed high measured here (${metersToFeetInches(diam)} across) is too big, irregular or stretched for any mound class, so it's probably the landform the mound sits on. Saving it would loosen the size limits for every future scan. Try tapping the top of the mound itself.`}</div>`;
-            // Outline what was measured, so it's clear which feature the check is about
+            // Outline what was measured, so it's clear which feature the check is
+            // about: on a slope, the footprint above the fitted hillside
+            const useFoot = best.plane && !best.rugged && best.dM > diam && best.plane.centroidR != null;
+            const oR = useFoot ? best.plane.centroidR : comp.centroidR, oC = useFoot ? best.plane.centroidC : comp.centroidC;
             const pts = [];
             for (let a = 0; a < 48; a++) {
-                const th = a / 48 * 2 * Math.PI, rad = diam / 2 / effRes;
-                pts.push([demBounds.n - ((comp.centroidR + Math.sin(th) * rad + 0.5) / H) * (demBounds.n - demBounds.s),
-                          demBounds.w + ((comp.centroidC + Math.cos(th) * rad + 0.5) / W) * (demBounds.e - demBounds.w)]);
+                const th = a / 48 * 2 * Math.PI, rad = best.dM / 2 / effRes;
+                pts.push([demBounds.n - ((oR + Math.sin(th) * rad + 0.5) / H) * (demBounds.n - demBounds.s),
+                          demBounds.w + ((oC + Math.cos(th) * rad + 0.5) / W) * (demBounds.e - demBounds.w)]);
             }
             if (window.__moundCheckOutline) map.removeLayer(window.__moundCheckOutline);
             window.__moundCheckOutline = L.polygon(pts, { color: '#92400e', weight: 2, fill: false, dashArray: '5 4', interactive: false }).addTo(map);
@@ -4201,68 +4205,94 @@
     // candidate only counts when the landform it sits on (its closed high
     // in the normal pass) is either the mound itself or a host at least
     // MOUND_HOST_RATIO times wider, i.e. a spur or hill, not a knob cluster.
-    // Height of a mound on a slope. iMound measures from the highest point
-    // of the rim, which on a hillside is the uphill side, so a hillside
-    // mound reads far lower than it is (Cottonpatch Mound: 1 ft). Here a
-    // tilted plane is fitted to a ring of ground around the candidate and
-    // the peak is measured from that plane. The fit's scatter says how
-    // even that ground is: a mound on a slope sits on a smooth, even
-    // hillside, while boulders, ledge knobs and colluvium bumps on a rugged
-    // mountainside sit on broken ground (scatter comparable to their height).
-    // Returns { relief, rough } in metres.
+    // Height and footprint of a mound on a slope. iMound measures from the
+    // highest point of the rim, which on a hillside is the uphill side, so
+    // it only takes in the mound's top and reads it far too low and small
+    // (Cottonpatch Mound: 1 ft tall, a fraction of its real width). Here a
+    // tilted plane is fitted to a ring of open hillside around the
+    // candidate, and the mound is measured above that plane. The ring steps
+    // outward from the detected top until moving it further no longer
+    // raises the measured height, i.e. until it has left the mound's lower
+    // flanks. The fit's scatter says how even that ground is: a mound on a
+    // slope sits on a smooth hillside, while boulders, ledge knobs and
+    // colluvium bumps on a rugged mountainside sit on broken ground.
+    // Returns { relief, rough, diameter, centroidR, centroidC } (metres / cells).
     function moundRingPlane(dem, W, H, k, cellM, nd) {
         const R = Math.max(2, Math.sqrt(k.area / Math.PI) / cellM);
-        const r0 = k.centroidR, c0 = k.centroidC, Ro = Math.ceil(2.4 * R);
+        const r0 = k.centroidR, c0 = k.centroidC;
+        // peak near the detected top
         let peak = -Infinity, pr = 0, pc = 0;
-        let n = 0, sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0;
-        const ring = [];
-        for (let r = Math.max(0, Math.floor(r0 - Ro)); r <= Math.min(H - 1, Math.ceil(r0 + Ro)); r++)
-            for (let c = Math.max(0, Math.floor(c0 - Ro)); c <= Math.min(W - 1, Math.ceil(c0 + Ro)); c++) {
+        const Rp = Math.ceil(0.6 * R);
+        for (let r = Math.max(0, Math.floor(r0 - Rp)); r <= Math.min(H - 1, Math.ceil(r0 + Rp)); r++)
+            for (let c = Math.max(0, Math.floor(c0 - Rp)); c <= Math.min(W - 1, Math.ceil(c0 + Rp)); c++) {
                 const z = dem[r * W + c];
-                if (z < nd) continue;
-                const x = c - c0, y = r - r0, d = Math.hypot(x, y) / R;
-                if (d <= 0.5) { if (z > peak) { peak = z; pr = y; pc = x; } }
-                else if (d >= 1.6 && d <= 2.4) {
+                if (z >= nd && Math.hypot(r - r0, c - c0) <= Rp && z > peak) { peak = z; pr = r; pc = c; }
+            }
+        if (peak === -Infinity) return { relief: 0, rough: Infinity, diameter: 0 };
+        // plane through the ring fIn..fOut (in units of R) around the peak
+        const fit = (fIn, fOut) => {
+            const Ro = Math.ceil(fOut * R);
+            let n = 0, sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0;
+            const ring = [];
+            for (let r = Math.max(0, pr - Ro); r <= Math.min(H - 1, pr + Ro); r++)
+                for (let c = Math.max(0, pc - Ro); c <= Math.min(W - 1, pc + Ro); c++) {
+                    const z = dem[r * W + c];
+                    if (z < nd) continue;
+                    const x = c - pc, y = r - pr, d = Math.hypot(x, y) / R;
+                    if (d < fIn || d > fOut) continue;
                     ring.push(x, y, z); n++; sx += x; sy += y; sz += z; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z;
                 }
+            if (n < 8) return null;
+            const mx = sx / n, my = sy / n, mz = sz / n;
+            const Cxx = sxx / n - mx * mx, Cyy = syy / n - my * my, Cxy = sxy / n - mx * my, Cxz = sxz / n - mx * mz, Cyz = syz / n - my * mz;
+            const det = Cxx * Cyy - Cxy * Cxy || 1e-9;
+            const b = (Cxz * Cyy - Cyz * Cxy) / det, c = (Cyz * Cxx - Cxz * Cxy) / det, a = mz - b * mx - c * my;
+            let ss = 0;
+            for (let i = 0; i < ring.length; i += 3) { const e = ring[i + 2] - (a + b * ring[i] + c * ring[i + 1]); ss += e * e; }
+            return { a, b, c, relief: peak - a, rough: Math.sqrt(ss / n), fIn };
+        };
+        let best = null;
+        for (const f of [1.6, 2.2, 3.0, 4.0]) {
+            const cur = fit(f, f + 0.8);
+            if (!cur) break;
+            if (best && cur.relief < best.relief * 1.08) break;   // left the mound: height stopped rising
+            best = cur;
+        }
+        if (!best) return { relief: 0, rough: Infinity, diameter: 0 };
+        // Footprint: ground connected to the peak, inside the ring, standing
+        // at least 10% of the mound's height above the fitted hillside
+        const lim = best.fIn * R, thrZ = 0.1 * best.relief, Rl = Math.ceil(lim);
+        const seen = new Set([pr * W + pc]), stack = [pr * W + pc];
+        let foot = 0, sr = 0, sc = 0;
+        while (stack.length) {
+            const i = stack.pop(), r = (i / W) | 0, c = i % W;
+            foot++; sr += r; sc += c;
+            for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+                const rr = r + dr, cc = c + dc, j = rr * W + cc;
+                if (rr < 0 || rr >= H || cc < 0 || cc >= W || seen.has(j)) continue;
+                const x = cc - pc, y = rr - pr;
+                if (Math.abs(x) > Rl || Math.abs(y) > Rl || Math.hypot(x, y) > lim) continue;
+                const z = dem[j];
+                if (z >= nd && z - (best.a + best.b * x + best.c * y) >= thrZ) { seen.add(j); stack.push(j); }
             }
-        if (n < 8 || peak === -Infinity) return { relief: 0, rough: Infinity };
-        // least-squares plane z = a + b x + c y
-        const mx = sx / n, my = sy / n, mz = sz / n;
-        const Cxx = sxx / n - mx * mx, Cyy = syy / n - my * my, Cxy = sxy / n - mx * my, Cxz = sxz / n - mx * mz, Cyz = syz / n - my * mz;
-        const det = Cxx * Cyy - Cxy * Cxy || 1e-9;
-        const b = (Cxz * Cyy - Cyz * Cxy) / det, c = (Cyz * Cxx - Cxz * Cxy) / det, a = mz - b * mx - c * my;
-        let ss = 0;
-        for (let i = 0; i < ring.length; i += 3) { const e = ring[i + 2] - (a + b * ring[i] + c * ring[i + 1]); ss += e * e; }
-        const relief = peak - (a + b * pc + c * pr);
-        // Footprint: ground inside the ring standing at least 20% of the
-        // mound's height above the fitted hillside
-        let foot = 0;
-        for (let r = Math.max(0, Math.floor(r0 - Ro)); r <= Math.min(H - 1, Math.ceil(r0 + Ro)); r++)
-            for (let c2 = Math.max(0, Math.floor(c0 - Ro)); c2 <= Math.min(W - 1, Math.ceil(c0 + Ro)); c2++) {
-                const z = dem[r * W + c2], x = c2 - c0, y = r - r0;
-                if (z >= nd && Math.hypot(x, y) / R < 1.6 && z - (a + b * x + c * y) >= 0.2 * relief) foot++;
-            }
-        return { relief, rough: Math.sqrt(ss / n), diameter: 2 * Math.sqrt(foot / Math.PI) * cellM };
+        }
+        return { relief: best.relief, rough: best.rough, diameter: 2 * Math.sqrt(foot / Math.PI) * cellM,
+                 centroidR: sr / foot, centroidC: sc / foot };
     }
     const MOUND_MAX_ROUGH = 0.2;   // ring scatter may be at most this share of the mound's height
-    // Mound height used by the size rules: iMound height on level ground;
-    // on sloped ground the height above the fitted slope, and only when
-    // that slope is even (else null: a knob on broken ground)
-    function moundSizeHeight(k, gsDeg, flatMax, dem, W, H, cellM, nd) {
-        if (gsDeg <= flatMax) return k.maxMetric;
-        // iMound's closed contour on a slope only captures the mound's top,
-        // so the ring sits beyond it (1.6-2.4x that radius) on the open
-        // hillside, and height is the peak above that fitted slope
+    const MOUND_TILT_MIN = 2;      // degrees: below this the ground is level and iMound measures the whole mound
+    // Height and width used by the size rules. On level ground, iMound's.
+    // On any tilted ground iMound's closed contour only takes in the part
+    // above the uphill rim, so the mound is measured above the fitted
+    // hillside instead. Returns null when the ground is steeper than the
+    // flat-ground setting AND broken / rugged (a knob or boulder, not a
+    // mound). { h, d, plane, rugged }
+    function moundMeasure(k, diameter, gsDeg, flatMax, dem, W, H, cellM, nd) {
+        if (gsDeg <= MOUND_TILT_MIN) return { h: k.maxMetric, d: diameter, plane: null, rugged: false };
         const p = moundRingPlane(dem, W, H, k, cellM, nd);
-        return p.relief > 0 && p.rough <= MOUND_MAX_ROUGH * p.relief ? p.relief : null;
-    }
-    // Mound width used by the size rules: on sloped ground iMound's contour
-    // only takes in the part above the uphill rim, so the footprint above
-    // the fitted hillside is used when it is larger
-    function moundSizeDiameter(k, diameter, gsDeg, flatMax, dem, W, H, cellM, nd) {
-        if (gsDeg <= flatMax) return diameter;
-        return Math.max(diameter, moundRingPlane(dem, W, H, k, cellM, nd).diameter || 0);
+        const rugged = !(p.relief > 0 && p.rough <= MOUND_MAX_ROUGH * p.relief);
+        if (rugged) return gsDeg > flatMax ? null : { h: k.maxMetric, d: diameter, plane: p, rugged };
+        return { h: Math.max(k.maxMetric, p.relief), d: Math.max(diameter, p.diameter || 0), plane: p, rugged };
     }
     const MOUND_HOST_RATIO = 4, MOUND_HOST_MIN_M = 60;
     function moundHostOk(hostDiam, diameter) {
@@ -5217,9 +5247,18 @@
                     const gsDeg = groundSlope[rcIndex(k)];
                     if (gsDeg > MOUND_SLOPE_HARD_MAX) continue;               // cliff / steep hillside
                     if (k.fillRatio < 0.6) continue;                         // several natural bumps merged
-                    const hM = moundSizeHeight(k, gsDeg, maxGroundSlope, denoised, W, H, effRes, nodataThresh);
-                    if (hM === null) continue;                               // bump on broken, rugged ground
-                    diameter = moundSizeDiameter(k, diameter, gsDeg, maxGroundSlope, denoised, W, H, effRes, nodataThresh);
+                    let meas = moundMeasure(k, diameter, gsDeg, maxGroundSlope, denoised, W, H, effRes, nodataThresh);
+                    if (!meas) continue;                                     // bump on broken, rugged hillside
+                    const dTop = diameter;                                   // detected top, for the cluster checks
+                    // One knob among several of its size: on a hillside that's a knob
+                    // field (dropped); on gentle ground it keeps its detected size,
+                    // since the slope measurement would take in its neighbours
+                    const clustered = gsDeg > MOUND_TILT_MIN && (!moundHostOk(fineHost[rcIndex(k)], dTop) ||
+                        moundNeighbourShare(fineHost.labels, W, H, k, dTop, effRes) > 0.05);
+                    if (clustered && gsDeg > maxGroundSlope) continue;
+                    if (clustered) meas = { h: k.maxMetric, d: dTop };
+                    const hM = meas.h;
+                    diameter = meas.d;
                     if (hM < feetToMeters(preset.minHeight) || diameter < feetToMeters(preset.minDiameter) ||
                         diameter > feetToMeters(preset.maxDiameter) || k.circularity < preset.minCircularity) continue;
                     if (k.elongation > preset.maxElongation * 1.3) continue;   // levee / ridge / merged bumps: too stretched for this class
@@ -5228,8 +5267,6 @@
                     const tm = moundTemplateMatch(height, W, H, k);
                     if (tm.score < minTemplate) continue;
                     if (moundSlopeRule(gsDeg, maxGroundSlope, tm.score, k)) continue;   // irregular knob on a hillside
-                    if (gsDeg > maxGroundSlope && (!moundHostOk(fineHost[rcIndex(k)], diameter) ||
-                        moundNeighbourShare(fineHost.labels, W, H, k, diameter, effRes) > 0.05)) continue; // one knob of a hillside knob field
                     const flatTop = moundFlatTop(height, W, H, k);
                     tm.shape = flatTop >= 0.18 ? 'platform / flat-topped' : 'conical / dome';
                     // Label by shape: a flat-topped fit is a platform mound when
