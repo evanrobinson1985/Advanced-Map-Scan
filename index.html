@@ -4266,7 +4266,9 @@
         // Footprint above a fitted surface: ground connected to the peak,
         // within `lim` cells, standing >= 5% of the mound's height above it
         const footprint = (fitRes, lim, frac = 0.05) => {
-            const thrZ = Math.max(frac * fitRes.relief, 0.03), Rl = Math.ceil(lim);   // toe: 5% of the height (3 cm floor against noise)
+            // toe: 5% of the height, but never below the hillside's own lumpiness
+            // (the fit's scatter), or the outline leaks downhill over ordinary ground
+            const thrZ = Math.max(frac * fitRes.relief, fitRes.rough, 0.03), Rl = Math.ceil(lim);
             const seen = new Set([pr * W + pc]), stack = [pr * W + pc];
             let foot = 0, sr = 0, sc = 0, maxD = 0;
             while (stack.length) {
@@ -4309,11 +4311,9 @@
         // flanks underestimates both, so either test alone stops too early).
         // Keep the ring near the mound (inner edge within ~25 m, or 2.5x the
         // footprint for a big mound): farther out it reaches bluffs, cave
-        // mouths and gullies that have nothing to do with the mound's
-        // setting. Of the rings that start clear of the footprint, the
-        // smoothest fit (least scatter for the height) is used.
+        // mouths and gullies that have nothing to do with the mound's setting.
         let maxF = Math.min(10, 25 / (R * cellM));
-        let fIn = 1.6, best = null, fp = null, pick = null;
+        let fIn = 1.6, best = null, fp = null;
         for (let it = 0; it < 12; it++) {
             const cur = fit(fIn, fIn + Math.max(0.8, 0.5 * fIn));
             if (!cur) break;
@@ -4336,11 +4336,9 @@
             const clear = fIn >= 1.25 * f2.eqR / R + 0.3;
             best = cur; fp = f2;
             maxF = Math.max(maxF, Math.min(10, 2.5 * f2.eqR / R));
-            if (clear && cur.relief > 0 && (!pick || cur.rough / cur.relief < pick.fit.rough / pick.fit.relief)) pick = { fit: cur, fp: f2, fIn };
             if ((settled && clear) || fIn >= maxF) break;
             fIn = Math.min(maxF, Math.max(fIn + 0.6, 1.25 * f2.eqR / R + 0.3));
         }
-        if (pick) { best = pick.fit; fp = pick.fp; fIn = pick.fIn; }
         if (!best || !fp) return { relief: 0, rough: Infinity, diameter: 0 };
         // Shape (roundness / stretch) from the 25% contour: the toe's edge is
         // ragged with LiDAR noise, which would make any mound look irregular
