@@ -267,7 +267,7 @@
                 <input type="range" id="moundMaxGroundSlope" min="2" max="30" step="1" value="8" oninput="updateThresholdVal('moundMaxGroundSlope','°',0)">
                 <span class="val-display" id="moundMaxGroundSlopeVal">8°</span>
             </div>
-            <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">Most mounds sit on terraces, floodplains and ridge tops, but some were built on a mountainside (e.g. Cottonpatch Mound on Montague Mountain at Russell Cave). A candidate on ground steeper than this still counts, but only if it is a clean mound shape: template match &ge; 0.85, elongation &le; 1.5x and circularity &ge; 0.55, which weeds out natural hillside knobs and outcrops. Ground steeper than 20&deg; is never kept.</div>
+            <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">Most mounds sit on terraces, floodplains and ridge tops, but some were built on a mountainside (e.g. Cottonpatch Mound on Montague Mountain at Russell Cave). A candidate on ground steeper than this still counts, but only if it is a clean mound shape: template match &ge; 0.85, elongation &le; 1.5x and circularity &ge; 0.45, which weeds out natural hillside knobs and outcrops. Ground steeper than 20&deg; is never kept.</div>
             <div style="font-size:0.68rem; color:#94a3b8; margin-top:4px; line-height:1.35;">All Shapes runs both dedicated Conical and Platform scans and merges the results - most thorough, roughly 2x the scan time of a single shape. Broad/Any is a faster single compromise scan. Circularity/Diameter/Height/Trend Radius come from published size ranges for each type (see chat for sourcing and caveats) - a perfect square already measures ~0.79 on the Circularity scale, close to a circle's 1.0, so "round" and "square" genuinely overlap here, these bias toward one shape rather than cleanly separating them. Max Circularity and Flank Slope only flag a candidate as unusual, they don't exclude it - a real, well-built mound can legitimately be steeper or more compact than a generic rule predicts. Selecting a specific shape (not "All" or "Custom") overwrites the sliders below; your own confirmed examples remain the more reliable calibration once you have some.</div>
         </div>
         </div>
@@ -2000,7 +2000,7 @@
             // expected to be compact and roughly round by design, so real
             // elongation here is a stronger signal of a natural ridge or
             // drainage feature than it would be for a platform mound.
-            conical: { minHeight: 2, minCircularity: 0.55, maxCircularity: 1.0, minDiameter: 20, maxDiameter: 380, trendRadius: 40, maxFlankSlope: 65, maxElongation: 1.8 },
+            conical: { minHeight: 2, minCircularity: 0.45, maxCircularity: 1.0, minDiameter: 20, maxDiameter: 380, trendRadius: 40, maxFlankSlope: 65, maxElongation: 1.8 },
             // Mississippian platform mounds: flat-topped, often square or
             // rectangular in plan - but most documented examples are closer
             // to square than dramatically elongated, so the circularity
@@ -4307,8 +4307,13 @@
         // Stop only when the ring starts clear of the footprint AND moving it
         // further out no longer changes the height (a fit still touching the
         // flanks underestimates both, so either test alone stops too early).
-        const maxF = Math.min(10, 60 / (R * cellM) + 1.6);   // never reach beyond ~60 m
-        let fIn = 1.6, best = null, fp = null;
+        // Keep the ring near the mound (inner edge within ~25 m, or 2.5x the
+        // footprint for a big mound): farther out it reaches bluffs, cave
+        // mouths and gullies that have nothing to do with the mound's
+        // setting. Of the rings that start clear of the footprint, the
+        // smoothest fit (least scatter for the height) is used.
+        let maxF = Math.min(10, 25 / (R * cellM));
+        let fIn = 1.6, best = null, fp = null, pick = null;
         for (let it = 0; it < 12; it++) {
             const cur = fit(fIn, fIn + Math.max(0.8, 0.5 * fIn));
             if (!cur) break;
@@ -4330,9 +4335,12 @@
             const settled = best && Math.abs(cur.relief - best.relief) <= 0.03 * Math.abs(best.relief) + 0.01;
             const clear = fIn >= 1.25 * f2.eqR / R + 0.3;
             best = cur; fp = f2;
+            maxF = Math.max(maxF, Math.min(10, 2.5 * f2.eqR / R));
+            if (clear && cur.relief > 0 && (!pick || cur.rough / cur.relief < pick.fit.rough / pick.fit.relief)) pick = { fit: cur, fp: f2, fIn };
             if ((settled && clear) || fIn >= maxF) break;
             fIn = Math.min(maxF, Math.max(fIn + 0.6, 1.25 * f2.eqR / R + 0.3));
         }
+        if (pick) { best = pick.fit; fp = pick.fp; fIn = pick.fIn; }
         if (!best || !fp) return { relief: 0, rough: Infinity, diameter: 0 };
         // Shape (roundness / stretch) from the 25% contour: the toe's edge is
         // ragged with LiDAR noise, which would make any mound look irregular
@@ -4341,7 +4349,7 @@
         return { relief: best.relief, rough: best.rough, diameter: 2 * fp.eqR * cellM,
                  centroidR: fp.sr / fp.foot, centroidC: fp.sc / fp.foot, circularity: fp.circularity, elongation: fp.elongation };
     }
-    const MOUND_MAX_ROUGH = 0.2;   // ring scatter may be at most this share of the mound's height
+    const MOUND_MAX_ROUGH = 0.35;  // ring scatter may be at most this share of the mound's height (real LiDAR ground is never perfectly smooth)
     const MOUND_TILT_MIN = 2;      // degrees: below this the ground is level and iMound measures the whole mound
     // Height and width used by the size rules. On level ground, iMound's.
     // On any tilted ground iMound's closed contour only takes in the part
@@ -4422,7 +4430,7 @@
         const bad = [];
         if (tmScore < 0.85) bad.push(`template ${tmScore.toFixed(2)} &lt; 0.85`);
         if (k.elongation > 1.5) bad.push(`elongation ${k.elongation.toFixed(1)}x &gt; 1.5x`);
-        if (k.circularity < 0.55) bad.push(`circularity ${k.circularity.toFixed(2)} &lt; 0.55`);
+        if (k.circularity < 0.45) bad.push(`circularity ${k.circularity.toFixed(2)} &lt; 0.45`);
         return bad.length ? 'on sloped ground it needs a clean mound shape: ' + bad.join(', ') : null;
     }
 
