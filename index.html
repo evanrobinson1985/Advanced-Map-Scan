@@ -2438,7 +2438,8 @@
             const noiseSigma = estimateNoiseFloor(currentDEM, denoised, nd);
             const thr = Math.max(0.05, 5 * noiseSigma);
             const defs = moundShapePresetDefs();
-            const presets = [{ name: 'conical', ...defs.conical }, { name: 'platform', ...defs.platform }];
+            const presets = moundPresetsWithTraining([{ name: 'conical', ...defs.conical }, { name: 'platform', ...defs.platform }]);
+            const flatMax = parseFloat(document.getElementById('moundMaxGroundSlope').value);
             // Same multi-scale, two-pass detrending as the scan. The tap is
             // snapped to the nearest closed high within ~10 m, and of all the
             // closed highs found there (per scale and pass) the check reports
@@ -2448,8 +2449,8 @@
             const tapLon = demBounds.w + ((c + 0.5) / W) * (demBounds.e - demBounds.w);
             const snapPx = Math.max(2, Math.round(10 / effRes));
             const slopeDeg = computeSlopeDegrees(denoised, W, H, effRes, nd);
-            const sizeFits = (k) => { const d = 2 * Math.sqrt(k.area / Math.PI);
-                return presets.filter(p => k.maxMetric >= feetToMeters(p.minHeight) && d >= feetToMeters(p.minDiameter) && d <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3).map(p => p.name); };
+            const sizeFits = (k, hM) => { const d = 2 * Math.sqrt(k.area / Math.PI);
+                return presets.filter(p => hM >= feetToMeters(p.minHeight) && d >= feetToMeters(p.minDiameter) && d <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3).map(p => p.name); };
             const found = [];
             let bestTapHeight = 0;
             const scales = [...new Set(presets.flatMap(p => moundScalesM(p)))];
@@ -2474,22 +2475,26 @@
                         }
                     if (sr < 0) continue;
                     const k = traceOneComponent(mask, hh, denoised, W, H, effRes, nd, new Uint8Array(n), new Int32Array(n), new Int32Array(n), sr, sc, null, slopeDeg);
-                    if (!k) continue;
+                    if (!k || k.area < Math.max(10 * effRes * effRes, 7)) continue;   // a noise speck, not a feature
                     const diam = 2 * Math.sqrt(k.area / Math.PI);
-                    found.push({ k, diam, height: hh, resid: rs, groundSlope: mt.slopeDeg, pass, scaleM, start: sr * W + sc,
-                                 hostDiam: host[rcIndex(k)], fits: sizeFits(k) });
+                    const hM = moundSizeHeight(k, mt.slopeDeg[rcIndex(k)], flatMax, denoised, W, H, effRes, nd);
+                    found.push({ k, diam, hM, height: hh, resid: rs, groundSlope: mt.slopeDeg, pass, scaleM, start: sr * W + sc,
+                                 hostDiam: host[rcIndex(k)], fits: sizeFits(k, hM), tm: moundTemplateMatch(hh, W, H, k),
+                                 plausible: presets.some(p => diam <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3) });
                 }
             }
             if (!found.length) {
                 L.popup({ maxWidth: 380 }).setLatLng([tapLat, tapLon]).setContent(`<b>Not a closed high here</b> (iMound height ${bestTapHeight.toFixed(2)} m, needs &gt; ${thr.toFixed(2)} m, and none within ${Math.round(snapPx * effRes)} m). The ground doesn't rise above a closed contour at this spot, so it's a slope, bulge or ridge nose rather than a free-standing mound, or the mound is lower than the LiDAR can separate from noise. Nothing was saved.`).openOn(map);
                 return;
             }
-            // Prefer a mound-sized closed high (smallest first, i.e. the most
-            // local one); otherwise report the smallest closed high found
-            found.sort((a, b) => (b.fits.length > 0) - (a.fits.length > 0) || a.diam - b.diam);
-            const best = found[0], comp = best.k, height = best.height, resid = best.resid, diam = best.diam;
+            // Prefer a closed high that fits a mound class, then one that is
+            // mound-shaped but too small / low, then the best dome or
+            // platform match; the smaller (more local) one on a tie
+            found.sort((a, b) => (b.fits.length > 0) - (a.fits.length > 0) || b.plausible - a.plausible ||
+                                 (b.tm.score - a.tm.score) || a.diam - b.diam);
+            const best = found[0], comp = best.k, height = best.height, resid = best.resid, diam = best.diam, hM = best.hM;
             const gs = best.groundSlope[rcIndex(comp)];
-            const tm = moundTemplateMatch(height, W, H, comp);
+            const tm = best.tm;
             const persist = moundPersistence(resid, W, H, nd, comp, best.start, parseInt(document.getElementById('moundRuns').value), Math.max(0.1, noiseSigma), Math.max(1, Math.round(3 / effRes)), thr);
             const chk = (ok, text) => `<tr style="${ok ? 'background:#dcfce7' : 'background:#fee2e2'}"><td>${ok ? '&#10003;' : '&#10007;'}</td><td>${text}</td></tr>`;
             const sizeOk = best.fits;
@@ -2498,25 +2503,33 @@
                     ? 'Stands on its own (not one knob of a larger cluster)'
                     : `Sits on a larger landform ${metersToFeetInches(best.hostDiam)} across (a spur or hill needs &ge; ${metersToFeetInches(Math.max(MOUND_HOST_RATIO * diam, MOUND_HOST_MIN_M))}; smaller means one knob of a natural cluster)`)
                 : '';
-            const saved = sizeOk.length > 0 && !comp.incomplete;
+            // You said it's a mound: save it (so later scans widen to include
+            // it) unless what was measured is bigger than any mound class,
+            // i.e. the landform under the mound rather than the mound
+            // Only "too small / too low" is forgiven: the shape must still be
+            // round and compact enough for a mound class, and not too big
+            const tooBig = !presets.some(p => diam <= feetToMeters(p.maxDiameter) && comp.circularity >= p.minCircularity && comp.elongation <= p.maxElongation * 1.3);
+            const saved = !tooBig && !comp.incomplete;
             const cLat = demBounds.n - ((comp.centroidR + 0.5) / H) * (demBounds.n - demBounds.s);
             const cLon = demBounds.w + ((comp.centroidC + 0.5) / W) * (demBounds.e - demBounds.w);
             const html = `<b>Mound check at this point (iMound pipeline)</b>
                 <div style="font-size:0.7rem;color:#64748b;">Measured ${best.pass === 'spur' ? 'with the spur pass (curved-surface detrend), ' : ''}at the ${Math.round(best.scaleM)} m scale; outlined in brown on the map.</div>
                 <table style="font-size:0.72rem;border-collapse:collapse;margin-top:6px;">
                 ${chk(true, `Closed high: ${metersToFeetInches(comp.maxMetric)} above its base contour, ${metersToFeetInches(diam)} across`)}
+                ${hM > comp.maxMetric ? chk(true, `On a slope, so height is measured against the ground ringing it: ${metersToFeetInches(hM)}`) : ''}
                 ${chk(!comp.incomplete, 'Fully inside the download (not clipped)')}
-                ${chk(sizeOk.length > 0, `Size/height/roundness fit a size class (${sizeOk.join(', ') || 'none'}; circularity ${comp.circularity.toFixed(2)}, elongation ${comp.elongation.toFixed(1)}x)`)}
+                ${chk(sizeOk.length > 0, `Size/height/roundness fit a size class (${sizeOk.join(', ') || 'none'}; smallest class needs ${Math.min(...presets.map(p => p.minHeight)).toFixed(1)} ft tall, ${Math.min(...presets.map(p => p.minDiameter)).toFixed(0)} ft across, circularity ${Math.min(...presets.map(p => p.minCircularity)).toFixed(2)}; this one: circularity ${comp.circularity.toFixed(2)}, elongation ${comp.elongation.toFixed(1)}x)`)}
                 ${hostRow}
                 ${(() => { const flat = parseFloat(document.getElementById('moundMaxGroundSlope').value), why = moundSlopeRule(gs, flat, tm.score, comp);
                     return chk(!why, gs <= flat ? `Ground slope under it ${gs.toFixed(1)}&deg; (flat ground, up to ${flat}&deg;)` : `Ground slope under it ${gs.toFixed(1)}&deg; (hillside mound${why ? ': ' + why : ', clean mound shape'})`); })()}
                 ${chk(comp.fillRatio >= 0.6, `Solid single shape (fill ratio ${comp.fillRatio.toFixed(2)}, min 0.60)`)}
-                ${chk(comp.maxMetric / diam >= parseFloat(document.getElementById('moundMinHW').value), `Height : width ${(comp.maxMetric / diam).toFixed(3)} (min ${document.getElementById('moundMinHW').value})`)}
+                ${chk(hM / diam >= parseFloat(document.getElementById('moundMinHW').value), `Height : width ${(hM / diam).toFixed(3)} (min ${document.getElementById('moundMinHW').value})`)}
                 ${chk(tm.score >= parseFloat(document.getElementById('moundMinTemplate').value), `Template match ${tm.score.toFixed(2)} (${tm.shape}; min ${document.getElementById('moundMinTemplate').value})`)}
                 ${chk(persist >= parseFloat(document.getElementById('moundMinPersist').value), `Persists in ${Math.round(persist * 100)}% of LiDAR-error runs (min ${Math.round(parseFloat(document.getElementById('moundMinPersist').value) * 100)}%)`)}
                 </table><div style="font-size:0.7rem;color:#64748b;margin-top:4px;">${saved
-                    ? 'Recorded as a confirmed mound; thresholds widen to include it if needed.'
-                    : `<b>Not saved as training:</b> the closed high measured here (${metersToFeetInches(diam)} across) isn't mound-sized, so it's probably the landform the mound sits on. Saving it would loosen the size limits for every future scan.`}</div>`;
+                    ? (sizeOk.length ? 'Recorded as a confirmed mound.' : '<b>Recorded as a confirmed mound.</b> The size limits now widen to include it, so rescan Mounds and it (and mounds like it) will be found.')
+                    : comp.incomplete ? '<b>Not saved as training:</b> the feature runs off the edge of the download. Download a larger area around it and try again.'
+                    : `<b>Not saved as training:</b> the closed high measured here (${metersToFeetInches(diam)} across) is too big, irregular or stretched for any mound class, so it's probably the landform the mound sits on. Saving it would loosen the size limits for every future scan. Try tapping the top of the mound itself.`}</div>`;
             // Outline what was measured, so it's clear which feature the check is about
             const pts = [];
             for (let a = 0; a < 48; a++) {
@@ -2527,7 +2540,7 @@
             if (window.__moundCheckOutline) map.removeLayer(window.__moundCheckOutline);
             window.__moundCheckOutline = L.polygon(pts, { color: '#92400e', weight: 2, fill: false, dashArray: '5 4', interactive: false }).addTo(map);
             L.popup({ maxWidth: 420 }).setLatLng([tapLat, tapLon]).setContent(html).openOn(map);
-            if (saved) confirmFeature(mode, diam, comp.circularity, comp.elongation, comp.maxMetric, cLat, cLon, null, null);
+            if (saved) confirmFeature(mode, diam, comp.circularity, comp.elongation, hM, cLat, cLon, null, null);
             return;
         }
 
@@ -4181,6 +4194,48 @@
     // candidate only counts when the landform it sits on (its closed high
     // in the normal pass) is either the mound itself or a host at least
     // MOUND_HOST_RATIO times wider, i.e. a spur or hill, not a knob cluster.
+    // Height of a mound on a slope. iMound measures from the highest point
+    // of the rim, which on a hillside is the uphill side, so a hillside
+    // mound reads far lower than it is (Cottonpatch Mound: 1 ft). Here the
+    // peak is compared with the mean of a ring of ground around it; a
+    // uniform slope averages out around a ring, leaving the mound.
+    function moundRingRelief(dem, W, H, k, cellM, nd) {
+        const R = Math.max(2, Math.sqrt(k.area / Math.PI) / cellM);
+        const r0 = k.centroidR, c0 = k.centroidC, Ro = Math.ceil(1.45 * R);
+        let peak = -Infinity, sum = 0, cnt = 0;
+        for (let r = Math.max(0, Math.floor(r0 - Ro)); r <= Math.min(H - 1, Math.ceil(r0 + Ro)); r++)
+            for (let c = Math.max(0, Math.floor(c0 - Ro)); c <= Math.min(W - 1, Math.ceil(c0 + Ro)); c++) {
+                const z = dem[r * W + c];
+                if (z < nd) continue;
+                const d = Math.hypot(r - r0, c - c0) / R;
+                if (d <= 0.5) peak = Math.max(peak, z);
+                else if (d >= 1.05 && d <= 1.45) { sum += z; cnt++; }
+            }
+        return cnt && peak > -Infinity ? peak - sum / cnt : 0;
+    }
+    // Mound height used by the size rules: iMound height, or on sloped
+    // ground the ring relief when that is larger
+    function moundSizeHeight(k, gsDeg, flatMax, dem, W, H, cellM, nd) {
+        return gsDeg > flatMax ? Math.max(k.maxMetric, moundRingRelief(dem, W, H, k, cellM, nd)) : k.maxMetric;
+    }
+    // Confirmed mounds (This is a Mound / checkbox) widen the size classes'
+    // MINIMUMS so a confirmed low or small mound, and ones like it, are
+    // found by later scans, in All Shapes mode too. Only lower bounds move,
+    // and only examples that fit the class's maximum size count, so a
+    // mistaken confirmation of a whole hill can't open the limits up.
+    function moundPresetsWithTraining(presets) {
+        const ex = (trainingData.mounds && trainingData.mounds.examples) || [];
+        return presets.map(p => {
+            const q = { ...p };
+            for (const e of ex) {
+                if (!(e.diameter > 0) || e.diameter > feetToMeters(p.maxDiameter)) continue;
+                q.minHeight = Math.min(q.minHeight, Math.max(0.5, metersToFeet(e.maxMetric) - 0.25));
+                q.minDiameter = Math.min(q.minDiameter, Math.max(6, metersToFeet(e.diameter) - 2));
+                q.minCircularity = Math.min(q.minCircularity, Math.max(0.3, e.circularity - 0.05));
+            }
+            return q;
+        });
+    }
     const MOUND_HOST_RATIO = 4, MOUND_HOST_MIN_M = 60;
     function moundHostOk(hostDiam, diameter) {
         if (!(hostDiam > 1.3 * diameter)) return true;   // the host IS this mound (or no host)
@@ -5046,7 +5101,7 @@
             const presetDefs = moundShapePresetDefs();
             let presetsToRun;
             if (moundShapeMode === 'all') {
-                presetsToRun = [{ name: 'conical', ...presetDefs.conical }, { name: 'platform', ...presetDefs.platform }];
+                presetsToRun = moundPresetsWithTraining([{ name: 'conical', ...presetDefs.conical }, { name: 'platform', ...presetDefs.platform }]);
             } else if (moundShapeMode === 'custom') {
                 presetsToRun = [{
                     name: 'custom',
@@ -5060,7 +5115,7 @@
                     maxElongation: parseFloat(document.getElementById('maxElongation').value),
                 }];
             } else {
-                presetsToRun = [{ name: moundShapeMode, ...presetDefs[moundShapeMode] }];
+                presetsToRun = moundPresetsWithTraining([{ name: moundShapeMode, ...presetDefs[moundShapeMode] }]);
             }
 
             const tick0 = (msg) => { status.innerText = msg; return new Promise(r => setTimeout(r, 0)); };
@@ -5115,10 +5170,11 @@
                     const gsDeg = groundSlope[rcIndex(k)];
                     if (gsDeg > MOUND_SLOPE_HARD_MAX) continue;               // cliff / steep hillside
                     if (k.fillRatio < 0.6) continue;                         // several natural bumps merged
-                    if (k.maxMetric < feetToMeters(preset.minHeight) || diameter < feetToMeters(preset.minDiameter) ||
+                    const hM = moundSizeHeight(k, gsDeg, maxGroundSlope, denoised, W, H, effRes, nodataThresh);
+                    if (hM < feetToMeters(preset.minHeight) || diameter < feetToMeters(preset.minDiameter) ||
                         diameter > feetToMeters(preset.maxDiameter) || k.circularity < preset.minCircularity) continue;
                     if (k.elongation > preset.maxElongation * 1.3) continue;   // levee / ridge / merged bumps: too stretched for this class
-                    if (k.maxMetric / diameter < minHW) continue;             // broad natural swell, far too low for its width
+                    if (hM / diameter < minHW) continue;                      // broad natural swell, far too low for its width
                     if (excludeWaterways && k.waterwayFraction > 0.4 && k.maxMetric < 2.5 * feetToMeters(preset.minHeight)) continue;
                     const tm = moundTemplateMatch(height, W, H, k);
                     if (tm.score < minTemplate) continue;
@@ -5131,8 +5187,9 @@
                     // it also fits the platform size class, and vice versa
                     let label = preset;
                     const other = presetsToRun.find(p => p.name === (tm.shape.startsWith('platform') ? 'platform' : 'conical'));
-                    if (other && other !== preset && k.maxMetric >= feetToMeters(other.minHeight) && diameter >= feetToMeters(other.minDiameter) &&
+                    if (other && other !== preset && hM >= feetToMeters(other.minHeight) && diameter >= feetToMeters(other.minDiameter) &&
                         diameter <= feetToMeters(other.maxDiameter) && k.circularity >= other.minCircularity) label = other;
+                    if (hM > k.maxMetric) k.maxMetric = hM;   // hillside mound: report its height above the slope
                     pre.push({ k, preset: label, tm, diameter, resid, height, mask });
                 }
                 }
