@@ -121,10 +121,10 @@
             <div style="height:8px; background:#e2e8f0; border-radius:4px; overflow:hidden;"><div id="dlProgressBar" style="height:100%; width:0%; background:#2563eb; transition:width 0.2s;"></div></div>
             <button id="dlCancelBtn" onclick="cancelDownload()" style="background:#fee2e2; color:#991b1b; padding:6px;">Cancel download</button>
         </div>
-        <input type="file" id="localDtmInput" accept=".tif,.tiff" style="display:none" onchange="loadLocalDTM(this)">
+        <input type="file" id="localDtmInput" accept=".tif,.tiff" multiple style="display:none" onchange="loadLocalDTM(this)">
         <input type="file" id="pipelineGeoJsonInput" accept=".json,.geojson" style="display:none" onchange="loadPipelineGeoJSON(this)">
         <div style="display:flex; gap:6px;">
-            <button onclick="document.getElementById('localDtmInput').click()" style="font-size:0.78rem;">Load Local DTM (GeoTIFF, WGS84)</button>
+            <button onclick="document.getElementById('localDtmInput').click()" style="font-size:0.78rem;">Load Local DTM (USGS 1 m tiles / GeoTIFF)</button>
             <button onclick="document.getElementById('pipelineGeoJsonInput').click()" style="font-size:0.78rem;">Load Pipeline Results (GeoJSON)</button>
         </div>
         <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem; margin-top:6px;">
@@ -1733,6 +1733,7 @@
         try {
             await Promise.all(Array.from({ length: Math.min(DL_PARALLEL, total) }, worker));
             const width_m = plan.width_m;
+            window.lastLocalDTMInfo = null;   // this DEM came from the 3DEP service
             commitDEM(out, W, H, bounds, width_m,
                 `Whole view loaded: ${W.toLocaleString()} x ${H.toLocaleString()} px at ${plan.res.toFixed(2)} m/px from ${total} tile(s). ` +
                 `3DEP serves the best LiDAR available at each spot; where only coarser source data exists, finer pixels are interpolated and won't add real detail.`);
@@ -1843,42 +1844,248 @@
         if (document.getElementById('autoTuneOnDownload').checked) setTimeout(autoDetectSettings, 50);
     }
 
-    // Loads a local bare-earth DTM GeoTIFF instead of the 3DEP download: your
-    // own LiDAR-derived DTM, or dtm_wgs84.tif from pipeline/karst_pipeline.py.
-    // Must be in WGS84 lon/lat (EPSG:4326), since everything in this app is
-    // positioned by lat/lon bounds.
+    // ---- Transverse Mercator (UTM) on the GRS80 ellipsoid ----
+    // Snyder, "Map Projections: A Working Manual" (USGS PP 1395), eqs. 8-9 to
+    // 8-25; sub-millimetre within a UTM zone. GRS80 (NAD83) and WGS84 differ by
+    // 0.1 mm in the ellipsoid; the NAD83->WGS84 datum offset (~1 m in the
+    // continental US) is not applied, which is well under a mound's size.
+    const TM_A = 6378137, TM_F = 1 / 298.257222101, TM_E2 = TM_F * (2 - TM_F), TM_EP2 = TM_E2 / (1 - TM_E2);
+    function tmMeridian(phi) {
+        const e2 = TM_E2, e4 = e2 * e2, e6 = e4 * e2;
+        return TM_A * ((1 - e2 / 4 - 3 * e4 / 64 - 5 * e6 / 256) * phi - (3 * e2 / 8 + 3 * e4 / 32 + 45 * e6 / 1024) * Math.sin(2 * phi)
+            + (15 * e4 / 256 + 45 * e6 / 1024) * Math.sin(4 * phi) - (35 * e6 / 3072) * Math.sin(6 * phi));
+    }
+    function makeTM(p) {   // p: { lon0, lat0, k0, fe, fn } in degrees / metres
+        const l0 = p.lon0 * Math.PI / 180, M0 = tmMeridian(p.lat0 * Math.PI / 180), k0 = p.k0;
+        const e2 = TM_E2, ep2 = TM_EP2, e1 = (1 - Math.sqrt(1 - e2)) / (1 + Math.sqrt(1 - e2));
+        const mu0 = TM_A * (1 - e2 / 4 - 3 * e2 * e2 / 64 - 5 * e2 * e2 * e2 / 256);
+        return {
+            forward(lat, lon) {
+                const phi = lat * Math.PI / 180, sp = Math.sin(phi), cp = Math.cos(phi), tp = Math.tan(phi);
+                const N = TM_A / Math.sqrt(1 - e2 * sp * sp), T = tp * tp, C = ep2 * cp * cp, A = (lon * Math.PI / 180 - l0) * cp;
+                const M = tmMeridian(phi);
+                const x = k0 * N * (A + (1 - T + C) * A ** 3 / 6 + (5 - 18 * T + T * T + 72 * C - 58 * ep2) * A ** 5 / 120);
+                const y = k0 * (M - M0 + N * tp * (A * A / 2 + (5 - T + 9 * C + 4 * C * C) * A ** 4 / 24 + (61 - 58 * T + T * T + 600 * C - 330 * ep2) * A ** 6 / 720));
+                return [p.fe + x, p.fn + y];
+            },
+            inverse(E, Nn) {
+                const M = M0 + (Nn - p.fn) / k0, mu = M / mu0;
+                const p1 = mu + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * Math.sin(2 * mu) + (21 * e1 * e1 / 16 - 55 * e1 ** 4 / 32) * Math.sin(4 * mu)
+                    + (151 * e1 ** 3 / 96) * Math.sin(6 * mu) + (1097 * e1 ** 4 / 512) * Math.sin(8 * mu);
+                const s1 = Math.sin(p1), c1 = Math.cos(p1), t1 = Math.tan(p1);
+                const C1 = ep2 * c1 * c1, T1 = t1 * t1, N1 = TM_A / Math.sqrt(1 - e2 * s1 * s1), R1 = TM_A * (1 - e2) / (1 - e2 * s1 * s1) ** 1.5;
+                const D = (E - p.fe) / (N1 * k0);
+                const phi = p1 - (N1 * t1 / R1) * (D * D / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 * C1 - 9 * ep2) * D ** 4 / 24
+                    + (61 + 90 * T1 + 298 * C1 + 45 * T1 * T1 - 252 * ep2 - 3 * C1 * C1) * D ** 6 / 720);
+                const lam = l0 + (D - (1 + 2 * T1 + C1) * D ** 3 / 6 + (5 - 2 * C1 + 28 * T1 - 3 * C1 * C1 + 8 * ep2 + 24 * T1 * T1) * D ** 5 / 120) / c1;
+                return [phi * 180 / Math.PI, lam * 180 / Math.PI];
+            }
+        };
+    }
+    // Works out how a GeoTIFF's coordinates relate to lat/lon. Returns
+    // { kind: 'geographic' } or { kind: 'tm', tm, unit, label }, or throws
+    // with a plain explanation for coordinate systems it can't convert.
+    function geoTiffCRS(keys) {
+        keys = keys || {};
+        const unitOf = (code) => code === 9002 ? 0.3048 : code === 9003 ? 1200 / 3937 : 1;
+        const pcs = keys.ProjectedCSTypeGeoKey;
+        if (!pcs && keys.GTModelTypeGeoKey !== 1) return { kind: 'geographic' };
+        let zone = 0, south = false, datum = '';
+        if (pcs >= 26901 && pcs <= 26923) { zone = pcs - 26900; datum = 'NAD83'; }
+        else if (pcs >= 6330 && pcs <= 6348) { zone = pcs - 6329; datum = 'NAD83(2011)'; }
+        else if (pcs >= 32601 && pcs <= 32660) { zone = pcs - 32600; datum = 'WGS84'; }
+        else if (pcs >= 32701 && pcs <= 32760) { zone = pcs - 32700; datum = 'WGS84'; south = true; }
+        if (zone) return { kind: 'tm', unit: 1, label: `UTM zone ${zone}${south ? 'S' : 'N'} (${datum})`,
+                           tm: makeTM({ lon0: -183 + 6 * zone, lat0: 0, k0: 0.9996, fe: 500000, fn: south ? 10000000 : 0 }) };
+        if ((pcs === 32767 || !pcs) && keys.ProjCoordTransGeoKey === 1) {   // user-defined Transverse Mercator
+            const u = unitOf(keys.ProjLinearUnitsGeoKey);
+            const lon0 = keys.ProjNatOriginLongGeoKey ?? keys.ProjCenterLongGeoKey, lat0 = keys.ProjNatOriginLatGeoKey ?? keys.ProjCenterLatGeoKey ?? 0;
+            if (lon0 == null) throw new Error('its Transverse Mercator parameters are incomplete');
+            return { kind: 'tm', unit: u, label: 'Transverse Mercator',
+                     tm: makeTM({ lon0, lat0, k0: keys.ProjScaleAtNatOriginGeoKey ?? 1, fe: (keys.ProjFalseEastingGeoKey || 0) * u, fn: (keys.ProjFalseNorthingGeoKey || 0) * u }) };
+        }
+        throw new Error(`its coordinate system (EPSG:${pcs || 'unknown'}) isn't one this app can convert. UTM (NAD83, NAD83(2011) or WGS84) and WGS84 lat/lon are supported; USGS 1 m DEM tiles are UTM. Otherwise reproject it first, e.g. gdalwarp -t_srs EPSG:4326 in.tif out.tif`);
+    }
+
+    // Loads local bare-earth DTM GeoTIFFs instead of the 3DEP download: the
+    // original USGS 1 m DEM tiles (UTM), your own LiDAR-derived DTM, or
+    // dtm_wgs84.tif from pipeline/karst_pipeline.py. Several files can be
+    // chosen at once and are merged. Only the part under the current map view
+    // is read (files are read in pieces, so a full 10 x 10 km, 100-million-cell
+    // USGS tile works on a phone); if the view is outside the files, their
+    // whole area is used as far as the memory budget allows. The data is
+    // placed on this app's lat/lon grid at the files' own resolution, sampled
+    // straight from the original cells (bilinear), rather than going through
+    // the elevation service's resampling.
     async function loadLocalDTM(fileInput) {
-        const file = fileInput.files[0];
+        const files = Array.from(fileInput.files || []);
         fileInput.value = '';
-        if (!file) return;
+        if (!files.length) return;
         if (scanInProgress) { document.getElementById('status').innerText = 'Wait for the scan to finish before loading a new DTM.'; return; }
         const status = document.getElementById('status');
-        status.innerText = `Reading ${file.name}...`;
+        const tick = async (msg) => { status.innerText = msg; await new Promise(r => setTimeout(r, 0)); };
         try {
-            const tiff = await GeoTIFF.fromArrayBuffer(await file.arrayBuffer());
-            const image = await tiff.getImage();
-            const keys = image.getGeoKeys ? image.getGeoKeys() : {};
-            if (keys && (keys.ProjectedCSTypeGeoKey || keys.GTModelTypeGeoKey === 1)) {
-                throw new Error('it is in a projected CRS. Reproject it to WGS84 first (e.g. gdalwarp -t_srs EPSG:4326 in.tif out.tif), or use the pipeline\'s dtm_wgs84.tif');
+            // 1. Open each file and work out its lat/lon footprint
+            const tiles = [];
+            for (const file of files) {
+                await tick(`Reading ${file.name}...`);
+                const tiff = await (GeoTIFF.fromBlob ? GeoTIFF.fromBlob(file) : GeoTIFF.fromArrayBuffer(await file.arrayBuffer()));
+                const image = await tiff.getImage();
+                const crs = geoTiffCRS(image.getGeoKeys ? image.getGeoKeys() : {});
+                const [ox, oy] = image.getOrigin(), [rx, ry] = image.getResolution();
+                const IW = image.getWidth(), IH = image.getHeight();
+                const vk = image.getGeoKeys ? (image.getGeoKeys().VerticalUnitsGeoKey) : null;
+                const zUnit = vk === 9002 ? 0.3048 : vk === 9003 ? 1200 / 3937 : 1;
+                const [minX, minY, maxX, maxY] = image.getBoundingBox();
+                let toLatLon, toSrc, pxM;
+                if (crs.kind === 'geographic') {
+                    if (!(minX >= -180 && maxX <= 180 && minY >= -90 && maxY <= 90)) throw new Error(`${file.name}: its bounds are not lon/lat degrees`);
+                    toLatLon = (x, y) => [y, x]; toSrc = (lat, lon) => [lon, lat];
+                    pxM = Math.abs(ry) * 111320;
+                } else {
+                    toLatLon = (x, y) => crs.tm.inverse(x * crs.unit, y * crs.unit);
+                    toSrc = (lat, lon) => { const [E, N] = crs.tm.forward(lat, lon); return [E / crs.unit, N / crs.unit]; };
+                    pxM = Math.abs(rx) * crs.unit;
+                }
+                // lat/lon bounds from points along the edges (a UTM tile is not a lat/lon rectangle)
+                let n = -90, sN = 90, e = -180, w = 180;
+                for (let t = 0; t <= 16; t++) for (const [x, y] of [[minX + (maxX - minX) * t / 16, minY], [minX + (maxX - minX) * t / 16, maxY], [minX, minY + (maxY - minY) * t / 16], [maxX, minY + (maxY - minY) * t / 16]]) {
+                    const [la, lo] = toLatLon(x, y);
+                    n = Math.max(n, la); sN = Math.min(sN, la); e = Math.max(e, lo); w = Math.min(w, lo);
+                }
+                tiles.push({ file, image, crs, ox, oy, rx, ry, IW, IH, zUnit, nodata: image.getGDALNoData(), toSrc, pxM, bounds: { n, s: sN, e, w } });
             }
-            const [minX, minY, maxX, maxY] = image.getBoundingBox();
-            if (!(minX >= -180 && maxX <= 180 && minY >= -90 && maxY <= 90)) throw new Error('its bounds are not lon/lat degrees');
-            const W = image.getWidth(), H = image.getHeight();
-            if (W * H > 256e6) throw new Error(`it is ${W}x${H} pixels, too large for the browser. Clip it to a smaller area first`);
-            const raw = (await image.readRasters())[0];
-            const nodata = image.getGDALNoData();
-            const dem = new Float32Array(W * H);
-            for (let i = 0; i < dem.length; i++) {
-                const v = raw[i];
-                dem[i] = (!isFinite(v) || (nodata !== null && v === nodata) || v < -1000) ? -9999 : v;
+            // 2. Area to load: the map view where it overlaps the files, else the files' whole area
+            const U = tiles.reduce((u, t) => ({ n: Math.max(u.n, t.bounds.n), s: Math.min(u.s, t.bounds.s), e: Math.max(u.e, t.bounds.e), w: Math.min(u.w, t.bounds.w) }),
+                                   { n: -90, s: 90, e: -180, w: 180 });
+            const mb = map.getBounds();
+            let T = { n: Math.min(U.n, mb.getNorth()), s: Math.max(U.s, mb.getSouth()), e: Math.min(U.e, mb.getEast()), w: Math.max(U.w, mb.getWest()) };
+            const inView = T.n > T.s && T.e > T.w;
+            if (!inView) T = { ...U };
+            const res = Math.max(0.5, Math.min(...tiles.map(t => t.pxM)));
+            const budget = parseFloat(document.getElementById('dlBudget').value) * 1e6;
+            const midLat = (T.n + T.s) / 2, kx = 111320 * Math.cos(midLat * Math.PI / 180), ky = 111320;
+            let shrunk = false;
+            if (((T.e - T.w) * kx / res) * ((T.n - T.s) * ky / res) > budget) {   // keep the centre, trim to the budget
+                const f = Math.sqrt(budget / (((T.e - T.w) * kx / res) * ((T.n - T.s) * ky / res))) * 0.999;
+                const cLat = (T.n + T.s) / 2, cLon = (T.e + T.w) / 2, hLat = (T.n - T.s) / 2 * f, hLon = (T.e - T.w) / 2 * f;
+                T = { n: cLat + hLat, s: cLat - hLat, e: cLon + hLon, w: cLon - hLon };
+                shrunk = true;
             }
-            const bounds = { n: maxY, s: minY, e: maxX, w: minX };
-            const width_m = 6371000 * (maxX - minX) * Math.PI / 180 * Math.cos((maxY + minY) / 2 * Math.PI / 180);
-            commitDEM(dem, W, H, bounds, width_m, `Local DTM loaded from ${file.name}.`);
-            map.fitBounds([[minY, minX], [maxY, maxX]]);
+            const width_m = (T.e - T.w) * kx;
+            const W = Math.max(2, Math.ceil(width_m / res)), H = Math.max(2, Math.ceil((T.n - T.s) * ky / res));
+            const dem = new Float32Array(W * H).fill(-9999);
+            const dLat = (T.n - T.s) / H, dLon = (T.e - T.w) / W;
+            // 3. Fill the grid from each file in turn (the first file covering a cell wins)
+            for (const t of tiles) {
+                // source-pixel window covering the target area (edges sampled, UTM bends them)
+                let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+                for (let k = 0; k <= 16; k++) for (const [la, lo] of [[T.s + (T.n - T.s) * k / 16, T.w], [T.s + (T.n - T.s) * k / 16, T.e], [T.s, T.w + (T.e - T.w) * k / 16], [T.n, T.w + (T.e - T.w) * k / 16]]) {
+                    const [x, y] = t.toSrc(la, lo);
+                    const c = (x - t.ox) / t.rx, r = (y - t.oy) / t.ry;
+                    x0 = Math.min(x0, c); x1 = Math.max(x1, c); y0 = Math.min(y0, r); y1 = Math.max(y1, r);
+                }
+                const wx0 = Math.max(0, Math.floor(x0) - 2), wx1 = Math.min(t.IW, Math.ceil(x1) + 2);
+                const wy0 = Math.max(0, Math.floor(y0) - 2), wy1 = Math.min(t.IH, Math.ceil(y1) + 2);
+                if (wx1 <= wx0 || wy1 <= wy0) continue;
+                const ww = wx1 - wx0, wh = wy1 - wy0;
+                if (ww * wh > 300e6) throw new Error(`${t.file.name}: the part needed is too large to read at once; zoom in first`);
+                await tick(`Reading ${ww.toLocaleString()} x ${wh.toLocaleString()} cells from ${t.file.name}...`);
+                const raw = (await t.image.readRasters({ window: [wx0, wy0, wx1, wy1], samples: [0] }))[0];
+                const val = (i) => { const v = raw[i]; return (!isFinite(v) || (t.nodata !== null && v === t.nodata) || v < -1000 || v > 10000) ? NaN : v * t.zUnit; };
+                await tick(`Placing ${t.file.name} on the map grid (${t.crs.kind === 'tm' ? t.crs.label : 'lat/lon'})...`);
+                // Exact projection on a lattice every STEP cells, bilinear in between
+                // (the projection is smooth; error well under a millimetre)
+                const STEP = 16, LW = Math.ceil(W / STEP) + 1, LH = Math.ceil(H / STEP) + 1;
+                const LC = new Float64Array(LW * LH), LR = new Float64Array(LW * LH);
+                for (let j = 0; j < LH; j++) for (let k = 0; k < LW; k++) {
+                    const lat = T.n - (Math.min(H, j * STEP) + 0.5) * dLat, lon = T.w + (Math.min(W, k * STEP) + 0.5) * dLon;
+                    const [x, y] = t.toSrc(lat, lon);
+                    LC[j * LW + k] = (x - t.ox) / t.rx - 0.5 - wx0; LR[j * LW + k] = (y - t.oy) / t.ry - 0.5 - wy0;
+                }
+                for (let r = 0; r < H; r++) {
+                    const j = Math.min(LH - 2, Math.floor(r / STEP)), fy = (r - j * STEP) / STEP;
+                    for (let c = 0; c < W; c++) {
+                        const o = r * W + c;
+                        if (dem[o] !== -9999) continue;
+                        const k = Math.min(LW - 2, Math.floor(c / STEP)), fx = (c - k * STEP) / STEP;
+                        const i00 = j * LW + k, i01 = i00 + 1, i10 = i00 + LW, i11 = i10 + 1;
+                        const sc = (LC[i00] * (1 - fx) + LC[i01] * fx) * (1 - fy) + (LC[i10] * (1 - fx) + LC[i11] * fx) * fy;
+                        const sr = (LR[i00] * (1 - fx) + LR[i01] * fx) * (1 - fy) + (LR[i10] * (1 - fx) + LR[i11] * fx) * fy;
+                        if (sc < -0.5 || sr < -0.5 || sc > ww - 0.5 || sr > wh - 0.5) continue;
+                        const c0 = Math.max(0, Math.min(ww - 1, Math.floor(sc))), r0 = Math.max(0, Math.min(wh - 1, Math.floor(sr)));
+                        const c1 = Math.min(ww - 1, c0 + 1), r1 = Math.min(wh - 1, r0 + 1), ax = Math.max(0, Math.min(1, sc - c0)), ay = Math.max(0, Math.min(1, sr - r0));
+                        const v00 = val(r0 * ww + c0), v01 = val(r0 * ww + c1), v10 = val(r1 * ww + c0), v11 = val(r1 * ww + c1);
+                        let v;
+                        if (v00 === v00 && v01 === v01 && v10 === v10 && v11 === v11) v = (v00 * (1 - ax) + v01 * ax) * (1 - ay) + (v10 * (1 - ax) + v11 * ax) * ay;
+                        else { // at a NoData edge: nearest valid neighbour
+                            const cand = [[v00, (ax) ** 2 + (ay) ** 2], [v01, (1 - ax) ** 2 + ay ** 2], [v10, ax ** 2 + (1 - ay) ** 2], [v11, (1 - ax) ** 2 + (1 - ay) ** 2]].filter(q => q[0] === q[0]).sort((a2, b2) => a2[1] - b2[1]);
+                            if (!cand.length) continue;
+                            v = cand[0][0];
+                        }
+                        dem[o] = v;
+                    }
+                }
+            }
+            let valid = 0;
+            for (let i = 0; i < dem.length; i++) if (dem[i] !== -9999) valid++;
+            if (!valid) throw new Error('none of the files has elevation data in that area');
+            const names = files.map(f => f.name).join(', ');
+            const srcRes = Math.min(...tiles.map(t => t.pxM));
+            const crsNote = [...new Set(tiles.map(t => t.crs.kind === 'tm' ? t.crs.label : 'WGS84 lat/lon'))].join(', ');
+            commitDEM(dem, W, H, T, width_m,
+                `Local DTM loaded from ${names} (${crsNote}, source ${srcRes.toFixed(2)} m cells)` +
+                (inView ? ': the part under the map view.' : ': the files\' area.') +
+                (shrunk ? ' Only the centre fitted the memory budget; zoom to your area and load again, or raise the budget.' : '') +
+                (valid < dem.length ? ` ${Math.round(100 * (1 - valid / dem.length))}% of the area has no data in these files.` : ''));
+            window.lastLocalDTMInfo = { names, srcRes, crs: crsNote };
+            if (!inView) map.fitBounds([[T.s, T.w], [T.n, T.e]]);
         } catch (err) {
             status.innerText = `Could not load that DTM: ${err.message || err}.`;
             console.error(err);
+        }
+    }
+
+    // "What data is here?": which source DEM the elevations at a point come
+    // from. For a local file that's the file itself; for a 3DEP download the
+    // elevation service is asked which of its source rasters (1 m LiDAR
+    // DEMs, or coarser fallbacks) is visible at that point, via its
+    // identify operation with the catalog items. The cell size is the
+    // service's LowPS (in its own map units: degrees or Web Mercator metres,
+    // converted here to ground metres).
+    async function checkSourceData(lat, lon) {
+        const show = (html) => L.popup({ maxWidth: 360 }).setLatLng([lat, lon]).setContent(`<b>Source data here</b><br>${html}`).openOn(map);
+        if (window.lastLocalDTMInfo) {
+            const i = window.lastLocalDTMInfo;
+            return show(`From your file(s) ${escapeHtml(i.names)} (${escapeHtml(i.crs)}), original cell size ${i.srcRes.toFixed(2)} m, sampled straight from the file.`);
+        }
+        show('Asking the USGS elevation service...');
+        try {
+            const geom = encodeURIComponent(JSON.stringify({ x: lon, y: lat, spatialReference: { wkid: 4326 } }));
+            const url = 'https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/identify' +
+                `?geometry=${geom}&geometryType=esriGeometryPoint&returnGeometry=false&returnCatalogItems=true&returnPixelValues=false&f=json`;
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error('HTTP ' + resp.status);
+            const j = await resp.json();
+            if (j.error) throw new Error(j.error.message || 'service error');
+            const feats = (j.catalogItems && j.catalogItems.features) || [];
+            const vis = j.catalogItemVisibilities || [];
+            let items = feats.map((f, k) => ({ a: f.attributes || {}, v: vis[k] }));
+            const shown = items.filter(it => it.v > 0);
+            if (shown.length) items = shown;
+            if (!items.length) return show('The service didn\'t list a source raster for this point (it may not share that detail). The download summary shows the grid size, and the note under Terrain Smoothing flags coarse source data.');
+            const ground = (ps) => !(ps > 0) ? null : ps < 0.01 ? ps * 111320 : ps * Math.cos(lat * Math.PI / 180);
+            items.sort((x, y) => (ground(x.a.LowPS) ?? 1e9) - (ground(y.a.LowPS) ?? 1e9));
+            const rows = items.slice(0, 3).map(({ a }) => {
+                const m = ground(a.LowPS);
+                const kind = m == null ? '' : m <= 1.5 ? ' &mdash; <b>1 m LiDAR</b>' : m <= 4 ? ' &mdash; ~3 m (1/9 arc-second)' : m <= 12 ? ' &mdash; <b>~10 m (1/3 arc-second), not LiDAR detail</b>' : ' &mdash; coarse';
+                const extra = Object.entries(a).filter(([k]) => /date|year|project|workunit|source|collect|acq/i.test(k) && a[k] != null && a[k] !== '')
+                    .map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(/date/i.test(k) && typeof v === 'number' && v > 1e11 ? new Date(v).toISOString().slice(0, 10) : v)}`).join('; ');
+                return `&bull; ${escapeHtml(a.Name || a.ProductName || a.name || 'unnamed raster')}${m != null ? `, cell size ${m.toFixed(2)} m` : ''}${kind}${extra ? `<br><span style="font-size:0.72rem;color:#64748b;">${extra}</span>` : ''}`;
+            });
+            show(rows.join('<br>') + '<div style="font-size:0.72rem;color:#64748b;margin-top:4px;">Finest listed first. Features smaller than about 3 cells across can\'t be measured reliably from that data.</div>');
+        } catch (err) {
+            show(`The USGS elevation service didn't answer (${escapeHtml(err.message || err)}). Try again later.`);
         }
     }
 
@@ -6634,7 +6841,7 @@ ${wpts.join('\n')}
         if (elev < -100) {
             html = `<b>No elevation data at this point</b> (NoData gap)`;
         } else {
-            html = `<b>Elevation:</b> ${metersToFeetInches(elev)}`;
+            html = `<b>Elevation:</b> ${metersToFeetInches(elev)} <a href="#" style="font-size:0.75rem;" onclick="checkSourceData(${e.latlng.lat.toFixed(7)}, ${e.latlng.lng.toFixed(7)}); return false;">What data is here?</a>`;
             const mi = lastMetricRaster && lastMetricGrid ? gridIndexAt(lastMetricGrid, e.latlng.lat, e.latlng.lng) : -1;
             if (mi >= 0) {
                 const metricVal = lastMetricRaster[mi];
