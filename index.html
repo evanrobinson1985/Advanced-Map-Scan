@@ -4746,12 +4746,23 @@
             const throughEdge = atEdge > 0.05 * N;
             const ditch = !throughEdge && radialSpread <= 0.25 * meanD && (sectors.size >= 6 || (elong > 2 && tangential));
             if (!ditch && ((throughEdge && elong > 2) || elong > 3)) { channels++; continue; }
+            // Holding water? 3DEP DEMs are hydro-flattened: a pond is replaced
+            // by one flat surface at the water level, so a pit whose lowest
+            // part is dead flat over a real area shows only its water surface,
+            // and is deeper (and holds more) than measured. Dug ground is
+            // never that flat.
+            let zMin = Infinity;
+            for (const i of cells) zMin = Math.min(zMin, z[i]);
+            let fN = 0, fS = 0, fSS = 0;
+            for (const i of cells) if (z[i] - zMin <= 0.03) { fN++; fS += z[i]; fSS += z[i] * z[i]; }
+            const fArea = fN * cellM * cellM, fSd = fN ? Math.sqrt(Math.max(0, fSS / fN - (fS / fN) ** 2)) : Infinity;
+            const water = fArea >= Math.max(12, 0.25 * areaM2) && fSd <= 0.015;
             // direction from the mound, as a compass bearing
             const ang = Math.atan2(mc + c0 - cC, -(mr + r0 - cR)) * 180 / Math.PI;
             for (const sct of sectors) sectorsAll.add(sct);
             pits.push({
                 ditch, areaM2, maxDepth: maxD, volume: vol, eqD, toeDistM: Math.max(0, minToe),
-                bearing: (ang + 360) % 360, sinkholeLike: !ditch && maxD / eqD > 0.2 && maxD > 1,
+                bearing: (ang + 360) % 360, sinkholeLike: !ditch && !water && maxD / eqD > 0.2 && maxD > 1, water,
                 cR: mr + r0, cC: mc + c0,
             });
         }
@@ -4760,8 +4771,10 @@
         const ring = sectorsAll.size / 16;
         const ratio = moundVol > 0 ? totalVol / moundVol : 0;
         const nearPits = pits.filter(p => !p.sinkholeLike && p.toeDistM <= Math.max(5, Rp * cellM));
+        // a water-filled pit's volume is only a lower bound, so the volume
+        // test can't rule it out: a ponded pit at the base counts as strong
         const evidence = !pits.length ? 'none'
-            : ((pits.some(p => p.ditch) && ring >= 0.5) || (nearPits.length && ratio >= 0.2 && ratio <= 3)) ? 'strong' : 'possible';
+            : ((pits.some(p => p.ditch) && ring >= 0.5) || (nearPits.length && ratio >= 0.2 && ratio <= 3) || nearPits.some(p => p.water)) ? 'strong' : 'possible';
         return { pits, totalVol, moundVol, ratio, ring, evidence, channels, reachM, thr, baseRadiusM: Rp * cellM };
     }
     function compassLabel16(deg) { return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(deg / 22.5) % 16]; }
@@ -4773,11 +4786,12 @@
             (bp.channels ? ` (${bp.channels} drainage channel${bp.channels > 1 ? 's' : ''} ignored)` : '') + '<br>';
         const color = bp.evidence === 'strong' ? '#166534' : '#1e40af', bg = bp.evidence === 'strong' ? '#dcfce7' : '#dbeafe';
         const ditch = bp.pits.find(p => p.ditch);
-        const list = bp.pits.slice(0, 4).map(p => `${p.ditch ? 'ditch' : 'pit'} ${compassLabel16(p.bearing)} of the mound, ${metersToFeetInches(p.maxDepth)} deep, ${metersToFeetInches(p.eqD)} across, ${p.toeDistM < 1 ? 'right at the base' : metersToFeetInches(p.toeDistM) + ' from the base'}${p.sinkholeLike ? ' (steep-sided: could be a natural sinkhole)' : ''}`).join('; ');
+        const list = bp.pits.slice(0, 4).map(p => `${p.ditch ? 'ditch' : 'pit'} ${compassLabel16(p.bearing)} of the mound, ${metersToFeetInches(p.maxDepth)} deep, ${metersToFeetInches(p.eqD)} across, ${p.toeDistM < 1 ? 'right at the base' : metersToFeetInches(p.toeDistM) + ' from the base'}${p.water ? ' (<b>flat bottom: probably holding water</b>; LiDAR sees only the water surface, so it is deeper than shown)' : ''}${p.sinkholeLike ? ' (steep-sided: could be a natural sinkhole)' : ''}`).join('; ');
         return `<div style="margin:4px 0;padding:4px 6px;border-radius:4px;background:${bg};color:${color};font-size:0.78rem;">` +
             `<b>Borrow pits (${bp.evidence === 'strong' ? 'strong sign of construction' : 'possible'}):</b> ${bp.pits.length} found: ${list}${bp.pits.length > 4 ? '; ...' : ''}. ` +
             (ditch ? `Ditch runs ${Math.round(bp.ring * 100)}% of the way around. ` : '') +
-            `About ${ft3(bp.totalVol)} ft&sup3; dug out vs ${ft3(bp.moundVol)} ft&sup3; in the mound (${bp.ratio.toFixed(1)}&times;).` +
+            `${bp.pits.some(p => p.water) ? 'At least' : 'About'} ${ft3(bp.totalVol)} ft&sup3; dug out vs ${ft3(bp.moundVol)} ft&sup3; in the mound (${bp.pits.some(p => p.water) ? '&ge; ' : ''}${bp.ratio < 0.1 ? bp.ratio.toFixed(2) : bp.ratio.toFixed(1)}&times;` +
+            `${bp.pits.some(p => p.water) ? '; water hides the true depth' : ''}). Old pits fill in over time, so less than 1&times; is normal.` +
             (bp.channels ? ` ${bp.channels} drainage channel${bp.channels > 1 ? 's' : ''} ignored.` : '') + `</div>`;
     }
     // Draws a borrow-pit result on a layer: dashed blue circles over the pits
@@ -4786,7 +4800,7 @@
         for (const p of bp.pits) {
             const lat = demBounds.n - ((p.cR + 0.5) / demHeight) * (demBounds.n - demBounds.s);
             const lon = demBounds.w + ((p.cC + 0.5) / demWidth) * (demBounds.e - demBounds.w);
-            L.circle([lat, lon], { radius: Math.max(1, p.eqD / 2), color: '#0369a1', weight: 2, dashArray: '4 3', fillColor: '#38bdf8', fillOpacity: 0.2, interactive: false }).addTo(layer);
+            L.circle([lat, lon], { radius: Math.max(1, p.eqD / 2), color: '#0369a1', weight: 2, dashArray: '4 3', fillColor: p.water ? '#1d4ed8' : '#38bdf8', fillOpacity: p.water ? 0.45 : 0.2, interactive: false }).addTo(layer);
         }
     }
     const MOUND_HOST_RATIO = 4, MOUND_HOST_MIN_M = 60;
