@@ -37,6 +37,14 @@ Each waypoint also carries its elevation, match score, depth or height, and size
 
 A summary lists what was detected and every value set, and all sliders stay adjustable. Confirmed training examples are re-applied afterwards, so thresholds never exclude a site you've confirmed.
 
+**Go to a location.** The search box at the top right of the map (a 🔍 button on a phone) and the Search box in the panel take coordinates or an address. The Search box in the panel works the same way. Coordinates are read in any common form:
+- decimal degrees (`34.9745, -85.8136` or `34.9745 N 85.8136 W`; longitude-first as GIS software writes it also works);
+- degrees-minutes-seconds (`34°58'28"N 85°48'49"W`) and degrees with decimal minutes;
+- UTM (`16S 608297 3870858`);
+- pasted map links (`…/@34.97,-85.81,17z`).
+
+Anything else is looked up as an address or place name with OpenStreetMap's Nominatim, falling back to Esri's World Geocoder; several matches are listed to choose from. A red pin marks the spot and shows it in decimal degrees, DMS and UTM.
+
 **Elevation data.** Downloads come from the USGS 3DEP elevation service: the best bare-earth DEM available at each spot (1 m LiDAR where USGS has it, coarser DEMs elsewhere), resampled by the service onto the app's lat/lon grid. Tap the map and choose **What data is here?** to see which source raster is under a point, with its cell size, so you know whether small features can be trusted. For the most faithful input, download the original USGS 1 m DEM tiles (apps.nationalmap.gov/downloader, "Elevation Products (3DEP)", 1 meter DEM) and open them with **Load Local DTM**. UTM tiles (NAD83, NAD83(2011) or WGS84) are converted in the browser, and several tiles can be picked at once and are merged. Only the part under the current map view is read, so a full 10 × 10 km tile works on a phone. Values are sampled straight from the original cells, skipping the service's resampling. WGS84 lat/lon GeoTIFFs still load as before. The NAD83 to WGS84 datum offset (about 1 m) is not applied.
 
 **Mound detection (iMound).** The Native Mounds scan uses the published inverted-DEM **iMound** method (Freeland et al. 2016). The terrain is detrended at several scales against the lower of a moving mean and a local quadratic (curved) surface fit, and flipped upside down. The curved fit means a mound tucked against the foot of a hillside, such as Cottonpatch Mound at Russell Cave, isn't swallowed by the slope beside it. The "pits" a fill has to raise are the mounds, measured from their own base contour. Only closed highs qualify, so hillside bulges and ridge noses don't. Candidates must then pass:
