@@ -2670,6 +2670,8 @@
             const found = [];
             let bestTapHeight = 0;
             const scales = [...new Set(presets.flatMap(p => moundScalesM(p)))];
+            // slope rules use the close-up 30 m surface, as in the scan
+            const fineSlope = moundTrend(denoised, W, H, Math.max(2, Math.round(30 / effRes)), nd, effRes).slopeDeg;
             for (const scaleM of scales) {
                 const mt = moundTrend(denoised, W, H, Math.max(2, Math.round(scaleM / effRes)), nd, effRes);
                 let host = null;
@@ -2693,12 +2695,12 @@
                     const k = traceOneComponent(mask, hh, denoised, W, H, effRes, nd, new Uint8Array(n), new Int32Array(n), new Int32Array(n), sr, sc, null, slopeDeg);
                     if (!k || k.area < Math.max(10 * effRes * effRes, 7)) continue;   // a noise speck, not a feature
                     const diam = 2 * Math.sqrt(k.area / Math.PI);
-                    const gsHere = mt.slopeDeg[rcIndex(k)];
+                    const gsHere = fineSlope[rcIndex(k)];
                     const meas = moundMeasure(k, 2 * Math.sqrt(k.area / Math.PI), gsHere, flatMax, denoised, W, H, effRes, nd);
                     const plane = meas ? meas.plane : moundRingPlane(denoised, W, H, k, effRes, nd);
                     const hM = meas ? meas.h : k.maxMetric, dM = meas ? meas.d : 2 * Math.sqrt(k.area / Math.PI);
                     if (meas && meas.circ != null) { k.circularity = meas.circ; k.elongation = meas.elong; }
-                    found.push({ k, diam, hM, plane, rugged: !meas || meas.rugged, hardReject: !meas, height: hh, resid: rs, groundSlope: mt.slopeDeg, pass, scaleM, start: sr * W + sc,
+                    found.push({ k, diam, hM, plane, rugged: !meas || meas.rugged, hardReject: !meas, height: hh, resid: rs, groundSlope: fineSlope, pass, scaleM, start: sr * W + sc,
                                  hostDiam: host[rcIndex(k)], fits: sizeFits(k, hM, dM), dM, tm: moundTemplateMatch(hh, W, H, k),
                                  plausible: presets.some(p => diam <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3) });
                 }
@@ -3417,7 +3419,7 @@
     // water-distant candidate still scores purely on its own physical merits
     // rather than being penalized.
     function scoreMatch(k, minD, maxD, minMetric, mode, waterDistM, tpiValue) {
-        const diameter = 2 * Math.sqrt(k.area / Math.PI);
+        const diameter = k._sizeD || 2 * Math.sqrt(k.area / Math.PI);
         const mid = Math.sqrt(minD * maxD);
         const spread = Math.log(maxD / minD) / 2;
         const sizeFit = spread > 0 ? Math.exp(-((Math.log(diameter/mid)/spread) ** 2)) : 1;
@@ -4545,12 +4547,14 @@
             // The summit is the point standing highest ABOVE the fitted
             // hillside; the highest raw point is on the uphill shoulder
             {
-                const L = Math.ceil(0.8 * fIn * R);
+                // (kept within 1.5x the detected top's radius of where it was
+                // detected, so it can't wander onto a neighbouring mound)
+                const L = Math.ceil(Math.min(0.8 * fIn * R, 1.5 * R + 2));
                 let bestD = -Infinity, nr = pr, nc = pc;
                 for (let r = Math.max(0, pr - L); r <= Math.min(H - 1, pr + L); r++)
                     for (let c = Math.max(0, pc - L); c <= Math.min(W - 1, pc + L); c++) {
                         const z = dem[r * W + c], x = c - pc, y = r - pr;
-                        if (z < nd || Math.hypot(x, y) > L) continue;
+                        if (z < nd || Math.hypot(x, y) > L || Math.hypot(r - r0, c - c0) > 1.5 * R + 2) continue;
                         const dz = z - cur.surf(x / R, y / R);
                         if (dz > bestD) { bestD = dz; nr = r; nc = c; }
                     }
@@ -4569,8 +4573,11 @@
         // ragged with LiDAR noise, which would make any mound look irregular
         const shape = footprint(best, fIn * R, 0.25);
         fp.circularity = shape.circularity; fp.elongation = shape.elongation;
+        // Placed at the summit: on a symmetric mound that is its centre, and
+        // unlike the footprint's centroid it isn't pulled sideways where the
+        // ground around a spur or slope foot fits the surface less well
         return { relief: best.relief, rough: best.rough, diameter: 2 * fp.eqR * cellM,
-                 centroidR: fp.sr / fp.foot, centroidC: fp.sc / fp.foot, circularity: fp.circularity, elongation: fp.elongation };
+                 centroidR: pr, centroidC: pc, circularity: fp.circularity, elongation: fp.elongation };
     }
     const MOUND_MAX_ROUGH = 0.35;  // ring scatter may be at most this share of the mound's height (real LiDAR ground is never perfectly smooth)
     const MOUND_TILT_MIN = 2;      // degrees: below this the ground is level and iMound measures the whole mound
@@ -4685,9 +4692,9 @@
         const reachM = reachOf(Rp);
         const thr = Math.max(0.15, 3 * (noiseSigma || 0));
         const surfThr = Math.max(thr, 2.5 * sig);
-        // Mound volume above the natural surface
-        let moundVol = 0;
-        for (let i = 0; i < n; i++) if (z[i] > nd && dist[i] <= 1.15 * Rp) moundVol += Math.max(0, z[i] - q(i)) * cellM * cellM;
+        // Mound volume and height above the natural surface
+        let moundVol = 0, moundH = 0;
+        for (let i = 0; i < n; i++) if (z[i] > nd && dist[i] <= 1.15 * Rp) { const e = z[i] - q(i); moundVol += Math.max(0, e) * cellM * cellM; moundH = Math.max(moundH, e); }
         // Dug-out ground in the ring around the mound
         const depth = new Float32Array(n), mask = new Uint8Array(n);
         for (let i = 0; i < n; i++) {
@@ -4698,7 +4705,7 @@
             if (d > 0) { mask[i] = 1; depth[i] = d; }
         }
         const pits = [], seen = new Uint8Array(n), stack = [];
-        let channels = 0;
+        let channels = 0, hollows = 0;
         const sectorsAll = new Set();
         for (let s0 = 0; s0 < n; s0++) {
             if (!mask[s0] || seen[s0]) continue;
@@ -4757,6 +4764,10 @@
             for (const i of cells) if (z[i] - zMin <= 0.03) { fN++; fS += z[i]; fSS += z[i] * z[i]; }
             const fArea = fN * cellM * cellM, fSd = fN ? Math.sqrt(Math.max(0, fSS / fN - (fS / fN) ** 2)) : Infinity;
             const water = fArea >= Math.max(12, 0.25 * areaM2) && fSd <= 0.015;
+            // Borrow pits are shallow next to the mound they fed; a hollow deeper
+            // than 3 m or twice the mound's height is a natural valley,
+            // sinkhole basin or quarry, not the mound's borrow
+            if (maxD > Math.max(3, 2 * moundH)) { hollows++; continue; }
             // direction from the mound, as a compass bearing
             const ang = Math.atan2(mc + c0 - cC, -(mr + r0 - cR)) * 180 / Math.PI;
             for (const sct of sectors) sectorsAll.add(sct);
@@ -4775,7 +4786,7 @@
         // test can't rule it out: a ponded pit at the base counts as strong
         const evidence = !pits.length ? 'none'
             : ((pits.some(p => p.ditch) && ring >= 0.5) || (nearPits.length && ratio >= 0.2 && ratio <= 3) || nearPits.some(p => p.water)) ? 'strong' : 'possible';
-        return { pits, totalVol, moundVol, ratio, ring, evidence, channels, reachM, thr, baseRadiusM: Rp * cellM };
+        return { pits, totalVol, moundVol, ratio, ring, evidence, channels, hollows, reachM, thr, baseRadiusM: Rp * cellM };
     }
     function compassLabel16(deg) { return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(deg / 22.5) % 16]; }
     // One-paragraph summary of a borrow-pit result for popups
@@ -4783,7 +4794,8 @@
         if (!bp) return '';
         const ft3 = (m3) => Math.round(m3 / (FT_TO_M ** 3)).toLocaleString();
         if (!bp.pits.length) return `<b>Borrow pits:</b> none found within ${metersToFeetInches(bp.reachM)} of the base` +
-            (bp.channels ? ` (${bp.channels} drainage channel${bp.channels > 1 ? 's' : ''} ignored)` : '') + '<br>';
+            (bp.channels ? ` (${bp.channels} drainage channel${bp.channels > 1 ? 's' : ''} ignored)` : '') +
+            (bp.hollows ? ` (${bp.hollows} deep natural hollow${bp.hollows > 1 ? 's' : ''} ignored)` : '') + '<br>';
         const color = bp.evidence === 'strong' ? '#166534' : '#1e40af', bg = bp.evidence === 'strong' ? '#dcfce7' : '#dbeafe';
         const ditch = bp.pits.find(p => p.ditch);
         const list = bp.pits.slice(0, 4).map(p => `${p.ditch ? 'ditch' : 'pit'} ${compassLabel16(p.bearing)} of the mound, ${metersToFeetInches(p.maxDepth)} deep, ${metersToFeetInches(p.eqD)} across, ${p.toeDistM < 1 ? 'right at the base' : metersToFeetInches(p.toeDistM) + ' from the base'}${p.water ? ' (<b>flat bottom: probably holding water</b>; LiDAR sees only the water surface, so it is deeper than shown)' : ''}${p.sinkholeLike ? ' (steep-sided: could be a natural sinkhole)' : ''}`).join('; ');
@@ -4792,7 +4804,8 @@
             (ditch ? `Ditch runs ${Math.round(bp.ring * 100)}% of the way around. ` : '') +
             `${bp.pits.some(p => p.water) ? 'At least' : 'About'} ${ft3(bp.totalVol)} ft&sup3; dug out vs ${ft3(bp.moundVol)} ft&sup3; in the mound (${bp.pits.some(p => p.water) ? '&ge; ' : ''}${bp.ratio < 0.1 ? bp.ratio.toFixed(2) : bp.ratio.toFixed(1)}&times;` +
             `${bp.pits.some(p => p.water) ? '; water hides the true depth' : ''}). Old pits fill in over time, so less than 1&times; is normal.` +
-            (bp.channels ? ` ${bp.channels} drainage channel${bp.channels > 1 ? 's' : ''} ignored.` : '') + `</div>`;
+            (bp.channels ? ` ${bp.channels} drainage channel${bp.channels > 1 ? 's' : ''} ignored.` : '') +
+            (bp.hollows ? ` ${bp.hollows} deep natural hollow${bp.hollows > 1 ? 's' : ''} ignored.` : '') + `</div>`;
     }
     // Draws a borrow-pit result on a layer: dashed blue circles over the pits
     function drawBorrowPits(bp, layer) {
@@ -5674,7 +5687,7 @@
             waterwayDist = distanceToMask(waterwayMask, demWidth, demHeight);
         }
 
-        let comps, denoised, baseScaleMetricRaster, moundTPI = null, modeCtx = null, lastMask = null;
+        let comps, denoised, baseScaleMetricRaster, moundTPI = null, modeCtx = null, lastMask = null, moundUnchecked = 0;
         if (mode === 'mounds') {
             // "All Shapes" runs the Conical and Platform presets as two
             // complete, independent scans and merges the results - each
@@ -5732,12 +5745,18 @@
             const rangePx = Math.max(1, Math.round(3 / effRes)); // error correlation length ~3 m
             const pre = [];
             const trendCache = new Map();
+            // Ground slope for the slope rules always comes from the close-up
+            // 30 m surface: at the coarse scales the hillside is averaged over
+            // up to ~200 m, so a mound on a 25 degree slope could read 15
+            const r30 = Math.max(2, Math.round(30 / effRes));
+            if (!trendCache.has(r30)) trendCache.set(r30, moundTrend(denoised, W, H, r30, nodataThresh, effRes));
+            const fineSlope = trendCache.get(r30).slopeDeg;
             let fineHost = null;   // closed highs of the finest normal pass: what a spot looks like close up
             for (const preset of presetsToRun) for (const scaleM of moundScalesM(preset)) {
                 await tick0(`Mounds (${preset.name}, ${Math.round(scaleM)} m scale): detrending and iMound inverted-DEM fill...`);
                 const trendR = Math.max(2, Math.round(scaleM / effRes));
                 if (!trendCache.has(trendR)) trendCache.set(trendR, moundTrend(denoised, W, H, trendR, nodataThresh, effRes));
-                const { trend: baseTrend, quad, slopeDeg: groundSlope } = trendCache.get(trendR);
+                const { trend: baseTrend, quad } = trendCache.get(trendR);
                 let hostDiam = null;
                 for (const pass of ['normal', 'spur']) {
                 const trend = pass === 'normal' ? baseTrend : quad;
@@ -5753,7 +5772,7 @@
                     if (k.incomplete) continue;
                     let diameter = 2 * Math.sqrt(k.area / Math.PI);
                     if (pass === 'spur' && !moundHostOk(hostDiam[rcIndex(k)], diameter)) continue;   // one knob of a natural cluster
-                    const gsDeg = groundSlope[rcIndex(k)];
+                    const gsDeg = fineSlope[rcIndex(k)];
                     if (gsDeg > MOUND_SLOPE_HARD_MAX) continue;               // cliff / steep hillside
                     if (k.fillRatio < 0.6) continue;                         // several natural bumps merged
                     let meas = moundMeasure(k, diameter, gsDeg, maxGroundSlope, denoised, W, H, effRes, nodataThresh);
@@ -5769,6 +5788,7 @@
                     const hM = meas.h;
                     diameter = meas.d;
                     if (meas.circ != null) { k.circularity = meas.circ; k.elongation = meas.elong; }
+                    if (meas.plane && !meas.rugged && meas.d > dTop && meas.plane.centroidR != null) { k._footR = meas.plane.centroidR; k._footC = meas.plane.centroidC; }
                     if (hM < feetToMeters(preset.minHeight) || diameter < feetToMeters(preset.minDiameter) ||
                         diameter > feetToMeters(preset.maxDiameter) || k.circularity < preset.minCircularity) continue;
                     if (k.elongation > preset.maxElongation * 1.3) continue;   // levee / ridge / merged bumps: too stretched for this class
@@ -5804,7 +5824,7 @@
             let persistChecked = 0;
             for (const c of merged) {
                 const k = c.k;
-                if (runs > 0 && persistChecked >= 400) break; // keeps very large scans responsive
+                if (runs > 0 && persistChecked >= 400) { moundUnchecked = merged.length - merged.indexOf(c); break; } // keeps very large scans responsive
                 if (runs > 0 && persistChecked % 10 === 0) await tick0(`Mounds: stochastic persistence test ${persistChecked + 1}-${Math.min(merged.length, persistChecked + 10)} of ${Math.min(merged.length, 400)}...`);
                 // peak cell of this candidate
                 const rad = Math.ceil(Math.sqrt(k.count / Math.PI) * Math.max(1, k.elongation));
@@ -5839,7 +5859,7 @@
                 modeCtx = {
                     describe(k) {
                         const r = (k._sizeD || 2 * Math.sqrt(k.area / Math.PI)) / 2;
-                        const bp = moundBorrowPits(denoisedForPits, W, H, k.centroidR, k.centroidC, r, effRes, nodataThresh, noiseSigma, waterwayMask);
+                        const bp = moundBorrowPits(denoisedForPits, W, H, k._footR != null ? k._footR : k.centroidR, k._footC != null ? k._footC : k.centroidC, r, effRes, nodataThresh, noiseSigma, waterwayMask);
                         k._borrowPits = bp;
                         if (bpMode === 'require' && !(bp && bp.pits.some(p => !p.sinkholeLike))) return { drop: true };
                         return { html: borrowPitHtml(bp), boost: !bp ? 0 : bp.evidence === 'strong' ? 0.25 : bp.evidence === 'possible' ? 0.1 : 0 };
@@ -5919,15 +5939,17 @@
         let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0;
         const ranked = [];
         for (const k of filtered) {
-            const lat = demBounds.n - (k.centroidR / demHeight) * (demBounds.n - demBounds.s);
-            const lon = demBounds.w + (k.centroidC / demWidth) * (demBounds.e - demBounds.w);
+            // mounds on tilted ground are placed and sized by their full footprint
+            const kR = k._footR != null ? k._footR : k.centroidR, kC = k._footC != null ? k._footC : k.centroidC;
+            const lat = demBounds.n - (kR / demHeight) * (demBounds.n - demBounds.s);
+            const lon = demBounds.w + (kC / demWidth) * (demBounds.e - demBounds.w);
             // Skip candidates already field-checked and marked not real - a
             // deliberate human decision, so full suppression is appropriate.
             if (trainingData[mode].rejected.some(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20)) {
                 suppressedCount++;
                 continue;
             }
-            const diameter = 2 * Math.sqrt(k.area / Math.PI);
+            const diameter = k._sizeD || 2 * Math.sqrt(k.area / Math.PI);
             const waterDistM = waterwayDist
                 ? waterwayDist[Math.min(demHeight-1, Math.max(0, Math.round(k.centroidR))) * demWidth + Math.min(demWidth-1, Math.max(0, Math.round(k.centroidC)))] * effRes
                 : Infinity;
@@ -6066,7 +6088,8 @@
             (mergedCount ? `; ${mergedCount} duplicate hit(s) on the same landforms were merged` : '') +
             (droppedCount ? `; ${droppedCount} failed a required check` : '') +
             (heldBackCount ? `; ${heldBackCount} lower-ranked candidate(s) held back (raise Max results per mode to see them)` : '') +
-            (suppressedCount > 0 ? `; ${suppressedCount} matched a spot you marked not real` : '') + '.' +
+            (suppressedCount > 0 ? `; ${suppressedCount} matched a spot you marked not real` : '') +
+            (moundUnchecked ? `; ${moundUnchecked} weaker mound candidate(s) were not tested (only the best 400 get the LiDAR-error test; zoom in to scan a smaller area)` : '') + '.' +
             (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '') +
             (!scanAllActive && detectedFeatures.some(f => f.mode !== mode) ? ' Results from your other scans are still shown (see the legend, top left).' : '');
         updateExportButtons();
@@ -6116,7 +6139,8 @@
         const demBounds = g.bounds, demWidth = g.w, demHeight = g.h, effRes = g.res; // the grid this feature was found on
         numPts = numPts || 32;
         const elong = Math.max(1.0, k.elongation);
-        const bM = Math.sqrt(k.area / (Math.PI * elong));
+        const areaM2 = k._sizeD ? Math.PI * (k._sizeD / 2) ** 2 : k.area;   // a mound's full measured footprint
+        const bM = Math.sqrt(areaM2 / (Math.PI * elong));
         const aM = elong * bM;
         const aPx = aM / effRes, bPx = bM / effRes;
         const theta = k.orientation;
@@ -6125,7 +6149,7 @@
             const t = (i % numPts) * 2 * Math.PI / numPts;
             const rowOff = aPx*Math.cos(t)*Math.cos(theta) - bPx*Math.sin(t)*Math.sin(theta);
             const colOff = aPx*Math.cos(t)*Math.sin(theta) + bPx*Math.sin(t)*Math.cos(theta);
-            const pr = k.centroidR + rowOff, pc = k.centroidC + colOff;
+            const pr = (k._footR != null ? k._footR : k.centroidR) + rowOff, pc = (k._footC != null ? k._footC : k.centroidC) + colOff;
             const lat = demBounds.n - (pr / demHeight) * (demBounds.n - demBounds.s);
             const lon = demBounds.w + (pc / demWidth) * (demBounds.e - demBounds.w);
             ring.push([lon, lat]);
