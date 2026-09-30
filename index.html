@@ -268,6 +268,15 @@
                 <span class="val-display" id="moundMaxGroundSlopeVal">8°</span>
             </div>
             <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">Most mounds sit on terraces, floodplains and ridge tops, but some were built on a mountainside (e.g. Cottonpatch Mound on Montague Mountain at Russell Cave). A candidate on ground steeper than this still counts, but only if it is a clean mound shape: template match &ge; 0.85, elongation &le; 1.5x and circularity &ge; 0.45, which weeds out natural hillside knobs and outcrops. Ground steeper than 20&deg; is never kept.</div>
+            <div class="slider-row" style="margin-top:6px;">
+                <label>Borrow pits</label>
+                <select id="moundBorrowPits" style="width:auto; flex-grow:1; margin:0 0 0 10px; padding:6px;">
+                    <option value="boost" selected>Look for them (rank mounds with pits higher)</option>
+                    <option value="require">Only show mounds with borrow pits</option>
+                    <option value="off">Don't look</option>
+                </select>
+            </div>
+            <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">The earth for a mound was dug close by, and the holes often survive: pits beside the mound (often holding water) or a ditch around it. The ground out to twice the mound's width past its base is searched; gullies and streams are ignored, and steep cone-shaped holes are flagged as possible natural sinkholes. Pits are drawn as dashed blue circles.</div>
             <div style="font-size:0.68rem; color:#94a3b8; margin-top:4px; line-height:1.35;">All Shapes runs both dedicated Conical and Platform scans and merges the results - most thorough, roughly 2x the scan time of a single shape. Broad/Any is a faster single compromise scan. Circularity/Diameter/Height/Trend Radius come from published size ranges for each type (see chat for sourcing and caveats) - a perfect square already measures ~0.79 on the Circularity scale, close to a circle's 1.0, so "round" and "square" genuinely overlap here, these bias toward one shape rather than cleanly separating them. Max Circularity and Flank Slope only flag a candidate as unusual, they don't exclude it - a real, well-built mound can legitimately be steeper or more compact than a generic rule predicts. Selecting a specific shape (not "All" or "Custom") overwrites the sliders below; your own confirmed examples remain the more reliable calibration once you have some.</div>
         </div>
         </div>
@@ -2758,7 +2767,16 @@
             }
             if (window.__moundCheckOutline) map.removeLayer(window.__moundCheckOutline);
             window.__moundCheckOutline = L.polygon(pts, { color: '#92400e', weight: 2, fill: false, dashArray: '5 4', interactive: false }).addTo(map);
-            L.popup({ maxWidth: 420 }).setLatLng([tapLat, tapLon]).setContent(html).openOn(map);
+            // Borrow pits around what was measured (unless switched off)
+            let bpHtml = '';
+            if (window.__moundCheckPits) { map.removeLayer(window.__moundCheckPits); window.__moundCheckPits = null; }
+            if (document.getElementById('moundBorrowPits').value !== 'off') {
+                const bp = moundBorrowPits(denoised, W, H, oR, oC, best.dM / 2, effRes, nd, noiseSigma, null);
+                bpHtml = borrowPitHtml(bp);
+                window.__moundCheckPits = L.layerGroup().addTo(map);
+                drawBorrowPits(bp, window.__moundCheckPits);
+            }
+            L.popup({ maxWidth: 420 }).setLatLng([tapLat, tapLon]).setContent(html.replace('</table>', '</table>' + bpHtml)).openOn(map);
             if (saved) confirmFeature(mode, best.dM, comp.circularity, comp.elongation, hM, cLat, cLon, null, null);
             return;
         }
@@ -4577,6 +4595,200 @@
                  circ: useFoot ? Math.max(k.circularity, p.circularity) : k.circularity,
                  elong: useFoot ? Math.min(k.elongation, p.elongation) : k.elongation };
     }
+    // ---- BORROW PITS ----
+    // The earth for a mound was dug nearby, and the holes often survive:
+    // one or several shallow pits beside the mound (frequently ponding
+    // water), or a ditch running part or all of the way around it. They are
+    // strong evidence of construction: natural knobs don't come with a
+    // matching hole next to them. For a mound centred at (cR, cC) with base
+    // radius radiusM, the ground from just inside the base out to
+    // max(10 m, 2 x radius) beyond it is checked for dug-out ground, found
+    // two ways:
+    //  - closed hollows (Priority-Flood fill depth), the classic ponding pit
+    //  - ground below the natural surface around the mound (a quadratic fitted
+    //    robustly to the surroundings, pits and mound left out), which also
+    //    catches scoops cut into a hillside that drain out one side.
+    // Long narrow hollows that aren't wrapped around the mound are drainage
+    // (gullies, channels) and don't count; steep-sided cone-shaped holes are
+    // flagged as possible natural sinkholes. Returns null when there is no
+    // usable ground around the mound.
+    function moundBorrowPits(dem, W, H, cR, cC, radiusM, cellM, nd, noiseSigma, waterMask) {
+        let Rp = Math.max(1.5, radiusM / cellM);
+        const reachOf = (rp) => Math.min(60, Math.max(15, 2.5 * rp * cellM));
+        // window big enough for a base up to twice the given radius
+        const M = Math.ceil(2 * Rp + reachOf(2 * Rp) / cellM) + 3;
+        const r0 = Math.max(0, Math.round(cR) - M), r1 = Math.min(H, Math.round(cR) + M + 1);
+        const c0 = Math.max(0, Math.round(cC) - M), c1 = Math.min(W, Math.round(cC) + M + 1);
+        const w = c1 - c0, h = r1 - r0, n = w * h;
+        if (w < 5 || h < 5) return null;
+        const z = new Float32Array(n), dist = new Float32Array(n);
+        for (let r = 0; r < h; r++) for (let c = 0; c < w; c++) {
+            const i = r * w + c, v = dem[(r0 + r) * W + c0 + c];
+            z[i] = v < nd ? -9999 : v;
+            dist[i] = Math.hypot(r0 + r - cR, c0 + c - cC);
+        }
+        const filled = fillDepressions(z, w, h, nd);
+        // Natural surface: quadratic through the surroundings (mound left
+        // out), refitted leaving out cells far off it (pits, stray bumps)
+        let Ro = 0, q = null, sig = Infinity;
+        const fitSurface = () => {
+            Ro = Rp + reachOf(Rp) / cellM;
+            const xs = (i) => ((i % w) + c0 - cC) / Ro, ys = (i) => (((i / w) | 0) + r0 - cR) / Ro;
+            const use = new Uint8Array(n);
+            let z0 = 0, nz = 0;
+            for (let i = 0; i < n; i++) if (z[i] > nd && dist[i] > 1.15 * Rp && dist[i] <= Ro) { use[i] = 1; z0 += z[i]; nz++; }
+            if (nz < 20) return false;
+            z0 /= nz;
+            for (let pass = 0; pass < 3; pass++) {
+                const A = Array.from({ length: 6 }, () => new Float64Array(7));
+                for (let i = 0; i < n; i++) {
+                    if (!use[i]) continue;
+                    const x = xs(i), y = ys(i), f = [1, x, y, x * x, y * y, x * y], zz = z[i] - z0;
+                    for (let a2 = 0; a2 < 6; a2++) { for (let b2 = 0; b2 < 6; b2++) A[a2][b2] += f[a2] * f[b2]; A[a2][6] += f[a2] * zz; }
+                }
+                for (let a2 = 0; a2 < 6; a2++) {
+                    let m = a2; for (let b2 = a2 + 1; b2 < 6; b2++) if (Math.abs(A[b2][a2]) > Math.abs(A[m][a2])) m = b2;
+                    [A[a2], A[m]] = [A[m], A[a2]];
+                    if (Math.abs(A[a2][a2]) < 1e-12) return false;
+                    for (let b2 = a2 + 1; b2 < 6; b2++) { const f = A[b2][a2] / A[a2][a2]; for (let k = a2; k < 7; k++) A[b2][k] -= f * A[a2][k]; }
+                }
+                const sol = new Float64Array(6);
+                for (let a2 = 5; a2 >= 0; a2--) { let t = A[a2][6]; for (let b2 = a2 + 1; b2 < 6; b2++) t -= A[a2][b2] * sol[b2]; sol[a2] = t / A[a2][a2]; }
+                q = (i) => { const x = xs(i), y = ys(i); return z0 + sol[0] + sol[1] * x + sol[2] * y + sol[3] * x * x + sol[4] * y * y + sol[5] * x * y; };
+                let ss = 0, k2 = 0;
+                for (let i = 0; i < n; i++) if (use[i]) { const e = z[i] - q(i); ss += e * e; k2++; }
+                sig = Math.sqrt(ss / Math.max(1, k2));
+                for (let i = 0; i < n; i++) if (use[i] && Math.abs(z[i] - q(i)) > 2.5 * sig) use[i] = 0;
+            }
+            return true;
+        };
+        if (!fitSurface()) return null;
+        // Where does the mound actually end? The radius at which the ground
+        // has come down to within 10% of the mound's height above the natural
+        // surface (the given radius is often only the mound's top). Refit
+        // with the whole mound left out, so its flanks don't lift the surface.
+        for (let it = 0; it < 2; it++) {
+            const bins = new Float64Array(Math.ceil(2 * Rp) + 2), cnt = new Float64Array(bins.length);
+            let top = 0;
+            for (let i = 0; i < n; i++) {
+                if (z[i] <= nd || dist[i] >= bins.length) continue;
+                const e = z[i] - q(i), b2 = Math.floor(dist[i]);
+                bins[b2] += e; cnt[b2]++;
+                if (dist[i] <= 0.5 * Rp) top = Math.max(top, e);
+            }
+            let base = Rp;
+            for (let b2 = Math.floor(0.5 * Rp); b2 < bins.length; b2++) if (cnt[b2] && bins[b2] / cnt[b2] <= 0.1 * top) { base = b2 + 0.5; break; }
+            if (base <= Rp * 1.1) break;
+            Rp = Math.min(2 * Rp, base);
+            if (!fitSurface()) return null;
+        }
+        const reachM = reachOf(Rp);
+        const thr = Math.max(0.15, 3 * (noiseSigma || 0));
+        const surfThr = Math.max(thr, 2.5 * sig);
+        // Mound volume above the natural surface
+        let moundVol = 0;
+        for (let i = 0; i < n; i++) if (z[i] > nd && dist[i] <= 1.15 * Rp) moundVol += Math.max(0, z[i] - q(i)) * cellM * cellM;
+        // Dug-out ground in the ring around the mound
+        const depth = new Float32Array(n), mask = new Uint8Array(n);
+        for (let i = 0; i < n; i++) {
+            if (z[i] <= nd || dist[i] < 0.85 * Rp || dist[i] > Ro) continue;
+            if (waterMask && waterMask[(r0 + ((i / w) | 0)) * W + c0 + (i % w)]) continue;   // on a mapped stream
+            const fd = filled[i] - z[i], sd = q(i) - z[i];
+            const d = Math.max(fd >= thr ? fd : 0, sd >= surfThr ? sd : 0);
+            if (d > 0) { mask[i] = 1; depth[i] = d; }
+        }
+        const pits = [], seen = new Uint8Array(n), stack = [];
+        let channels = 0;
+        const sectorsAll = new Set();
+        for (let s0 = 0; s0 < n; s0++) {
+            if (!mask[s0] || seen[s0]) continue;
+            const cells = [];
+            stack.push(s0); seen[s0] = 1;
+            while (stack.length) {
+                const i = stack.pop(); cells.push(i);
+                const r = (i / w) | 0, c = i % w;
+                for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+                    const rr = r + dr, cc = c + dc;
+                    if (rr < 0 || rr >= h || cc < 0 || cc >= w) continue;
+                    const j = rr * w + cc;
+                    if (mask[j] && !seen[j]) { seen[j] = 1; stack.push(j); }
+                }
+            }
+            const areaM2 = cells.length * cellM * cellM;
+            if (areaM2 < Math.max(4, 3 * cellM * cellM)) continue;
+            let sr = 0, sc = 0, srr = 0, scc = 0, src = 0, maxD = 0, vol = 0, minToe = Infinity, sd = 0, sdd = 0, atEdge = 0;
+            const sectors = new Set();
+            for (const i of cells) {
+                const r = (i / w) | 0, c = i % w;
+                sr += r; sc += c; srr += r * r; scc += c * c; src += r * c;
+                maxD = Math.max(maxD, depth[i]); vol += depth[i] * cellM * cellM;
+                minToe = Math.min(minToe, (dist[i] - Rp) * cellM);
+                sd += dist[i]; sdd += dist[i] * dist[i];
+                if (dist[i] > Ro - 1.5) atEdge++;
+                sectors.add(((Math.round(Math.atan2(-(r + r0 - cR), c + c0 - cC) / (Math.PI / 8)) % 16) + 16) % 16);
+            }
+            const N = cells.length, mr = sr / N, mc = sc / N;
+            const vrr = srr / N - mr * mr, vcc = scc / N - mc * mc, vrc = src / N - mr * mc;
+            const tr = vrr + vcc, dt = Math.sqrt(Math.max(0, (vrr - vcc) ** 2 / 4 + vrc * vrc));
+            const elong = Math.sqrt((tr / 2 + dt) / Math.max(1e-9, tr / 2 - dt));
+            const eqD = 2 * Math.sqrt(areaM2 / Math.PI);
+            // A ditch keeps a steady distance from the mound and wraps a good
+            // part of the way around it. Drainage runs out through the edge of
+            // the search ring (a pit or ditch sits inside it); a long narrow
+            // hollow that doesn't wrap around is a channel too.
+            const meanD = sd / N, radialSpread = Math.sqrt(Math.max(0, sdd / N - meanD * meanD));
+            // Long axis across the line to the mound = curving around it (a
+            // ditch, or a piece of one: a shallow ditch often shows up in
+            // segments); along that line = running away from it (drainage)
+            const axis = 0.5 * Math.atan2(2 * vrc, vcc - vrr);                     // long axis, (col,row) angle
+            const radial = Math.atan2(mr + r0 - cR, mc + c0 - cC);
+            const tangential = Math.abs(Math.cos(axis - radial)) < 0.5;
+            const throughEdge = atEdge > 0.05 * N;
+            const ditch = !throughEdge && radialSpread <= 0.25 * meanD && (sectors.size >= 6 || (elong > 2 && tangential));
+            if (!ditch && ((throughEdge && elong > 2) || elong > 3)) { channels++; continue; }
+            // direction from the mound, as a compass bearing
+            const ang = Math.atan2(mc + c0 - cC, -(mr + r0 - cR)) * 180 / Math.PI;
+            for (const sct of sectors) sectorsAll.add(sct);
+            pits.push({
+                ditch, areaM2, maxDepth: maxD, volume: vol, eqD, toeDistM: Math.max(0, minToe),
+                bearing: (ang + 360) % 360, sinkholeLike: !ditch && maxD / eqD > 0.2 && maxD > 1,
+                cR: mr + r0, cC: mc + c0,
+            });
+        }
+        pits.sort((a, b) => b.volume - a.volume);
+        const totalVol = pits.reduce((a, p) => a + p.volume, 0);
+        const ring = sectorsAll.size / 16;
+        const ratio = moundVol > 0 ? totalVol / moundVol : 0;
+        const nearPits = pits.filter(p => !p.sinkholeLike && p.toeDistM <= Math.max(5, Rp * cellM));
+        const evidence = !pits.length ? 'none'
+            : ((pits.some(p => p.ditch) && ring >= 0.5) || (nearPits.length && ratio >= 0.2 && ratio <= 3)) ? 'strong' : 'possible';
+        return { pits, totalVol, moundVol, ratio, ring, evidence, channels, reachM, thr, baseRadiusM: Rp * cellM };
+    }
+    function compassLabel16(deg) { return ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'][Math.round(deg / 22.5) % 16]; }
+    // One-paragraph summary of a borrow-pit result for popups
+    function borrowPitHtml(bp) {
+        if (!bp) return '';
+        const ft3 = (m3) => Math.round(m3 / (FT_TO_M ** 3)).toLocaleString();
+        if (!bp.pits.length) return `<b>Borrow pits:</b> none found within ${metersToFeetInches(bp.reachM)} of the base` +
+            (bp.channels ? ` (${bp.channels} drainage channel${bp.channels > 1 ? 's' : ''} ignored)` : '') + '<br>';
+        const color = bp.evidence === 'strong' ? '#166534' : '#1e40af', bg = bp.evidence === 'strong' ? '#dcfce7' : '#dbeafe';
+        const ditch = bp.pits.find(p => p.ditch);
+        const list = bp.pits.slice(0, 4).map(p => `${p.ditch ? 'ditch' : 'pit'} ${compassLabel16(p.bearing)} of the mound, ${metersToFeetInches(p.maxDepth)} deep, ${metersToFeetInches(p.eqD)} across, ${p.toeDistM < 1 ? 'right at the base' : metersToFeetInches(p.toeDistM) + ' from the base'}${p.sinkholeLike ? ' (steep-sided: could be a natural sinkhole)' : ''}`).join('; ');
+        return `<div style="margin:4px 0;padding:4px 6px;border-radius:4px;background:${bg};color:${color};font-size:0.78rem;">` +
+            `<b>Borrow pits (${bp.evidence === 'strong' ? 'strong sign of construction' : 'possible'}):</b> ${bp.pits.length} found: ${list}${bp.pits.length > 4 ? '; ...' : ''}. ` +
+            (ditch ? `Ditch runs ${Math.round(bp.ring * 100)}% of the way around. ` : '') +
+            `About ${ft3(bp.totalVol)} ft&sup3; dug out vs ${ft3(bp.moundVol)} ft&sup3; in the mound (${bp.ratio.toFixed(1)}&times;).` +
+            (bp.channels ? ` ${bp.channels} drainage channel${bp.channels > 1 ? 's' : ''} ignored.` : '') + `</div>`;
+    }
+    // Draws a borrow-pit result on a layer: dashed blue circles over the pits
+    function drawBorrowPits(bp, layer) {
+        if (!bp) return;
+        for (const p of bp.pits) {
+            const lat = demBounds.n - ((p.cR + 0.5) / demHeight) * (demBounds.n - demBounds.s);
+            const lon = demBounds.w + ((p.cC + 0.5) / demWidth) * (demBounds.e - demBounds.w);
+            L.circle([lat, lon], { radius: Math.max(1, p.eqD / 2), color: '#0369a1', weight: 2, dashArray: '4 3', fillColor: '#38bdf8', fillOpacity: 0.2, interactive: false }).addTo(layer);
+        }
+    }
     const MOUND_HOST_RATIO = 4, MOUND_HOST_MIN_M = 60;
     function moundHostOk(hostDiam, diameter) {
         if (!(hostDiam > 1.3 * diameter)) return true;   // the host IS this mound (or no host)
@@ -5560,6 +5772,7 @@
                     if (other && other !== preset && hM >= feetToMeters(other.minHeight) && diameter >= feetToMeters(other.minDiameter) &&
                         diameter <= feetToMeters(other.maxDiameter) && k.circularity >= other.minCircularity) label = other;
                     if (hM > k.maxMetric) k.maxMetric = hM;   // hillside mound: report its height above the slope
+                    k._sizeD = diameter;
                     pre.push({ k, preset: label, tm, diameter, resid, height, mask });
                 }
                 }
@@ -5605,6 +5818,20 @@
                 });
             }
             baseScaleMetricRaster = heightForInspect;
+            // Borrow pits around each short-listed mound (see moundBorrowPits)
+            const bpMode = document.getElementById('moundBorrowPits').value;
+            if (bpMode !== 'off') {
+                const denoisedForPits = denoised;
+                modeCtx = {
+                    describe(k) {
+                        const r = (k._sizeD || 2 * Math.sqrt(k.area / Math.PI)) / 2;
+                        const bp = moundBorrowPits(denoisedForPits, W, H, k.centroidR, k.centroidC, r, effRes, nodataThresh, noiseSigma, waterwayMask);
+                        k._borrowPits = bp;
+                        if (bpMode === 'require' && !(bp && bp.pits.some(p => !p.sinkholeLike))) return { drop: true };
+                        return { html: borrowPitHtml(bp), boost: !bp ? 0 : bp.evidence === 'strong' ? 0.25 : bp.evidence === 'possible' ? 0.1 : 0 };
+                    }
+                };
+            }
             moundTPI = null;
         } else {
             const result = await computeMetricRasterForMode(mode);
@@ -5788,6 +6015,7 @@
                                 ${shapeWarning}${confirmHtml}${significanceHtml}`;
 
             L.marker([lat, lon], {icon: iconInst}).bindPopup(popupHtml).addTo(modeLayer(mode));
+            if (mode === 'mounds' && k._borrowPits) drawBorrowPits(k._borrowPits, modeLayer(mode));
             // Same oriented-ellipse geometry used for the shapefile export, so the
             // map view and the exported file always agree - an elongated feature
             // shows elongated here too, not a generic circle. Leaflet wants
@@ -6356,7 +6584,8 @@
                 trainingData[f.mode].examples.some(ex => approxMetersBetween(ex.lat, ex.lon, f.lat, f.lon) < 20);
             const desc = `${typeName} - algorithmic candidate, verify in the field. Match score ${f.matchScore}%. ` +
                 (f.mode === 'settlement' ? '' : `${modeMetricLabel(f.mode)}: ${(f.k.maxMetric * M2FT).toFixed(1)} ft. `) +
-                `About ${Math.round(f.diameter * M2FT)} ft across.` + (confirmed ? ' Confirmed real by you.' : '');
+                `About ${Math.round(f.diameter * M2FT)} ft across.` +
+                (f.k._borrowPits && f.k._borrowPits.pits.length ? ` Borrow pits: ${f.k._borrowPits.pits.length} (${f.k._borrowPits.evidence}).` : '') + (confirmed ? ' Confirmed real by you.' : '');
             return `  <wpt lat="${f.lat.toFixed(7)}" lon="${f.lon.toFixed(7)}">
     ${ele}<time>${now}</time>
     <name>${xmlEsc(name)}</name>
@@ -6403,6 +6632,7 @@ ${wpts.join('\n')}
                     circularity: +f.k.circularity.toFixed(3),
                     elongation: +f.k.elongation.toFixed(3),
                     match_pct: f.matchScore,
+                    ...(f.k._borrowPits ? { borrow_pits: f.k._borrowPits.pits.length, borrow_evidence: f.k._borrowPits.evidence, borrow_vol_m3: +f.k._borrowPits.totalVol.toFixed(1) } : {}),
                     lat: +f.lat.toFixed(6), lon: +f.lon.toFixed(6),
                     dtm_res_m: +f.grid.res.toFixed(3)
                 }
