@@ -65,7 +65,9 @@
         .shelter-marker { filter: hue-rotate(270deg); }
         .hunt-marker { filter: hue-rotate(90deg); }
         #panelHeader:hover { opacity: 0.8; }
-    </style>
+    .outline-drawing .leaflet-interactive { pointer-events: none !important; }
+    .outline-drawing { cursor: crosshair; }
+</style>
 </head>
 <body>
 
@@ -276,6 +278,9 @@
                     <option value="off">Don't look</option>
                 </select>
             </div>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem; margin:6px 0 2px;">
+                <input type="checkbox" id="moundUseLearned" disabled> Use size ranges learned from my outlined mounds <span id="moundUseLearnedNote" style="color:#94a3b8;"></span>
+            </label>
             <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">The earth for a mound was dug close by, and the holes often survive: pits beside the mound (often holding water) or a ditch around it. The ground out to twice the mound's width past its base is searched; gullies and streams are ignored, and steep cone-shaped holes are flagged as possible natural sinkholes. Pits are drawn as dashed blue circles.</div>
             <div style="font-size:0.68rem; color:#94a3b8; margin-top:4px; line-height:1.35;">All Shapes runs both dedicated Conical and Platform scans and merges the results - most thorough, roughly 2x the scan time of a single shape. Broad/Any is a faster single compromise scan. Circularity/Diameter/Height/Trend Radius come from published size ranges for each type (see chat for sourcing and caveats) - a perfect square already measures ~0.79 on the Circularity scale, close to a circle's 1.0, so "round" and "square" genuinely overlap here, these bias toward one shape rather than cleanly separating them. Max Circularity and Flank Slope only flag a candidate as unusual, they don't exclude it - a real, well-built mound can legitimately be steeper or more compact than a generic rule predicts. Selecting a specific shape (not "All" or "Custom") overwrites the sliders below; your own confirmed examples remain the more reliable calibration once you have some.</div>
         </div>
@@ -642,6 +647,17 @@
         <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importTrainingData(this)">
         <button onclick="document.getElementById('importFileInput').click()">Import Training Data</button>
         <button onclick="clearTrainingData()" style="background:#fee2e2;color:#991b1b;">Clear Training Data</button>
+        <div style="margin-top:10px;padding-top:8px;border-top:1px solid #e2e8f0;">
+            <button onclick="startOutline()" style="background:#fef3c7;color:#92400e;">&#9998; Outline a Mound or Look-alike</button>
+            <div id="outlineSummary" style="font-size:0.8rem; text-align:center; margin:6px 0; color:#334155;">Outlined: 0 mounds, 0 look-alikes.</div>
+            <div style="display:flex; gap:6px;">
+                <button id="outlineShowBtn" onclick="toggleOutlineLayer()" style="font-size:0.78rem;">Show outlines</button>
+                <button onclick="exportOutlines()" style="font-size:0.78rem;">Export outlines</button>
+                <button onclick="document.getElementById('importOutlinesInput').click()" style="font-size:0.78rem;">Import outlines</button>
+            </div>
+            <input type="file" id="importOutlinesInput" accept=".geojson,.json" style="display:none" onchange="importOutlines(this)">
+            <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Tap points around the base of a known mound, where it meets the natural ground, then Finish. The app fits the natural ground in a band outside your line and measures height, size, shape, sides, ground slope, elevation and borrow pits. It also records what the scanner itself sees there, which is what later scans are compared with, and tells you if your line looks tight or wide. Outline look-alikes too (tree throws, boulders, spoil piles, natural knobs): later scans rank candidates like your mounds higher, rank ones like your look-alikes lower, and skip anything inside a look-alike outline. Export saves GeoJSON (opens in GIS software); import merges, so outlines from different trips and devices combine.</div>
+        </div>
         <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">
             Confirming a cave/sinkhole or mound &mdash; the checkbox on a marker's popup, or "This is a Cave/Sinkhole" / "This is a Mound" from click-to-inspect &mdash; only ever widens thresholds to include it and raises similar future candidates' Match Score. It never narrows the search or excludes anything unlike what's been confirmed so far. Settlement confirmation works differently, on purpose: a camp or village site can't be verified by looking at the map the way a hole in the ground can, so "Confirm Known Site" asks what actual evidence you have (artifacts, a documented record, midden staining, oral history) rather than offering a one-click checkbox. Confirmed sites boost future scans two ways: areas near a confirmed site score higher, and areas whose water/elevation/slope profile resembles a confirmed site score higher too, even far away. Each mode is learned separately. Training data lives in this browser only (localStorage) &mdash; export it to back it up or move it to another device.
         </div>
@@ -2098,6 +2114,399 @@
         }
     }
 
+    // ==== OUTLINE TOOL: hand-drawn training outlines ====
+    // You trace a mound's base (where it meets the natural ground), or a
+    // look-alike that is NOT a mound (tree throw, boulder, spoil pile...).
+    // The app measures the outline against the natural ground, fitted to a
+    // band just outside your line, and records two things:
+    //  - the outline's true dimensions (what you see and export), and
+    //  - what the scanner itself sees there (moundFindAt), which is what
+    //    later scans are compared with, so the comparison is like for like.
+    // Stored in trainingData.outlines; exported/imported as GeoJSON.
+    let outlineDraw = null, outlineLayer = null, outlineLayerShown = false, outlinePending = null;
+    const OUTLINE_LOOKALIKES = ['tree throw', 'boulder / rock outcrop', 'spoil or dirt pile', 'natural knob', 'road / berm / levee', 'other'];
+
+    function startOutline() {
+        if (!currentDEM) { document.getElementById('status').innerText = 'Download or load a DTM first, then outline a mound on it.'; return; }
+        if (outlineDraw) return;
+        map.closePopup();
+        outlineDraw = { pts: [], line: L.polyline([], { color: '#b45309', weight: 3, interactive: false }).addTo(map), dots: L.layerGroup().addTo(map) };
+        map.doubleClickZoom.disable();
+        // taps on markers, outlines and scan results go through to the map while drawing
+        map.getContainer().classList.add('outline-drawing');
+        const bar = document.getElementById('outlineBar');
+        bar.style.display = 'flex';
+        updateOutlineBar();
+        // on a phone, fold the settings panel away so the map is free to tap
+        if (window.innerWidth < 700 && document.getElementById('panelContent').style.display !== 'none') togglePanel();
+    }
+    function updateOutlineBar() {
+        const n = outlineDraw ? outlineDraw.pts.length : 0;
+        document.getElementById('outlineBarText').innerText = n < 3
+            ? `Tap points around the base of the mound (where it meets the natural ground). ${n} point${n === 1 ? '' : 's'}, 3+ needed.`
+            : `${n} points. Keep going around the base, then Finish.`;
+        document.getElementById('outlineFinishBtn').disabled = n < 3;
+    }
+    function outlineAddPoint(ll) {
+        outlineDraw.pts.push(ll);
+        outlineDraw.line.setLatLngs([...outlineDraw.pts, outlineDraw.pts[0]]);
+        L.circleMarker(ll, { radius: 4, color: '#b45309', fillColor: '#fbbf24', fillOpacity: 1, weight: 2, interactive: false }).addTo(outlineDraw.dots);
+        updateOutlineBar();
+    }
+    function outlineUndo() {
+        if (!outlineDraw || !outlineDraw.pts.length) return;
+        outlineDraw.pts.pop();
+        outlineDraw.line.setLatLngs(outlineDraw.pts.length ? [...outlineDraw.pts, outlineDraw.pts[0]] : []);
+        const ls = outlineDraw.dots.getLayers(); if (ls.length) outlineDraw.dots.removeLayer(ls[ls.length - 1]);
+        updateOutlineBar();
+    }
+    function outlineCancel() {
+        if (outlineDraw) { map.removeLayer(outlineDraw.line); map.removeLayer(outlineDraw.dots); }
+        outlineDraw = null;
+        if (outlinePending && outlinePending.layer) map.removeLayer(outlinePending.layer);
+        outlinePending = null;
+        document.getElementById('outlineBar').style.display = 'none';
+        map.doubleClickZoom.enable();
+        map.getContainer().classList.remove('outline-drawing');
+    }
+    function pointInPoly(x, y, poly) {   // poly: [[x,y],...]
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const [xi, yi] = poly[i], [xj, yj] = poly[j];
+            if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+        }
+        return inside;
+    }
+    function distToPolyEdge(x, y, poly) {
+        let best = Infinity;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const [ax, ay] = poly[j], [bx, by] = poly[i], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+            const t = L2 ? Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / L2)) : 0;
+            best = Math.min(best, Math.hypot(x - ax - t * dx, y - ay - t * dy));
+        }
+        return best;
+    }
+    // Robust quadratic surface z = f(x, y) through points (x, y in metres),
+    // refitted twice leaving out points far off it
+    function fitQuadRobust(X, Y, Z) {
+        let use = new Uint8Array(X.length).fill(1), f = null, sig = Infinity;
+        const z0 = Z.reduce((a, b) => a + b, 0) / Z.length, sc = Math.max(1, Math.max(...X.map(Math.abs), ...Y.map(Math.abs)));
+        for (let pass = 0; pass < 3; pass++) {
+            const A = Array.from({ length: 6 }, () => new Float64Array(7));
+            let cnt = 0;
+            for (let i = 0; i < X.length; i++) {
+                if (!use[i]) continue;
+                const x = X[i] / sc, y = Y[i] / sc, v = [1, x, y, x * x, y * y, x * y];
+                for (let a = 0; a < 6; a++) { for (let b = 0; b < 6; b++) A[a][b] += v[a] * v[b]; A[a][6] += v[a] * (Z[i] - z0); }
+                cnt++;
+            }
+            if (cnt < 12) return null;
+            for (let a = 0; a < 6; a++) {
+                let m = a; for (let b = a + 1; b < 6; b++) if (Math.abs(A[b][a]) > Math.abs(A[m][a])) m = b;
+                [A[a], A[m]] = [A[m], A[a]];
+                if (Math.abs(A[a][a]) < 1e-12) return null;
+                for (let b = a + 1; b < 6; b++) { const t = A[b][a] / A[a][a]; for (let k = a; k < 7; k++) A[b][k] -= t * A[a][k]; }
+            }
+            const q = new Float64Array(6);
+            for (let a = 5; a >= 0; a--) { let t = A[a][6]; for (let b = a + 1; b < 6; b++) t -= A[a][b] * q[b]; q[a] = t / A[a][a]; }
+            f = (x, y) => { x /= sc; y /= sc; return z0 + q[0] + q[1] * x + q[2] * y + q[3] * x * x + q[4] * y * y + q[5] * x * y; };
+            let ss = 0, k2 = 0;
+            for (let i = 0; i < X.length; i++) if (use[i]) { const e = Z[i] - f(X[i], Y[i]); ss += e * e; k2++; }
+            sig = Math.sqrt(ss / Math.max(1, k2));
+            for (let i = 0; i < X.length; i++) if (use[i] && Math.abs(Z[i] - f(X[i], Y[i])) > 2.5 * sig) use[i] = 0;
+        }
+        const grad = (x, y) => { const h = 0.5; return [(f(x + h, y) - f(x - h, y)) / (2 * h), (f(x, y + h) - f(x, y - h)) / (2 * h)]; };
+        return { f, sig, grad };
+    }
+
+    async function outlineFinish() {
+        if (!outlineDraw) return;
+        if (outlineDraw.pts.length < 3) { document.getElementById('status').innerText = 'An outline needs at least 3 points.'; return; }
+        const pts = outlineDraw.pts.map(p => [p.lat, p.lng]);
+        const status = document.getElementById('status');
+        status.innerText = 'Measuring the outline and what the scanner sees there...';
+        await new Promise(r => setTimeout(r, 0));
+        const g = fullDemGrid;
+        const cLat = pts.reduce((a, p) => a + p[0], 0) / pts.length, cLon = pts.reduce((a, p) => a + p[1], 0) / pts.length;
+        const idx = gridIndexAt(g, cLat, cLon);
+        if (idx < 0 || pts.some(p => gridIndexAt(g, p[0], p[1]) < 0)) { status.innerText = 'The outline must lie inside the downloaded area.'; return; }
+        const r = (idx / g.w) | 0, c = idx % g.w;
+        let res;
+        try {
+            if (g.w * g.h <= SCAN_MAX_PX) res = measureOutlineOnGrid(pts);
+            else {
+                const half = 1024, r0 = Math.max(0, r - half), c0 = Math.max(0, c - half), r1 = Math.min(g.h, r + half), c1 = Math.min(g.w, c + half);
+                res = await withGrid(cropGrid(g, r0, c0, r1, c1), async () => measureOutlineOnGrid(pts));
+            }
+        } catch (e) { console.error(e); status.innerText = `Could not measure that outline: ${e.message || e}.`; return; }
+        if (res.error) { status.innerText = res.error; return; }
+        // keep the drawn shape, stop drawing
+        map.removeLayer(outlineDraw.dots);
+        outlineDraw.line.setStyle({ dashArray: '6 4' });
+        outlinePending = { rec: res.rec, layer: outlineDraw.line };
+        outlineDraw = null;
+        document.getElementById('outlineBar').style.display = 'none';
+        map.doubleClickZoom.enable();
+        map.getContainer().classList.remove('outline-drawing');
+        status.innerText = 'Outline measured. Choose Mound or Not a mound, then Save.';
+        L.popup({ maxWidth: 440, closeOnClick: false }).setLatLng([cLat, cLon]).setContent(outlineResultHtml(res.rec, true)).openOn(map);
+    }
+
+    // Runs on the current grid globals (the full DTM, or a window of it)
+    function measureOutlineOnGrid(pts) {
+        const W = demWidth, H = demHeight, nd = -100, cell = effRes;
+        const b = demBounds, dLat = (b.n - b.s) / H, dLon = (b.e - b.w) / W;
+        const poly = pts.map(([la, lo]) => [(lo - b.w) / dLon - 0.5, (b.n - la) / dLat - 0.5]);   // [col, row]
+        const cx = poly.reduce((a, p) => a + p[0], 0) / poly.length, cy = poly.reduce((a, p) => a + p[1], 0) / poly.length;
+        // polygon geometry in metres
+        let areaPoly = 0, perim = 0;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            areaPoly += (poly[j][0] * poly[i][1] - poly[i][0] * poly[j][1]) / 2;
+            perim += Math.hypot(poly[i][0] - poly[j][0], poly[i][1] - poly[j][1]);
+        }
+        areaPoly = Math.abs(areaPoly) * cell * cell; perim *= cell;
+        const Req = Math.sqrt(areaPoly / Math.PI);
+        const bandM = Math.max(10, Req), bandPx = bandM / cell;
+        const minC = Math.floor(Math.min(...poly.map(p => p[0])) - bandPx - 2), maxC = Math.ceil(Math.max(...poly.map(p => p[0])) + bandPx + 2);
+        const minR = Math.floor(Math.min(...poly.map(p => p[1])) - bandPx - 2), maxR = Math.ceil(Math.max(...poly.map(p => p[1])) + bandPx + 2);
+        if (minC < 0 || minR < 0 || maxC >= W || maxR >= H) return { error: 'The outline is too close to the edge of the downloaded area (the ground around it is needed). Download a larger area.' };
+        // what the scanner sees here (also gives the same denoised DTM the scan uses)
+        const fa = moundFindAt(Math.round(cy), Math.round(cx), Math.max(3, Math.round(Req / cell)));
+        const den = fa.denoised;
+        const slopeR = computeSlopeDegrees(den, W, H, cell, nd);
+        const inside = [], band = [];
+        for (let r = minR; r <= maxR; r++) for (let c = minC; c <= maxC; c++) {
+            const z = den[r * W + c]; if (z < nd) continue;
+            const inP = pointInPoly(c, r, poly), d = distToPolyEdge(c, r, poly) * cell;
+            if (inP) inside.push({ r, c, z, d }); else if (d <= bandM) band.push({ r, c, z, d });
+        }
+        if (inside.length < 4) return { error: `The outline covers only ${inside.length} DTM cell(s) at ${cell.toFixed(2)} m; draw it larger or use finer data.` };
+        if (band.length < 20) return { error: 'Not enough ground data around the outline.' };
+        // natural ground: robust quadratic through the band outside the line,
+        // skipping the first few metres, so a line drawn a little inside the
+        // base doesn't have the mound's own lower sides lifting the "ground"
+        const skipM = Math.min(3, 0.3 * bandM), fitPts = band.filter(p => p.d >= skipM);
+        if (fitPts.length < 20) return { error: 'Not enough ground data around the outline.' };
+        const X = fitPts.map(p => (p.c - cx) * cell), Y = fitPts.map(p => (cy - p.r) * cell), Z = fitPts.map(p => p.z);
+        const fit = fitQuadRobust(X, Y, Z);
+        if (!fit) return { error: 'Could not fit the ground around the outline.' };
+        const hOf = (p) => p.z - fit.f((p.c - cx) * cell, (cy - p.r) * cell);
+        let top = -Infinity, sumr = null, vol = 0, flankSum = 0, flankMax = 0;
+        for (const p of inside) {
+            const h = hOf(p); p.h = h;
+            if (h > top) { top = h; sumr = p; }
+            vol += Math.max(0, h) * cell * cell;
+            const sl = slopeR[p.r * W + p.c]; flankSum += sl; flankMax = Math.max(flankMax, sl);
+        }
+        const flat = inside.filter(p => p.h >= 0.85 * top).length / inside.length;
+        // long / short axis of the outline (principal axes of its vertices, then extents)
+        let sxx = 0, syy = 0, sxy = 0;
+        for (const [x, y] of poly) { sxx += (x - cx) ** 2; syy += (y - cy) ** 2; sxy += (x - cx) * (y - cy); }
+        const th = 0.5 * Math.atan2(2 * sxy, sxx - syy), ux = Math.cos(th), uy = Math.sin(th);
+        const along = poly.map(([x, y]) => (x - cx) * ux + (y - cy) * uy), across = poly.map(([x, y]) => -(x - cx) * uy + (y - cy) * ux);
+        let lenM = (Math.max(...along) - Math.min(...along)) * cell, widM = (Math.max(...across) - Math.min(...across)) * cell;
+        let bearing = (Math.atan2(ux, -uy) * 180 / Math.PI + 360) % 180;   // long axis, degrees from north
+        if (widM > lenM) { [lenM, widM] = [widM, lenM]; bearing = (bearing + 90) % 180; }
+        // ground under it
+        const [gx, gy] = fit.grad((sumr.c - cx) * cell, (cy - sumr.r) * cell);
+        const groundSlope = Math.atan(Math.hypot(gx, gy)) * 180 / Math.PI;
+        const groundAspect = (Math.atan2(-gx, -gy) * 180 / Math.PI + 360) % 360;   // downhill direction
+        const baseElev = sumr.z - top;
+        // line check: ground just outside still rising (too tight) / much flat base-level ground inside (too loose)
+        const nearOut = band.filter(p => p.d <= Math.max(2, 1.5 * cell)).map(hOf);
+        const outMean = nearOut.length ? nearOut.reduce((a, v) => a + v, 0) / nearOut.length : 0;
+        const lowInside = inside.filter(p => p.h < 0.05 * top).length / inside.length;
+        const lineNote = top <= 0 ? 'The ground inside the outline is not higher than the ground around it.'
+            : outMean > Math.max(0.1 * top, 2 * fit.sig) ? `Ground just outside your line is still ${metersToFeetInches(outMean)} above the natural surface: the line may be inside the base (drawn a bit tight).`
+            : lowInside > 0.35 ? `${Math.round(lowInside * 100)}% of the outline is at natural ground level: the line may be outside the base (drawn a bit wide).`
+            : 'Your line matches the base well.';
+        // the app's own estimate of the base, for comparison: ground connected to the summit >= 5% of the height
+        let autoD = null;
+        if (top > 0) {
+            const lim = bandPx + Req / cell, seen = new Set([sumr.r * W + sumr.c]), st = [sumr.r * W + sumr.c];
+            while (st.length) {
+                const i = st.pop(), rr = (i / W) | 0, cc = i % W;
+                for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+                    const r2 = rr + dr, c2 = cc + dc, j = r2 * W + c2;
+                    if (r2 < minR || r2 > maxR || c2 < minC || c2 > maxC || seen.has(j) || Math.hypot(r2 - cy, c2 - cx) > lim) continue;
+                    const z = den[j]; if (z < nd) continue;
+                    if (z - fit.f((c2 - cx) * cell, (cy - r2) * cell) >= 0.05 * top) { seen.add(j); st.push(j); }
+                }
+            }
+            autoD = 2 * Math.sqrt(seen.size / Math.PI) * cell;
+        }
+        // borrow pits around it
+        const bp = top > 0 ? moundBorrowPits(den, W, H, cy, cx, Req, cell, nd, fa.noiseSigma, null) : null;
+        // what the scanner sees: its best closed high whose top lies inside the outline
+        const sv = fa.found.find(f => pointInPoly(f.k.centroidC, f.k.centroidR, poly)) || null;
+        const toLL = (rr, cc) => [b.n - (rr + 0.5) * dLat, b.w + (cc + 0.5) * dLon];
+        const rec = {
+            id: 'o' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+            ts: Date.now(), label: 'mound', lookalike: '', name: '',
+            polygon: pts, centroid: toLL(cy, cx), summit: toLL(sumr.r, sumr.c),
+            dtm: { res: +cell.toFixed(2), source: window.lastLocalDTMInfo ? window.lastLocalDTMInfo.names : '3DEP download' },
+            outline: {
+                heightM: +top.toFixed(3), areaM2: +areaPoly.toFixed(1), perimeterM: +perim.toFixed(1), eqDiameterM: +(2 * Req).toFixed(2),
+                lengthM: +lenM.toFixed(2), widthM: +widM.toFixed(2), longAxisBearing: Math.round(bearing), elongation: +(lenM / Math.max(0.01, widM)).toFixed(2),
+                roundness: +Math.min(1, 4 * Math.PI * areaPoly / (perim * perim)).toFixed(3), volumeM3: +vol.toFixed(1), heightToWidth: +(top / Math.max(0.01, 2 * Req)).toFixed(3),
+                flankSlopeMean: +(flankSum / inside.length).toFixed(1), flankSlopeMax: +flankMax.toFixed(1), flatTopFraction: +flat.toFixed(2),
+                shape: flat >= 0.25 ? 'platform / flat-topped' : 'conical / dome',
+                groundSlopeDeg: +groundSlope.toFixed(1), groundAspectDeg: Math.round(groundAspect), groundRoughnessM: +fit.sig.toFixed(3),
+                baseElevM: +baseElev.toFixed(2), summitElevM: +sumr.z.toFixed(2), appBaseDiameterM: autoD != null ? +autoD.toFixed(2) : null, lineNote,
+                borrowPits: bp ? { count: bp.pits.length, evidence: bp.evidence, volumeM3: +bp.totalVol.toFixed(1), water: bp.pits.some(p => p.water) } : null,
+            },
+            scanner: sv ? {
+                heightM: +sv.hM.toFixed(3), diameterM: +sv.dM.toFixed(2), circularity: +sv.k.circularity.toFixed(3), elongation: +sv.k.elongation.toFixed(2),
+                template: +sv.tm.score.toFixed(2), templateShape: sv.tm.shape, groundSlopeDeg: +sv.groundSlope[rcIndex(sv.k)].toFixed(1),
+                fitsClass: sv.fits.join(', ') || 'none',
+            } : null,
+        };
+        return { rec, bp };
+    }
+
+    function outlineResultHtml(rec, pending) {
+        const o = rec.outline, s2 = rec.scanner, ft = metersToFeetInches;
+        const row = (k, v) => `<tr><td style="color:#64748b;padding-right:6px;">${k}</td><td>${v}</td></tr>`;
+        const ft3 = (m3) => Math.round(m3 / (FT_TO_M ** 3)).toLocaleString();
+        let html = `<b>${pending ? 'Outline measured' : escapeHtml(rec.name || (rec.label === 'mound' ? 'Outlined mound' : 'Outlined look-alike'))}</b>` +
+            (pending ? '' : ` <span style="font-size:0.72rem;color:#64748b;">${rec.label === 'mound' ? 'mound' : 'NOT a mound' + (rec.lookalike ? ' (' + escapeHtml(rec.lookalike) + ')' : '')}, ${new Date(rec.ts).toLocaleDateString()}</span>`) +
+            `<table style="font-size:0.74rem;border-collapse:collapse;margin-top:4px;">` +
+            row('Height above ground', ft(o.heightM)) +
+            row('Across (equal-area)', `${ft(o.eqDiameterM)}; ${ft(o.lengthM)} long &times; ${ft(o.widthM)} wide, long axis ${o.longAxisBearing}&deg;`) +
+            row('Area / volume', `${Math.round(o.areaM2 / (FT_TO_M ** 2)).toLocaleString()} ft&sup2; / ${ft3(o.volumeM3)} ft&sup3;`) +
+            row('Shape', `${o.shape}; roundness ${o.roundness}, ${o.elongation}&times; long as wide; height:width ${o.heightToWidth}`) +
+            row('Sides', `average ${o.flankSlopeMean}&deg;, steepest ${o.flankSlopeMax}&deg;`) +
+            row('Ground', `${o.groundSlopeDeg}&deg; slope facing ${compassLabel16(o.groundAspectDeg)}; roughness ${ft(o.groundRoughnessM)}`) +
+            row('Elevation', `base ${ft(o.baseElevM)}, top ${ft(o.summitElevM)}`) +
+            (o.borrowPits ? row('Borrow pits', o.borrowPits.count ? `${o.borrowPits.count} (${o.borrowPits.evidence}${o.borrowPits.water ? ', holding water' : ''}), ${ft3(o.borrowPits.volumeM3)} ft&sup3;` : 'none found') : '') +
+            row('Scanner sees', s2 ? `${ft(s2.heightM)} tall, ${ft(s2.diameterM)} across, roundness ${s2.circularity}, template ${s2.template}; size class: ${escapeHtml(s2.fitsClass)}` : '<b>no closed high</b>: the scan cannot pick this out as it stands') +
+            `</table><div style="font-size:0.74rem;margin-top:4px;padding:3px 6px;border-radius:4px;background:#fef3c7;color:#92400e;">${escapeHtml(o.lineNote)}` +
+            (o.appBaseDiameterM ? ` The app's own estimate of the base is ${ft(o.appBaseDiameterM)} across.` : '') + `</div>`;
+        if (pending) {
+            html += `<div style="margin-top:6px;font-size:0.8rem;">
+                <label><input type="radio" name="olLabel" value="mound" checked onchange="document.getElementById('olLook').style.display='none'"> Mound</label>
+                <label style="margin-left:8px;"><input type="radio" name="olLabel" value="not" onchange="document.getElementById('olLook').style.display='inline-block'"> Not a mound (look-alike)</label>
+                <select id="olLook" style="display:none;width:auto;margin-left:4px;padding:2px;font-size:0.75rem;">${OUTLINE_LOOKALIKES.map(t => `<option>${t}</option>`).join('')}</select>
+                <input id="olName" placeholder="Site name (optional)" style="width:100%;margin-top:4px;padding:4px;font-size:0.8rem;box-sizing:border-box;">
+                <div style="margin-top:6px;"><button style="width:auto;padding:4px 10px;" onclick="outlineSave()">Save</button>
+                <button style="width:auto;padding:4px 10px;background:#fee2e2;color:#991b1b;" onclick="map.closePopup(); outlineCancel();">Discard</button></div></div>`;
+        } else {
+            html += `<div style="margin-top:6px;"><button style="width:auto;padding:3px 8px;font-size:0.75rem;background:#fee2e2;color:#991b1b;" onclick="deleteOutline('${rec.id}')">Delete this outline</button></div>`;
+        }
+        return html;
+    }
+    function outlineSave() {
+        if (!outlinePending) return;
+        const rec = outlinePending.rec;
+        rec.label = (document.querySelector('input[name="olLabel"]:checked') || {}).value === 'not' ? 'not' : 'mound';
+        rec.lookalike = rec.label === 'not' ? document.getElementById('olLook').value : '';
+        rec.name = (document.getElementById('olName').value || '').trim().slice(0, 120);
+        trainingData.outlines.push(rec);
+        saveTrainingData();
+        map.removeLayer(outlinePending.layer);
+        outlinePending = null;
+        map.closePopup();
+        outlineLayerShown = true;
+        refreshOutlineLayer();
+        updateOutlineSummary();
+        document.getElementById('status').innerText = `Saved ${rec.label === 'mound' ? 'mound' : 'look-alike'} outline${rec.name ? ' "' + rec.name + '"' : ''}.` +
+            (rec.scanner ? '' : ' The scanner does not see a closed high there, so it is stored for reference but cannot be used to rank candidates.');
+    }
+    function deleteOutline(id) {
+        if (!confirm('Delete this outline from your training data?')) return;
+        trainingData.outlines = trainingData.outlines.filter(o => o.id !== id);
+        saveTrainingData(); map.closePopup(); refreshOutlineLayer(); updateOutlineSummary();
+    }
+    function refreshOutlineLayer() {
+        if (outlineLayer) { map.removeLayer(outlineLayer); outlineLayer = null; }
+        if (!outlineLayerShown) return;
+        outlineLayer = L.layerGroup().addTo(map);
+        for (const rec of trainingData.outlines) {
+            const isM = rec.label === 'mound';
+            L.polygon(rec.polygon, { color: isM ? '#92400e' : '#475569', weight: 2, dashArray: isM ? null : '5 4', fillColor: isM ? '#f59e0b' : '#94a3b8', fillOpacity: 0.15 })
+                .bindPopup(() => outlineResultHtml(rec, false), { maxWidth: 440 }).addTo(outlineLayer);
+        }
+    }
+    function toggleOutlineLayer() {
+        outlineLayerShown = !outlineLayerShown;
+        refreshOutlineLayer();
+        document.getElementById('outlineShowBtn').innerText = outlineLayerShown ? 'Hide outlines' : 'Show outlines';
+        if (outlineLayerShown && trainingData.outlines.length) {
+            const bb = L.latLngBounds(trainingData.outlines.flatMap(o => o.polygon));
+            if (!map.getBounds().intersects(bb)) map.fitBounds(bb, { maxZoom: 17 });
+        }
+    }
+    function updateOutlineSummary() {
+        const el = document.getElementById('outlineSummary'); if (!el) return;
+        const m = trainingData.outlines.filter(o => o.label === 'mound'), n = trainingData.outlines.length - m.length;
+        const usable = m.filter(o => o.scanner).length;
+        el.innerText = `Outlined: ${m.length} mound${m.length === 1 ? '' : 's'} (${usable} the scanner can see), ${n} look-alike${n === 1 ? '' : 's'}.`;
+        const cb = document.getElementById('moundUseLearned');
+        if (cb) { cb.disabled = usable < 5; if (usable < 5) cb.checked = false; document.getElementById('moundUseLearnedNote').innerText = usable < 5 ? `(needs 5 outlined mounds the scanner can see; you have ${usable})` : `(from ${usable} outlined mounds)`; }
+    }
+    function exportOutlines() {
+        if (!trainingData.outlines.length) { document.getElementById('status').innerText = 'No outlines to export yet.'; return; }
+        const flat = (o, pre) => Object.fromEntries(Object.entries(o || {}).flatMap(([k, v]) => v && typeof v === 'object' ? Object.entries(v).map(([k2, v2]) => [`${pre}${k}_${k2}`, v2]) : [[pre + k, v]]));
+        const fc = { type: 'FeatureCollection', features: trainingData.outlines.map(o => ({
+            type: 'Feature',
+            geometry: { type: 'Polygon', coordinates: [[...o.polygon, o.polygon[0]].map(([la, lo]) => [+lo.toFixed(7), +la.toFixed(7)])] },
+            properties: { id: o.id, label: o.label, lookalike: o.lookalike, name: o.name, date: new Date(o.ts).toISOString().slice(0, 10), dtm_res_m: o.dtm.res, dtm_source: o.dtm.source,
+                          ...flat(o.outline, 'o_'), ...flat(o.scanner, 's_'), record: JSON.stringify(o) },
+        })) };
+        downloadBlob(new Blob([JSON.stringify(fc, null, 1)], { type: 'application/geo+json' }), 'mound-training-outlines.geojson');
+    }
+    function importOutlines(fileInput) {
+        const file = fileInput.files[0]; fileInput.value = '';
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+            try {
+                const fc = JSON.parse(reader.result);
+                let added = 0, dup = 0;
+                for (const f of fc.features || []) {
+                    const rec = f.properties && f.properties.record ? JSON.parse(f.properties.record) : null;
+                    if (!rec || !rec.polygon || !rec.outline) continue;
+                    if (trainingData.outlines.some(o => o.id === rec.id)) { dup++; continue; }
+                    trainingData.outlines.push(rec); added++;
+                }
+                saveTrainingData(); refreshOutlineLayer(); updateOutlineSummary();
+                document.getElementById('status').innerText = `Imported ${added} outline(s)${dup ? `; ${dup} already present` : ''}.`;
+            } catch (e) { document.getElementById('status').innerText = 'Could not read that file as outline GeoJSON exported from this app.'; }
+        };
+        reader.readAsText(file);
+    }
+
+    // ---- Using the outlines in the mound scan ----
+    // Similarity of a scan candidate to your outlined mounds and look-alikes,
+    // compared on what the scanner measures in both (size, height, shape,
+    // template fit, ground slope). Returns { mound, not } with the closest
+    // match of each kind ({ sim 0-1, rec }) or null.
+    function outlineSimilarity(k) {
+        const d = k._sizeD || 2 * Math.sqrt(k.area / Math.PI), h = k.maxMetric;
+        let mound = null, not = null;
+        for (const o of trainingData.outlines) {
+            const s = o.scanner; if (!s) continue;
+            const t = [Math.log(d / s.diameterM) / 0.35, Math.log(Math.max(0.05, h) / Math.max(0.05, s.heightM)) / 0.4, (k.circularity - s.circularity) / 0.1,
+                       Math.log(Math.max(1, k.elongation) / Math.max(1, s.elongation)) / 0.3,
+                       k._template != null ? (k._template - s.template) / 0.15 : 0, k._gs != null ? (k._gs - s.groundSlopeDeg) / 6 : 0];
+            const sim = Math.exp(-0.5 * t.reduce((a, v) => a + v * v, 0) / t.length * 2);
+            const slot = o.label === 'mound' ? 'mound' : 'not';
+            if (slot === 'mound' ? (!mound || sim > mound.sim) : (!not || sim > not.sim)) (slot === 'mound' ? (mound = { sim, rec: o }) : (not = { sim, rec: o }));
+        }
+        return { mound, not };
+    }
+    // Size classes from your outlined mounds (opt-in): each limit set just
+    // outside the range the scanner measured on them. This narrows as well as
+    // widens, which is why it is a deliberate switch.
+    function moundLearnedPresets() {
+        const S = trainingData.outlines.filter(o => o.label === 'mound' && o.scanner).map(o => o.scanner);
+        if (S.length < 5) return null;
+        const mn = (f) => Math.min(...S.map(f)), mx = (f) => Math.max(...S.map(f));
+        return [{ name: 'learned', minHeight: Math.max(0.5, metersToFeet(mn(s => s.heightM)) * 0.85), minDiameter: Math.max(6, metersToFeet(mn(s => s.diameterM)) * 0.85),
+                  maxDiameter: metersToFeet(mx(s => s.diameterM)) * 1.25, minCircularity: Math.max(0.2, mn(s => s.circularity) - 0.05), maxCircularity: 1,
+                  maxElongation: Math.max(1.2, mx(s => s.elongation) * 1.15 / 1.3), maxFlankSlope: 70, trendRadius: 40 }];
+    }
+
     // Overlays candidate GeoJSON produced by pipeline/karst_pipeline.py (or
     // any GeoJSON) for review alongside the in-browser scans and 3D view.
     let pipelineLayer = null;
@@ -2416,6 +2825,7 @@
         }
         d.settlement = d.settlement || { examples: [] };
         d.settlement.examples = d.settlement.examples || [];
+        d.outlines = d.outlines || [];   // hand-drawn training outlines (see OUTLINE TOOL)
         return d;
     }
     function loadTrainingData() {
@@ -2516,6 +2926,7 @@
     }
 
     function updateTrainingSummary() {
+        if (typeof updateOutlineSummary === 'function') updateOutlineSummary();
         const el = document.getElementById('trainingSummary');
         if (!el) return;
         const sigCount = ['caves', 'shelter', 'ceremonial'].reduce((n, m) => n + trainingData[m].examples.filter(e => e.significance).length, 0);
@@ -2640,6 +3051,73 @@
         try { await withGrid(cropGrid(g, r0, c0, r1, c1), () => confirmMissedFeatureOnGrid(mode, r - r0, c - c0)); }
         finally { scanInProgress = false; }
     }
+    // What the mound scan sees near a grid cell: every closed high found
+    // there across the scan's scales and passes, measured exactly as the
+    // scan measures them, best candidate first. Used by the "This is a
+    // Mound" check and by the outline tool. snapPx: how far from (r, c) a
+    // closed high may start.
+    function moundFindAt(r, c, snapPx) {
+        const nd = -100, W = demWidth, H = demHeight, n = W * H;
+        const denoised = boxSmooth(currentDEM, W, H, Math.max(1, Math.round(1.0 / effRes)), nd);
+        const noiseSigma = estimateNoiseFloor(currentDEM, denoised, nd);
+        const thr = Math.max(0.05, 5 * noiseSigma);
+        const defs = moundShapePresetDefs();
+        const presets = [{ name: 'conical', ...defs.conical }, { name: 'platform', ...defs.platform }];
+        const flatMax = parseFloat(document.getElementById('moundMaxGroundSlope').value);
+        // Same multi-scale, two-pass detrending as the scan. The tap is
+        // snapped to the nearest closed high within ~10 m, and of all the
+        // closed highs found there (per scale and pass) the check reports
+        // the mound-sized one, so a mound on a spur is measured as the
+        // mound, not as the whole spur it sits on.
+        const slopeDeg = computeSlopeDegrees(denoised, W, H, effRes, nd);
+        const sizeFits = (k, hM, d) => {
+            return presets.filter(p => hM >= feetToMeters(p.minHeight) && d >= feetToMeters(p.minDiameter) && d <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3).map(p => p.name); };
+        const found = [];
+        let bestTapHeight = 0;
+        const scales = [...new Set(presets.flatMap(p => moundScalesM(p)))];
+        // slope rules use the close-up 30 m surface, as in the scan
+        const fineSlope = moundTrend(denoised, W, H, Math.max(2, Math.round(30 / effRes)), nd, effRes).slopeDeg;
+        for (const scaleM of scales) {
+            const mt = moundTrend(denoised, W, H, Math.max(2, Math.round(scaleM / effRes)), nd, effRes);
+            let host = null;
+            for (const pass of ['normal', 'spur']) {
+                const tr = pass === 'normal' ? mt.trend : mt.quad;
+                const rs = new Float32Array(n);
+                for (let i = 0; i < n; i++) rs[i] = (denoised[i] < nd || tr[i] < nd) ? -9999 : denoised[i] - tr[i];
+                const hh = iMoundHeights(rs, W, H, nd);
+                bestTapHeight = Math.max(bestTapHeight, hh[r * W + c]);
+                const mask = new Uint8Array(n);
+                for (let i = 0; i < n; i++) if (hh[i] > thr) mask[i] = 1;
+                if (pass === 'normal') host = componentDiameters(mask, W, H, effRes);
+                // nearest closed-high cell to the tap
+                let sr = -1, sc = -1, bd = Infinity;
+                for (let rr = Math.max(0, r - snapPx); rr <= Math.min(H - 1, r + snapPx); rr++)
+                    for (let cc = Math.max(0, c - snapPx); cc <= Math.min(W - 1, c + snapPx); cc++) {
+                        const d2 = (rr - r) ** 2 + (cc - c) ** 2;
+                        if (mask[rr * W + cc] && d2 <= snapPx * snapPx && d2 < bd) { bd = d2; sr = rr; sc = cc; }
+                    }
+                if (sr < 0) continue;
+                const k = traceOneComponent(mask, hh, denoised, W, H, effRes, nd, new Uint8Array(n), new Int32Array(n), new Int32Array(n), sr, sc, null, slopeDeg);
+                if (!k || k.area < Math.max(10 * effRes * effRes, 7)) continue;   // a noise speck, not a feature
+                const diam = 2 * Math.sqrt(k.area / Math.PI);
+                const gsHere = fineSlope[rcIndex(k)];
+                const meas = moundMeasure(k, 2 * Math.sqrt(k.area / Math.PI), gsHere, flatMax, denoised, W, H, effRes, nd);
+                const plane = meas ? meas.plane : moundRingPlane(denoised, W, H, k, effRes, nd);
+                const hM = meas ? meas.h : k.maxMetric, dM = meas ? meas.d : 2 * Math.sqrt(k.area / Math.PI);
+                if (meas && meas.circ != null) { k.circularity = meas.circ; k.elongation = meas.elong; }
+                found.push({ k, diam, hM, plane, rugged: !meas || meas.rugged, hardReject: !meas, height: hh, resid: rs, groundSlope: fineSlope, pass, scaleM, start: sr * W + sc,
+                             hostDiam: host[rcIndex(k)], fits: sizeFits(k, hM, dM), dM, tm: moundTemplateMatch(hh, W, H, k),
+                             plausible: presets.some(p => diam <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3) });
+            }
+        }
+        // Prefer a closed high that fits a mound class, then one that is
+        // mound-shaped but too small / low, then the best dome or
+        // platform match; the smaller (more local) one on a tie
+        found.sort((a, b) => (b.fits.length > 0) - (a.fits.length > 0) || b.plausible - a.plausible ||
+                             (b.tm.score - a.tm.score) || a.diam - b.diam);
+        return { found, bestTapHeight, denoised, noiseSigma, thr, presets, flatMax, nd, W, H, n };
+    }
+
     async function confirmMissedFeatureOnGrid(mode, r, c) {
         if (!currentDEM) return;
         map.closePopup();
@@ -2649,71 +3127,14 @@
             // Runs the same iMound pipeline as the real scan at this point and
             // reports each check it passes or fails, to answer "why wasn't
             // the mound I know is here found?"
-            const nd = -100, W = demWidth, H = demHeight, n = W * H;
-            const denoised = boxSmooth(currentDEM, W, H, Math.max(1, Math.round(1.0 / effRes)), nd);
-            const noiseSigma = estimateNoiseFloor(currentDEM, denoised, nd);
-            const thr = Math.max(0.05, 5 * noiseSigma);
-            const defs = moundShapePresetDefs();
-            const presets = [{ name: 'conical', ...defs.conical }, { name: 'platform', ...defs.platform }];
-            const flatMax = parseFloat(document.getElementById('moundMaxGroundSlope').value);
-            // Same multi-scale, two-pass detrending as the scan. The tap is
-            // snapped to the nearest closed high within ~10 m, and of all the
-            // closed highs found there (per scale and pass) the check reports
-            // the mound-sized one, so a mound on a spur is measured as the
-            // mound, not as the whole spur it sits on.
+            const snapPx = Math.max(2, Math.round(10 / effRes));
+            const { found, bestTapHeight, denoised, noiseSigma, thr, presets, flatMax, nd, W, H, n } = moundFindAt(r, c, snapPx);
             const tapLat = demBounds.n - ((r + 0.5) / H) * (demBounds.n - demBounds.s);
             const tapLon = demBounds.w + ((c + 0.5) / W) * (demBounds.e - demBounds.w);
-            const snapPx = Math.max(2, Math.round(10 / effRes));
-            const slopeDeg = computeSlopeDegrees(denoised, W, H, effRes, nd);
-            const sizeFits = (k, hM, d) => {
-                return presets.filter(p => hM >= feetToMeters(p.minHeight) && d >= feetToMeters(p.minDiameter) && d <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3).map(p => p.name); };
-            const found = [];
-            let bestTapHeight = 0;
-            const scales = [...new Set(presets.flatMap(p => moundScalesM(p)))];
-            // slope rules use the close-up 30 m surface, as in the scan
-            const fineSlope = moundTrend(denoised, W, H, Math.max(2, Math.round(30 / effRes)), nd, effRes).slopeDeg;
-            for (const scaleM of scales) {
-                const mt = moundTrend(denoised, W, H, Math.max(2, Math.round(scaleM / effRes)), nd, effRes);
-                let host = null;
-                for (const pass of ['normal', 'spur']) {
-                    const tr = pass === 'normal' ? mt.trend : mt.quad;
-                    const rs = new Float32Array(n);
-                    for (let i = 0; i < n; i++) rs[i] = (denoised[i] < nd || tr[i] < nd) ? -9999 : denoised[i] - tr[i];
-                    const hh = iMoundHeights(rs, W, H, nd);
-                    bestTapHeight = Math.max(bestTapHeight, hh[r * W + c]);
-                    const mask = new Uint8Array(n);
-                    for (let i = 0; i < n; i++) if (hh[i] > thr) mask[i] = 1;
-                    if (pass === 'normal') host = componentDiameters(mask, W, H, effRes);
-                    // nearest closed-high cell to the tap
-                    let sr = -1, sc = -1, bd = Infinity;
-                    for (let rr = Math.max(0, r - snapPx); rr <= Math.min(H - 1, r + snapPx); rr++)
-                        for (let cc = Math.max(0, c - snapPx); cc <= Math.min(W - 1, c + snapPx); cc++) {
-                            const d2 = (rr - r) ** 2 + (cc - c) ** 2;
-                            if (mask[rr * W + cc] && d2 <= snapPx * snapPx && d2 < bd) { bd = d2; sr = rr; sc = cc; }
-                        }
-                    if (sr < 0) continue;
-                    const k = traceOneComponent(mask, hh, denoised, W, H, effRes, nd, new Uint8Array(n), new Int32Array(n), new Int32Array(n), sr, sc, null, slopeDeg);
-                    if (!k || k.area < Math.max(10 * effRes * effRes, 7)) continue;   // a noise speck, not a feature
-                    const diam = 2 * Math.sqrt(k.area / Math.PI);
-                    const gsHere = fineSlope[rcIndex(k)];
-                    const meas = moundMeasure(k, 2 * Math.sqrt(k.area / Math.PI), gsHere, flatMax, denoised, W, H, effRes, nd);
-                    const plane = meas ? meas.plane : moundRingPlane(denoised, W, H, k, effRes, nd);
-                    const hM = meas ? meas.h : k.maxMetric, dM = meas ? meas.d : 2 * Math.sqrt(k.area / Math.PI);
-                    if (meas && meas.circ != null) { k.circularity = meas.circ; k.elongation = meas.elong; }
-                    found.push({ k, diam, hM, plane, rugged: !meas || meas.rugged, hardReject: !meas, height: hh, resid: rs, groundSlope: fineSlope, pass, scaleM, start: sr * W + sc,
-                                 hostDiam: host[rcIndex(k)], fits: sizeFits(k, hM, dM), dM, tm: moundTemplateMatch(hh, W, H, k),
-                                 plausible: presets.some(p => diam <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3) });
-                }
-            }
             if (!found.length) {
                 L.popup({ maxWidth: 380 }).setLatLng([tapLat, tapLon]).setContent(`<b>Not a closed high here</b> (iMound height ${bestTapHeight.toFixed(2)} m, needs &gt; ${thr.toFixed(2)} m, and none within ${Math.round(snapPx * effRes)} m). The ground doesn't rise above a closed contour at this spot, so it's a slope, bulge or ridge nose rather than a free-standing mound, or the mound is lower than the LiDAR can separate from noise. Nothing was saved.`).openOn(map);
                 return;
             }
-            // Prefer a closed high that fits a mound class, then one that is
-            // mound-shaped but too small / low, then the best dome or
-            // platform match; the smaller (more local) one on a tie
-            found.sort((a, b) => (b.fits.length > 0) - (a.fits.length > 0) || b.plausible - a.plausible ||
-                                 (b.tm.score - a.tm.score) || a.diam - b.diam);
             const best = found[0], comp = best.k, height = best.height, resid = best.resid, diam = best.diam, hM = best.hM;
             const gs = best.groundSlope[rcIndex(comp)];
             const tm = best.tm;
@@ -5716,6 +6137,8 @@
             } else {
                 presetsToRun = [{ name: moundShapeMode, ...presetDefs[moundShapeMode] }];
             }
+            const learned = document.getElementById('moundUseLearned').checked ? moundLearnedPresets() : null;
+            if (learned) presetsToRun = learned;   // opt-in: size classes from your outlined mounds
 
             const tick0 = (msg) => { status.innerText = msg; return new Promise(r => setTimeout(r, 0)); };
             await tick0('Mounds: denoising DTM (low-pass)...');
@@ -5797,6 +6220,7 @@
                     const tm = moundTemplateMatch(height, W, H, k);
                     if (tm.score < minTemplate) continue;
                     if (moundSlopeRule(gsDeg, maxGroundSlope, tm.score, k)) continue;   // irregular knob on a hillside
+                    k._gs = gsDeg;
                     const flatTop = moundFlatTop(height, W, H, k);
                     tm.shape = flatTop >= 0.18 ? 'platform / flat-topped' : 'conical / dome';
                     // Label by shape: a flat-topped fit is a platform mound when
@@ -5964,6 +6388,20 @@
             let base = scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue);
             // Mounds: a good template fit that survives the error runs raises the score
             if (mode === 'mounds' && k._template != null) base = Math.round(base + (100 - base) * Math.max(0, k._template - 0.5) * 1.2 * k._persist);
+            if (mode === 'mounds' && trainingData.outlines.length) {
+                // inside one of your look-alike outlines: skip, like a spot marked not real
+                if (trainingData.outlines.some(o => o.label === 'not' && pointInPoly(lon, lat, o.polygon.map(([a2, b2]) => [b2, a2])))) { suppressedCount++; continue; }
+                const sm = outlineSimilarity(k);
+                k._simHtml = '';
+                if (sm.mound && sm.mound.sim > 0.2) {
+                    base = Math.round(base + (100 - base) * 0.5 * sm.mound.sim);
+                    k._simHtml += `<b>Like your outlined mound:</b> ${escapeHtml(sm.mound.rec.name || 'unnamed')} (${Math.round(sm.mound.sim * 100)}% similar)<br>`;
+                }
+                if (sm.not && sm.not.sim > 0.5 && (!sm.mound || sm.not.sim > sm.mound.sim)) {
+                    base = Math.round(base * (1 - 0.5 * sm.not.sim));
+                    k._simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles your look-alike outline ${escapeHtml(sm.not.rec.name || '')} (${escapeHtml(sm.not.rec.lookalike || 'not a mound')}, ${Math.round(sm.not.sim * 100)}% similar)</div>`;
+                }
+            }
             ranked.push({ k, lat, lon, diameter, base });
         }
         ranked.sort((x, y) => y.base - x.base || y.k.maxMetric - x.k.maxMetric);
@@ -6046,7 +6484,7 @@
                                 <b>Circularity:</b> ${k.circularity.toFixed(2)}<br>
                                 <b>Elongation:</b> ${k.elongation.toFixed(2)}&times;<br>
                                 <b>Fill Ratio:</b> ${k.fillRatio.toFixed(2)}<br>
-                                ${flankSlopeLine}${shapePresetLine}${extra ? extra.html : ''}<b>Match Score:</b> ${matchScore}%<br>
+                                ${flankSlopeLine}${shapePresetLine}${mode === 'mounds' && k._simHtml ? k._simHtml : ''}${extra ? extra.html : ''}<b>Match Score:</b> ${matchScore}%<br>
                                 <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}
                                 ${shapeWarning}${confirmHtml}${significanceHtml}`;
 
@@ -7095,6 +7533,7 @@ ${wpts.join('\n')}
     // really nothing here" versus "it's just under the current threshold",
     // rather than guessing from marker placement alone.
     map.on('click', (e) => {
+        if (outlineDraw) { outlineAddPoint(e.latlng); return; }
         if (!currentDEM) return;
         const row = ((demBounds.n - e.latlng.lat) / (demBounds.n - demBounds.s)) * demHeight;
         const col = ((e.latlng.lng - demBounds.w) / (demBounds.e - demBounds.w)) * demWidth;
@@ -7141,5 +7580,11 @@ ${wpts.join('\n')}
     });
 </script>
 
+<div id="outlineBar" style="display:none; position:fixed; top:8px; left:50%; transform:translateX(-50%); z-index:3000; background:#fffbeb; border:2px solid #b45309; border-radius:8px; padding:8px 10px; gap:8px; align-items:center; flex-wrap:wrap; max-width:94vw; box-shadow:0 2px 10px rgba(0,0,0,0.25); font-size:0.82rem; color:#78350f;">
+    <span id="outlineBarText" style="flex:1 1 220px;"></span>
+    <button onclick="outlineUndo()" style="width:auto;padding:4px 10px;">Undo</button>
+    <button id="outlineFinishBtn" onclick="outlineFinish()" style="width:auto;padding:4px 10px;background:#b45309;color:#fff;" disabled>Finish</button>
+    <button onclick="outlineCancel()" style="width:auto;padding:4px 10px;background:#fee2e2;color:#991b1b;">Cancel</button>
+</div>
 </body>
 </html>
