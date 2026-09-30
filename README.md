@@ -84,6 +84,13 @@ Comparisons use the scanner's view of each outline, so they are like for like. W
 
 Similarity to confirmed real features wins over similarity to rejected ones, so a genuine mound that happens to resemble a dirt pile you rejected is not thrown away.
 
+**Undoing mistakes.** **Undo last training change** in the Training Data panel reverses your most recent training actions, one at a time, up to the last 30. Undo steps are saved with the training data, so they survive a reload. It covers:
+- a confirmed feature (any size limits it had loosened are put back);
+- "Not a real feature" (results it took off the map come back);
+- an outline, a settlement site, a burial/ritual mark, or a removal.
+
+**Review Training Data** lists everything you've taught the app, newest first, with **Go to** and **Remove** for each item. A confirmed mound's popup also has "Added by mistake? Remove this confirmation". Removing or undoing a confirmed mound takes it off the map and brings back the scan's own result for that spot. The legend and learned settings update with every change.
+
 **Keeping training data.** Training data is saved in two places in the browser (localStorage and IndexedDB, the newer copy wins on load), and the app asks the browser to keep the site's storage persistent. Both copies belong to the exact address the app is opened from, including the port, and are lost if the site's data is cleared. So the Training Data panel counts confirmations not yet in a backup file, with **Back up now**. Where the browser supports it, **Keep a backup file updated automatically** rewrites a backup file after every confirmation. **Import Training Data** merges with what is already there, so restoring an older backup never loses newer work.
 
 **Horizontal Cave Entrances.** A walk-in cave mouth in a bluff face can't be seen in bare-earth LiDAR. This mode finds the settings such entrances open into: gentle ground or a talus apron at the foot of a real cliff. By default a site must also show a karst drainage sign:

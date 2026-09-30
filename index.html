@@ -643,6 +643,10 @@
         <h4>5. Training Data</h4>
         <div id="trainingSummary" style="font-size:0.85rem; text-align:center; margin-bottom:8px; color:#334155;">Confirmed: 0 cave/sinkhole, 0 mound example(s)</div>
         <div id="backupNote" style="font-size:0.74rem; text-align:center; margin-bottom:8px; color:#475569; line-height:1.4;"></div>
+        <div style="display:flex; gap:6px; margin-bottom:6px;">
+            <button id="undoTrainingBtn" onclick="undoLastTraining()" style="font-size:0.8rem;" disabled>&#8630; Undo last training change</button>
+            <button onclick="openTrainingReview()" style="font-size:0.8rem;">Review Training Data</button>
+        </div>
         <button onclick="exportTrainingData()">Export Training Data</button>
         <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importTrainingData(this)">
         <button onclick="document.getElementById('importFileInput').click()">Import Training Data</button>
@@ -2205,6 +2209,146 @@
         }
     }
 
+    // ==== UNDO AND REVIEW OF TRAINING DATA ====
+    // Every training action (confirming a feature, "Not a real feature", an
+    // outline, a settlement site, a significance mark, and removals made
+    // here) is recorded, so "Undo last" can reverse the latest ones in turn
+    // (up to 30). "Review Training Data" lists everything, newest first, to
+    // remove a mistake made long ago. The map, legend, learned settings and
+    // outline layer follow each change.
+    function recordUndo(u) {
+        const st = trainingData._undo || (trainingData._undo = []);
+        const e = { ...u, at: Date.now() + Math.random() };
+        st.push(e);
+        if (st.length > 30) st.shift();
+        return e;
+    }
+    // Scan results taken off the map by an action (the result you marked not
+    // real and its look-alikes; a scan hit replaced by a confirmed mound), kept
+    // for this session so Undo can put them back without a rescan
+    const undoRemovedFeatures = new Map();
+    function restoreFeatures(list) {
+        for (const f of list || []) {
+            if (detectedFeatures.includes(f)) continue;
+            for (const l of f._layers || []) modeLayer(f.mode).addLayer(l);
+            detectedFeatures.push(f);
+        }
+        updateDetectionLegend();
+        if (typeof updateExportButtons === 'function') updateExportButtons();
+    }
+    function trainingItemLabel(mode) { return mode === 'settlement' ? 'known settlement site' : modeFeatureName(mode).toLowerCase(); }
+    // After any change: save, and bring the map / legend / settings in line
+    function syncAfterTrainingChange() {
+        saveTrainingData(true);
+        updateTrainingSummary();
+        if (typeof refreshOutlineLayer === 'function') refreshOutlineLayer();
+        const ids = new Set(knownMounds().map(k => k.id));
+        for (const f of detectedFeatures.filter(g => g.known && !ids.has(g.known.id))) removeKnownMound(f.known.id);
+        refreshLearnedMoundSettings(false);
+        updateUndoButton();
+        if (document.getElementById('trainingReview')) renderTrainingReview();
+    }
+    function undoLastTraining() {
+        const st = trainingData._undo || [];
+        const u = st.pop();
+        const status = document.getElementById('status');
+        if (!u) { status.innerText = 'Nothing to undo.'; updateUndoButton(); return; }
+        let msg = '', replace = null;
+        const where = (ex) => ex ? ` at ${ex.lat.toFixed(5)}, ${ex.lon.toFixed(5)}` : '';
+        if (u.kind === 'example' || u.kind === 'reject') {
+            const list = u.kind === 'example' ? trainingData[u.mode].examples : trainingData[u.mode].rejected;
+            const i = list.findIndex(e => e.ts === u.ts);
+            const cur = i >= 0 ? list[i] : null;
+            if (i >= 0) { if (u.replaced) list[i] = u.replaced; else list.splice(i, 1); }
+            if (u.thresholdsBefore) { trainingData[u.mode].thresholds = u.thresholdsBefore; if (u.mode === activeThresholdMode) applyModeThresholds(u.mode); }
+            if (u.mode === 'mounds' && u.kind === 'example') { removeKnownMound('ex' + u.ts); if (u.replaced) replace = u.replaced; }
+            let back = 0;
+            if (u.kind === 'reject' && undoRemovedFeatures.has(u.at)) { const fs2 = undoRemovedFeatures.get(u.at); back = fs2.length; restoreFeatures(fs2); undoRemovedFeatures.delete(u.at); }
+            msg = u.kind === 'example' ? `Undid: confirmed ${trainingItemLabel(u.mode)}${where(cur)}.` + (u.replaced ? ' The earlier confirmation at that spot is back.' : '')
+                                       : `Undid "Not a real feature"${where(cur)}.` + (back ? ` ${back} result${back > 1 ? 's' : ''} put back on the map.` : ' Scans will show features like it again; rescan to see it.');
+        } else if (u.kind === 'outline') {
+            const o = trainingData.outlines.find(x => x.id === u.id);
+            trainingData.outlines = trainingData.outlines.filter(x => x.id !== u.id);
+            removeKnownMound(u.id);
+            msg = `Undid: ${o && o.label === 'not' ? 'look-alike' : 'mound'} outline${o && o.name ? ' "' + o.name + '"' : ''}.`;
+        } else if (u.kind === 'significance') {
+            const ex = trainingData[u.mode].examples.find(e => e.ts === u.exTs);
+            if (ex) { if (u.prev) ex.significance = u.prev; else delete ex.significance; }
+            msg = 'Undid the burial/ritual significance mark.';
+        } else if (u.kind === 'removed') {
+            const it = u.item, k = u.key;
+            if (k.list === 'outlines') trainingData.outlines.push(it);
+            else trainingData[k.mode][k.list].push(it);
+            msg = 'Undid the removal; the item is back in your training data.';
+            if ((k.list === 'outlines' && it.label === 'mound') || (k.list === 'examples' && k.mode === 'mounds')) replace = it;
+        }
+        syncAfterTrainingChange();
+        if (replace) placeKnownMound(knownMounds().find(km => approxMetersBetween(km.lat, km.lon, replace.lat != null ? replace.lat : replace.centroid[0], replace.lon != null ? replace.lon : replace.centroid[1]) < 2));
+        status.innerText = msg + ((trainingData._undo || []).length ? ` (${trainingData._undo.length} more step${trainingData._undo.length > 1 ? 's' : ''} can be undone.)` : '');
+    }
+    function updateUndoButton() {
+        const b = document.getElementById('undoTrainingBtn'); if (!b) return;
+        const n = (trainingData._undo || []).length;
+        b.disabled = !n;
+        b.innerText = n ? `↶ Undo last training change (${n})` : '↶ Undo last training change';
+    }
+    // key: { list: 'examples' | 'rejected' | 'outlines', mode, ts | id }
+    function removeTrainingItem(key) {
+        let item = null;
+        if (key.list === 'outlines') {
+            item = trainingData.outlines.find(o => o.id === key.id);
+            trainingData.outlines = trainingData.outlines.filter(o => o.id !== key.id);
+            if (item) removeKnownMound(item.id);
+        } else {
+            const list = trainingData[key.mode][key.list], i = list.findIndex(e => e.ts === key.ts);
+            if (i >= 0) item = list.splice(i, 1)[0];
+            if (item && key.mode === 'mounds' && key.list === 'examples') removeKnownMound('ex' + item.ts);
+        }
+        if (!item) return;
+        recordUndo({ kind: 'removed', key, item });
+        syncAfterTrainingChange();
+        document.getElementById('status').innerText = 'Removed from your training data. Undo can bring it back.';
+    }
+    function openTrainingReview() {
+        if (!document.getElementById('trainingReview')) {
+            const d = document.createElement('div');
+            d.id = 'trainingReview';
+            d.style.cssText = 'position:fixed;inset:0;z-index:4000;background:rgba(15,23,42,0.45);display:flex;align-items:flex-start;justify-content:center;padding:4vh 8px;box-sizing:border-box;';
+            d.onclick = (e) => { if (e.target === d) d.remove(); };
+            document.body.appendChild(d);
+        }
+        renderTrainingReview();
+    }
+    function renderTrainingReview() {
+        const d = document.getElementById('trainingReview'); if (!d) return;
+        const ft = metersToFeetInches, rows = [];
+        const dt = (ts) => ts > 1e9 ? new Date(ts).toLocaleDateString() : '';
+        for (const m of [...GEOMETRIC_MODES]) {
+            for (const ex of trainingData[m].examples) rows.push({ ts: ex.ts, lat: ex.lat, lon: ex.lon, key: { list: 'examples', mode: m, ts: ex.ts },
+                title: `Confirmed ${trainingItemLabel(m)}`, detail: `${ex.maxMetric != null ? ft(ex.maxMetric) + (m === 'caves' || m === 'ceremonial' ? ' deep, ' : ' tall, ') : ''}${ex.diameter ? ft(ex.diameter) + ' across' : ''}${ex.significance ? `; marked ${ex.significance.type}` : ''}` });
+            for (const r of trainingData[m].rejected) rows.push({ ts: r.ts, lat: r.lat, lon: r.lon, key: { list: 'rejected', mode: m, ts: r.ts },
+                title: `Not a real ${trainingItemLabel(m)}`, detail: r.features ? `${ft(r.features.heightM)}, ${ft(r.features.diameterM)} across` : '' });
+        }
+        for (const ex of trainingData.settlement.examples) rows.push({ ts: ex.ts, lat: ex.lat, lon: ex.lon, key: { list: 'examples', mode: 'settlement', ts: ex.ts },
+            title: 'Known settlement site', detail: ex.evidence ? `evidence: ${ex.evidence}` : '' });
+        for (const o of trainingData.outlines) rows.push({ ts: o.ts, lat: o.centroid[0], lon: o.centroid[1], key: { list: 'outlines', id: o.id },
+            title: o.label === 'mound' ? 'Outlined mound' : `Outlined look-alike${o.lookalike ? ' (' + o.lookalike + ')' : ''}`,
+            detail: `${o.name ? '"' + o.name + '", ' : ''}${ft(o.outline.heightM)} tall, ${ft(o.outline.eqDiameterM)} across` });
+        rows.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        window.__reviewRows = rows;
+        d.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:560px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
+            <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:8px;">
+              <b style="flex:1;">Your training data (${rows.length})</b>
+              <button onclick="undoLastTraining()" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;" ${(trainingData._undo || []).length ? '' : 'disabled'}>&#8630; Undo last</button>
+              <button onclick="document.getElementById('trainingReview').remove()" style="width:auto;margin:0;padding:4px 10px;">Close</button></div>
+            ${rows.length ? rows.map((r, i) => `<div style="padding:7px 12px;border-bottom:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;">
+              <div style="flex:1;min-width:0;"><b>${escapeHtml(r.title)}</b> <span style="color:#64748b;font-size:0.75rem;">${dt(r.ts)}</span><br>
+              <span style="font-size:0.78rem;color:#475569;">${escapeHtml(r.detail)}</span><br><span style="font-size:0.72rem;color:#94a3b8;">${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</span></div>
+              <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;" onclick="const r = window.__reviewRows[${i}]; document.getElementById('trainingReview').remove(); map.setView([r.lat, r.lon], 18);">Go to</button>
+              <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fee2e2;color:#991b1b;" onclick="removeTrainingItem(window.__reviewRows[${i}].key)">Remove</button></div>`).join('')
+              : '<div style="padding:14px;color:#64748b;">Nothing yet: confirmations, "Not a real feature" marks, outlines and settlement sites will be listed here.</div>'}</div>`;
+    }
+
     // ==== CONFIRMED MOUNDS ====
     // Mounds you have confirmed (an outline saved as a mound, "This is a
     // Mound", or the checkbox on a scan result) are proven, so they are always
@@ -2257,7 +2401,8 @@
             ${km.areaM2 ? `<b>Area / volume:</b> ${Math.round(km.areaM2 / (FT_TO_M ** 2)).toLocaleString()} ft&sup2; / ${ft3(km.volumeM3)} ft&sup3;<br>` : ''}
             ${km.shape ? `<b>Shape:</b> ${km.shape}<br>` : ''}
             ${f.scanScore != null ? `<b>This scan:</b> also detected it (Match Score ${f.scanScore}%)<br>` : (f.scanned ? `<b>This scan:</b> did not pick it out; shown because you confirmed it<br>` : '')}
-            <b>Coords:</b> ${km.lat.toFixed(5)}, ${km.lon.toFixed(5)}`;
+            <b>Coords:</b> ${km.lat.toFixed(5)}, ${km.lon.toFixed(5)}<br>
+            <a href="#" style="font-size:0.75rem;color:#b91c1c;" onclick="event.preventDefault(); map.closePopup(); ${km.src === 'outline' ? `removeTrainingItem({ list: 'outlines', id: '${km.id}' })` : `removeTrainingItem({ list: 'examples', mode: 'mounds', ts: ${km.ts} })`};">Added by mistake? Remove this confirmation</a>`;
         const marker = L.marker([km.lat, km.lon], { icon: featureIcon('mounds', true) }).bindPopup(html).addTo(layer);
         const ring = f.polygon ? f.polygon : ellipseRingLatLon(f.k, 32, f.grid).map(([lo, la]) => [la, lo]);
         const poly = L.polygon(ring, { color: MODE_STYLE.mounds.color, weight: 3, fillColor: MODE_STYLE.mounds.color, fillOpacity: 0.2, interactive: false }).addTo(layer);
@@ -2273,9 +2418,11 @@
         const near = (f) => f.mode === 'mounds' && (f.known ? f.known.id === km.id || approxMetersBetween(f.lat, f.lon, km.lat, km.lon) < Math.max(10, 0.6 * km.d)
                                                              : approxMetersBetween(f.lat, f.lon, km.lat, km.lon) < Math.max(10, 0.6 * km.d));
         let scanScore = null;
-        for (const f of detectedFeatures.filter(near)) { if (!f.known) scanScore = f.matchScore; removeFeatureLayers(f); }
+        const replacedHits = [];
+        for (const f of detectedFeatures.filter(near)) { if (!f.known) { scanScore = f.matchScore; replacedHits.push(f); } else replacedHits.push(...(f._replaced || [])); removeFeatureLayers(f); }
         detectedFeatures = detectedFeatures.filter(f => !near(f));
         const f = knownMoundFeature(km, scanScore);
+        f._replaced = replacedHits;   // put back if this confirmation is undone or removed
         renderKnownMound(f);
         detectedFeatures.push(f);
         if (!modeVisible('mounds')) toggleModeLayer('mounds', true);
@@ -2283,8 +2430,10 @@
         if (typeof updateExportButtons === 'function') updateExportButtons();
     }
     function removeKnownMound(id) {
-        for (const f of detectedFeatures.filter(f => f.known && f.known.id === id)) removeFeatureLayers(f);
+        const gone = detectedFeatures.filter(f => f.known && f.known.id === id);
+        for (const f of gone) removeFeatureLayers(f);
         detectedFeatures = detectedFeatures.filter(f => !(f.known && f.known.id === id));
+        for (const f of gone) restoreFeatures(f._replaced);   // the scan's own result for that spot comes back
         updateDetectionLegend();
     }
 
@@ -2576,6 +2725,7 @@
         rec.lookalike = rec.label === 'not' ? document.getElementById('olLook').value : '';
         rec.name = (document.getElementById('olName').value || '').trim().slice(0, 120);
         trainingData.outlines.push(rec);
+        recordUndo({ kind: 'outline', id: rec.id });
         saveTrainingData(true);
         map.removeLayer(outlinePending.layer);
         outlinePending = null;
@@ -2589,10 +2739,9 @@
             (rec.scanner ? '' : ' The scanner does not see a closed high there, so it is stored for reference but cannot be used to rank candidates.');
     }
     function deleteOutline(id) {
-        if (!confirm('Delete this outline from your training data?')) return;
-        trainingData.outlines = trainingData.outlines.filter(o => o.id !== id);
-        saveTrainingData(); map.closePopup(); refreshOutlineLayer(); updateOutlineSummary();
-        removeKnownMound(id);
+        if (!confirm('Delete this outline from your training data? (Undo can bring it back.)')) return;
+        map.closePopup();
+        removeTrainingItem({ list: 'outlines', id });
     }
     function refreshOutlineLayer() {
         if (outlineLayer) { map.removeLayer(outlineLayer); outlineLayer = null; }
@@ -3094,6 +3243,7 @@
         if (!storagePersistAsked && navigator.storage && navigator.storage.persist) { storagePersistAsked = true; navigator.storage.persist().catch(() => {}); }
         if (isNewConfirmation) autoBackupTrainingData();
         if (typeof updateBackupNote === 'function') updateBackupNote();
+        if (typeof updateUndoButton === 'function') updateUndoButton();
     }
     let trainingData = loadTrainingData();
     window.__trainingReady = true;
@@ -3248,6 +3398,7 @@
     }
     updateTrainingSummary();
     updateBackupNote();
+    updateUndoButton();
     // Restore the Mound Shape you last chose (Learned stays selected, with its
     // sliders refreshed from your confirmed mounds)
     function restoreMoundShape() {
@@ -3266,6 +3417,8 @@
         const list = trainingData[mode].examples;
         const dupIdx = list.findIndex(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
         const example = { diameter, circularity, elongation, maxMetric, lat, lon, ts: Date.now() };
+        recordUndo({ kind: 'example', mode, ts: example.ts, replaced: dupIdx >= 0 ? list[dupIdx] : null,
+                     thresholdsBefore: trainingData[mode].thresholds ? JSON.parse(JSON.stringify(trainingData[mode].thresholds)) : null });
         // what the scanner measured on it, so every confirmed mound feeds the
         // similarity ranking and the learned size ranges like for like
         if (mode === 'mounds' && template != null && isFinite(template))
@@ -3311,13 +3464,16 @@
         const dupIdx = list.findIndex(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
         // what it looked like, so later scans can avoid features like it
         const entry = { lat, lon, ts: Date.now(), features: f ? featureVector(f.k, f.diameter) : null };
+        const undoEntry = recordUndo({ kind: 'reject', mode, ts: entry.ts, replaced: dupIdx >= 0 ? list[dupIdx] : null });
         if (dupIdx >= 0) list[dupIdx] = entry; else list.push(entry);
         saveTrainingData(true);
         updateTrainingSummary();
         map.closePopup();
         // off the map and out of the legend now
-        if (f) { removeFeatureLayers(f); detectedFeatures = detectedFeatures.filter(g => g !== f); }
-        const pruned = pruneLookalikesOnMap(mode);
+        const takenOff = [];
+        if (f) { removeFeatureLayers(f); detectedFeatures = detectedFeatures.filter(g => g !== f); takenOff.push(f); }
+        const pruned = pruneLookalikesOnMap(mode, takenOff);
+        undoRemovedFeatures.set(undoEntry.at, takenOff);
         updateDetectionLegend();
         if (typeof updateExportButtons === 'function') updateExportButtons();
         document.getElementById('status').innerText = `Removed and marked as not a real feature. Scans will skip this spot, and skip or rank lower features that look like it.` +
@@ -3361,10 +3517,10 @@
     // anything you confirmed is dropped; a looser resemblance only lowers it
     const REJECT_DROP_SIM = 0.9, REJECT_PENALTY_SIM = 0.5;
     function rejectsDrop(v) { return v.neg && v.neg.sim >= REJECT_DROP_SIM && (!v.pos || v.neg.sim > v.pos.sim); }
-    function pruneLookalikesOnMap(mode) {
+    function pruneLookalikesOnMap(mode, takenOff) {
         let n = 0;
         for (const f of detectedFeatures.filter(g => g.mode === mode && !g.known && g.k)) {
-            if (rejectsDrop(similarityVerdict(mode, featureVector(f.k, f.diameter)))) { removeFeatureLayers(f); detectedFeatures = detectedFeatures.filter(g => g !== f); n++; }
+            if (rejectsDrop(similarityVerdict(mode, featureVector(f.k, f.diameter)))) { removeFeatureLayers(f); detectedFeatures = detectedFeatures.filter(g => g !== f); if (takenOff) takenOff.push(f); n++; }
         }
         return n;
     }
@@ -3406,8 +3562,9 @@
             return;
         }
         const notes = prompt('Optional notes (site record number, source of knowledge, etc.) - leave blank to skip:') || '';
+        recordUndo({ kind: 'significance', mode, exTs: ex.ts, prev: ex.significance || null });
         ex.significance = { type, notes: notes.trim(), markedTs: Date.now() };
-        saveTrainingData();
+        saveTrainingData(true);
         updateTrainingSummary();
         map.closePopup();
         document.getElementById('status').innerText = `Marked as ${type} significance - stored locally with this site's record.`;
@@ -3648,8 +3805,9 @@
             }
         }
         const example = { lat, lon, waterDistM, hand, slopeDeg, evidence: evidence.trim(), ts: Date.now() };
+        recordUndo({ kind: 'example', mode: 'settlement', ts: example.ts, replaced: dupIdx >= 0 ? list[dupIdx] : null, thresholdsBefore: null });
         if (dupIdx >= 0) list[dupIdx] = example; else list.push(example);
-        saveTrainingData();
+        saveTrainingData(true);
         updateTrainingSummary();
         map.closePopup();
         document.getElementById('status').innerText = waterDistM !== null
