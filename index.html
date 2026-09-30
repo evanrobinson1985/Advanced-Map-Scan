@@ -2667,20 +2667,6 @@
     function trainingNegatives() {
         return trainingData.outlines.filter(o => o.label === 'not' && o.scanner).map(o => ({ s: o.scanner, name: o.name || '', lookalike: o.lookalike }));
     }
-    // Closest match among your mounds and among your look-alikes: { sim 0-1, rec }
-    function outlineSimilarity(k) {
-        const d = k._sizeD || 2 * Math.sqrt(k.area / Math.PI), h = k.maxMetric;
-        const simTo = (s) => {
-            const t = [Math.log(d / s.diameterM) / 0.35, Math.log(Math.max(0.05, h) / Math.max(0.05, s.heightM)) / 0.4, (k.circularity - s.circularity) / 0.1,
-                       Math.log(Math.max(1, k.elongation) / Math.max(1, s.elongation)) / 0.3,
-                       k._template != null ? (k._template - s.template) / 0.15 : 0, k._gs != null ? (k._gs - s.groundSlopeDeg) / 6 : 0];
-            return Math.exp(-t.reduce((a2, v) => a2 + v * v, 0) / t.length);
-        };
-        let mound = null, not = null;
-        for (const p of trainingPositives()) { const sim = simTo(p.s); if (!mound || sim > mound.sim) mound = { sim, rec: p }; }
-        for (const p of trainingNegatives()) { const sim = simTo(p.s); if (!not || sim > not.sim) not = { sim, rec: p }; }
-        return { mound, not };
-    }
     // The best scan ranges for mounds like yours: everything your confirmed
     // mounds span, plus a safety margin that is wide with few examples and
     // tightens as you add more (15% + 50%/sqrt(N)); with 20 or more, the 5th
@@ -3320,14 +3306,67 @@
     // like, it only rules out this one specific location.
     function markNotReal(mode, lat, lon, ev) {
         if (ev) { ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); }
+        const f = detectedFeatures.find(g => g.mode === mode && !g.known && approxMetersBetween(g.lat, g.lon, lat, lon) < 1);
         const list = trainingData[mode].rejected;
         const dupIdx = list.findIndex(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
-        const entry = { lat, lon, ts: Date.now() };
+        // what it looked like, so later scans can avoid features like it
+        const entry = { lat, lon, ts: Date.now(), features: f ? featureVector(f.k, f.diameter) : null };
         if (dupIdx >= 0) list[dupIdx] = entry; else list.push(entry);
         saveTrainingData(true);
         updateTrainingSummary();
         map.closePopup();
-        document.getElementById('status').innerText = 'Marked as not a real feature - future scans near this spot will flag it as previously ruled out, rather than showing it fresh again.';
+        // off the map and out of the legend now
+        if (f) { removeFeatureLayers(f); detectedFeatures = detectedFeatures.filter(g => g !== f); }
+        const pruned = pruneLookalikesOnMap(mode);
+        updateDetectionLegend();
+        if (typeof updateExportButtons === 'function') updateExportButtons();
+        document.getElementById('status').innerText = `Removed and marked as not a real feature. Scans will skip this spot, and skip or rank lower features that look like it.` +
+            (pruned ? ` ${pruned} other result${pruned > 1 ? 's' : ''} on the map that closely matched it ${pruned > 1 ? 'were' : 'was'} removed too.` : '');
+    }
+
+    // ---- Similarity to what you have confirmed or rejected ----
+    // A feature is described the way the scanner measures it: width, height
+    // (or depth), roundness, stretch, and for mounds the template match and
+    // ground slope. Features you marked "Not a real feature" keep that
+    // description, so scans can avoid features like them.
+    function featureVector(k, diameter) {
+        return { diameterM: diameter || k._sizeD || 2 * Math.sqrt(k.area / Math.PI), heightM: k.maxMetric, circularity: k.circularity, elongation: k.elongation,
+                 template: k._template != null ? k._template : null, groundSlopeDeg: k._gs != null ? k._gs : null };
+    }
+    function featureSimilarity(a, b) {
+        const t = [Math.log(Math.max(0.1, a.diameterM) / Math.max(0.1, b.diameterM)) / 0.35,
+                   Math.log(Math.max(0.05, a.heightM) / Math.max(0.05, b.heightM)) / 0.4,
+                   (a.circularity - b.circularity) / 0.1,
+                   Math.log(Math.max(1, a.elongation) / Math.max(1, b.elongation)) / 0.3];
+        if (a.template != null && b.template != null) t.push((a.template - b.template) / 0.15);
+        if (a.groundSlopeDeg != null && b.groundSlopeDeg != null) t.push((a.groundSlopeDeg - b.groundSlopeDeg) / 6);
+        return Math.exp(-t.reduce((s2, v) => s2 + v * v, 0) / t.length);
+    }
+    // Closest confirmed-real and closest rejected example for a feature of
+    // this mode: { pos: { sim, name } | null, neg: { sim, name, kind } | null }
+    function similarityVerdict(mode, vec) {
+        let pos = null, neg = null;
+        const posList = mode === 'mounds' ? trainingPositives().map(p => ({ v: p.s, name: p.name }))
+            : trainingData[mode].examples.map(ex => ({ v: { diameterM: ex.diameter, heightM: ex.maxMetric, circularity: ex.circularity, elongation: ex.elongation }, name: 'confirmed ' + modeFeatureName(mode).toLowerCase() }));
+        const negList = [
+            ...(mode === 'mounds' ? trainingNegatives().map(p => ({ v: p.s, name: p.name, kind: 'your look-alike outline' + (p.lookalike ? ` (${p.lookalike})` : '') })) : []),
+            ...trainingData[mode].rejected.filter(r => r.features).map(r => ({ v: r.features, name: '', kind: `a feature you marked not real (${new Date(r.ts).toLocaleDateString()})` })),
+        ];
+        for (const p of posList) { const sim = featureSimilarity(vec, p.v); if (!pos || sim > pos.sim) pos = { sim, name: p.name }; }
+        for (const p of negList) { const sim = featureSimilarity(vec, p.v); if (!neg || sim > neg.sim) neg = { sim, name: p.name, kind: p.kind }; }
+        return { pos, neg };
+    }
+    // Rule shared by scans and by "Not a real feature": a feature that closely
+    // matches something you rejected (90%+) and resembles it more than
+    // anything you confirmed is dropped; a looser resemblance only lowers it
+    const REJECT_DROP_SIM = 0.9, REJECT_PENALTY_SIM = 0.5;
+    function rejectsDrop(v) { return v.neg && v.neg.sim >= REJECT_DROP_SIM && (!v.pos || v.neg.sim > v.pos.sim); }
+    function pruneLookalikesOnMap(mode) {
+        let n = 0;
+        for (const f of detectedFeatures.filter(g => g.mode === mode && !g.known && g.k)) {
+            if (rejectsDrop(similarityVerdict(mode, featureVector(f.k, f.diameter)))) { removeFeatureLayers(f); detectedFeatures = detectedFeatures.filter(g => g !== f); n++; }
+        }
+        return n;
     }
 
     // Marks an ALREADY-confirmed cave or shelter with known burial or
@@ -4204,15 +4243,9 @@
         const reliefFit = Math.min(1, k.maxMetric / (minMetric * 3));
         const baseScore = Math.min(1, Math.max(0, 0.4*k.circularity + 0.3*sizeFit + 0.3*reliefFit));
 
-        let bestSim = 0;
-        for (const ex of trainingData[mode].examples) {
-            const dD = (diameter - ex.diameter) / 10;
-            const dC = (k.circularity - ex.circularity) / 0.15;
-            const dE = (k.elongation - ex.elongation) / 1.0;
-            const sim = Math.exp(-(dD*dD + dC*dC + dE*dE) / 2);
-            if (sim > bestSim) bestSim = sim;
-        }
-        const withTraining = baseScore + (1 - baseScore) * bestSim * 0.5; // boost-only blend
+        // (similarity to your confirmed and rejected examples is applied by
+        // the ranking step, via similarityVerdict)
+        const withTraining = baseScore;
 
         // Real cave entrances and mound sites both cluster near water (springs/
         // resurgences for caves; drinking water, transport, and fertile
@@ -6719,7 +6752,7 @@
         //  4. show the top "Max results per mode".
         const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
         const spacingM = { basecamp: 60, huntcamp: 60, shelter: 40, mounds: 25, caves: 10, ceremonial: 15, entrance: 40 }[mode] || 20;
-        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0;
+        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0, resembledCount = 0;
         const ranked = [];
         for (const k of filtered) {
             // mounds on tilted ground are placed and sized by their full footprint
@@ -6747,19 +6780,19 @@
             let base = scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue);
             // Mounds: a good template fit that survives the error runs raises the score
             if (mode === 'mounds' && k._template != null) base = Math.round(base + (100 - base) * Math.max(0, k._template - 0.5) * 1.2 * k._persist);
-            if (mode === 'mounds' && trainingData.outlines.length) {
-                // inside one of your look-alike outlines: skip, like a spot marked not real
-                if (trainingData.outlines.some(o => o.label === 'not' && pointInPoly(lon, lat, o.polygon.map(([a2, b2]) => [b2, a2])))) { suppressedCount++; continue; }
-                const sm = outlineSimilarity(k);
-                k._simHtml = '';
-                if (sm.mound && sm.mound.sim > 0.2) {
-                    base = Math.round(base + (100 - base) * 0.5 * sm.mound.sim);
-                    k._simHtml += `<b>Like your outlined mound:</b> ${escapeHtml(sm.mound.rec.name || 'unnamed')} (${Math.round(sm.mound.sim * 100)}% similar)<br>`;
-                }
-                if (sm.not && sm.not.sim > 0.5 && (!sm.mound || sm.not.sim > sm.mound.sim)) {
-                    base = Math.round(base * (1 - 0.5 * sm.not.sim));
-                    k._simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles your look-alike outline ${escapeHtml(sm.not.rec.name || '')} (${escapeHtml(sm.not.rec.lookalike || 'not a mound')}, ${Math.round(sm.not.sim * 100)}% similar)</div>`;
-                }
+            // inside one of your look-alike outlines: skip, like a spot marked not real
+            if (mode === 'mounds' && trainingData.outlines.some(o => o.label === 'not' && pointInPoly(lon, lat, o.polygon.map(([a2, b2]) => [b2, a2])))) { suppressedCount++; continue; }
+            // like what you confirmed: higher; like what you rejected: lower, or skipped when it closely matches
+            k._simHtml = '';
+            const sv = similarityVerdict(mode, featureVector(k, diameter));
+            if (rejectsDrop(sv)) { resembledCount++; continue; }
+            if (sv.pos && sv.pos.sim > 0.2) {
+                base = Math.round(base + (100 - base) * 0.5 * sv.pos.sim);
+                if (sv.pos.sim > 0.5) k._simHtml += `<b>Like your ${escapeHtml(sv.pos.name || 'confirmed feature')}</b> (${Math.round(sv.pos.sim * 100)}% similar)<br>`;
+            }
+            if (sv.neg && sv.neg.sim > REJECT_PENALTY_SIM && (!sv.pos || sv.neg.sim > sv.pos.sim)) {
+                base = Math.round(base * (1 - 0.5 * sv.neg.sim));
+                k._simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles ${escapeHtml(sv.neg.kind)}${sv.neg.name ? ' ' + escapeHtml(sv.neg.name) : ''} (${Math.round(sv.neg.sim * 100)}% similar), so it is ranked lower</div>`;
             }
             ranked.push({ k, lat, lon, diameter, base });
         }
@@ -6852,7 +6885,7 @@
                                 <b>Circularity:</b> ${k.circularity.toFixed(2)}<br>
                                 <b>Elongation:</b> ${k.elongation.toFixed(2)}&times;<br>
                                 <b>Fill Ratio:</b> ${k.fillRatio.toFixed(2)}<br>
-                                ${flankSlopeLine}${shapePresetLine}${mode === 'mounds' && k._simHtml ? k._simHtml : ''}${extra ? extra.html : ''}<b>Match Score:</b> ${matchScore}%<br>
+                                ${flankSlopeLine}${shapePresetLine}${k._simHtml || ''}${extra ? extra.html : ''}<b>Match Score:</b> ${matchScore}%<br>
                                 <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}
                                 ${shapeWarning}${confirmHtml}${significanceHtml}`;
 
@@ -6902,6 +6935,7 @@
             (droppedCount ? `; ${droppedCount} failed a required check` : '') +
             (heldBackCount ? `; ${heldBackCount} lower-ranked candidate(s) held back (raise Max results per mode to see them)` : '') +
             (suppressedCount > 0 ? `; ${suppressedCount} matched a spot you marked not real` : '') +
+            (resembledCount > 0 ? `; ${resembledCount} closely resembled features you marked not real and were skipped` : '') +
             (moundUnchecked ? `; ${moundUnchecked} weaker mound candidate(s) were not tested (only the best 400 get the LiDAR-error test; zoom in to scan a smaller area)` : '') + '.' +
             (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '') +
             (!scanAllActive && detectedFeatures.some(f => f.mode !== mode) ? ' Results from your other scans are still shown (see the legend, top left).' : '');
