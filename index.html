@@ -242,6 +242,7 @@
                 <option value="platform">Platform / Rectangular only</option>
                 <option value="broad">Broad / Any (single quick scan)</option>
                 <option value="custom">Custom (use sliders below)</option>
+                <option value="learned" disabled>Learned from my confirmed mounds (needs 5)</option>
             </select>
             <div class="slider-row" style="margin-top:6px;">
                 <label>Min template match</label>
@@ -278,9 +279,7 @@
                     <option value="off">Don't look</option>
                 </select>
             </div>
-            <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem; margin:6px 0 2px;">
-                <input type="checkbox" id="moundUseLearned" disabled> Use size ranges learned from my outlined mounds <span id="moundUseLearnedNote" style="color:#94a3b8;"></span>
-            </label>
+
             <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:4px; line-height:1.35;">The earth for a mound was dug close by, and the holes often survive: pits beside the mound (often holding water) or a ditch around it. The ground out to twice the mound's width past its base is searched; gullies and streams are ignored, and steep cone-shaped holes are flagged as possible natural sinkholes. Pits are drawn as dashed blue circles.</div>
             <div style="font-size:0.68rem; color:#94a3b8; margin-top:4px; line-height:1.35;">All Shapes runs both dedicated Conical and Platform scans and merges the results - most thorough, roughly 2x the scan time of a single shape. Broad/Any is a faster single compromise scan. Circularity/Diameter/Height/Trend Radius come from published size ranges for each type (see chat for sourcing and caveats) - a perfect square already measures ~0.79 on the Circularity scale, close to a circle's 1.0, so "round" and "square" genuinely overlap here, these bias toward one shape rather than cleanly separating them. Max Circularity and Flank Slope only flag a candidate as unusual, they don't exclude it - a real, well-built mound can legitimately be steeper or more compact than a generic rule predicts. Selecting a specific shape (not "All" or "Custom") overwrites the sliders below; your own confirmed examples remain the more reliable calibration once you have some.</div>
         </div>
@@ -643,6 +642,7 @@
     <div class="control-group">
         <h4>5. Training Data</h4>
         <div id="trainingSummary" style="font-size:0.85rem; text-align:center; margin-bottom:8px; color:#334155;">Confirmed: 0 cave/sinkhole, 0 mound example(s)</div>
+        <div id="backupNote" style="font-size:0.74rem; text-align:center; margin-bottom:8px; color:#475569; line-height:1.4;"></div>
         <button onclick="exportTrainingData()">Export Training Data</button>
         <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importTrainingData(this)">
         <button onclick="document.getElementById('importFileInput').click()">Import Training Data</button>
@@ -797,11 +797,12 @@
         if (!modeLayers[mode]) { modeLayers[mode] = L.layerGroup(); detectedFeaturesLayer.addLayer(modeLayers[mode]); }
         return modeLayers[mode];
     }
-    function featureIcon(mode) {
+    function featureIcon(mode, confirmed) {
         const st = MODE_STYLE[mode] || { color: '#475569', letter: '?' };
+        const badge = confirmed ? `<div style="position:absolute;right:-6px;top:-6px;background:#16a34a;color:#fff;width:13px;height:13px;border-radius:50%;border:1.5px solid #fff;font:bold 9px/13px sans-serif;text-align:center;">&#10003;</div>` : '';
         return L.divIcon({
             className: 'det-icon',
-            html: `<div style="background:${st.color};color:#fff;width:20px;height:20px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5);font:bold 11px/20px sans-serif;text-align:center;">${st.letter}</div>`,
+            html: `<div style="position:relative;background:${st.color};color:#fff;width:20px;height:20px;border-radius:50%;border:2px solid ${confirmed ? '#16a34a' : '#fff'};box-shadow:0 1px 4px rgba(0,0,0,0.5);font:bold 11px/20px sans-serif;text-align:center;">${st.letter}${badge}</div>`,
             iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12]
         });
     }
@@ -2114,6 +2115,89 @@
         }
     }
 
+    // ==== CONFIRMED MOUNDS ====
+    // Mounds you have confirmed (an outline saved as a mound, "This is a
+    // Mound", or the checkbox on a scan result) are proven, so they are always
+    // shown as mounds: placed on the map as soon as you confirm them, and
+    // added by every later mound scan that covers them, with the size you
+    // recorded, whether or not the scan picks them out. A scan hit on the same
+    // mound is merged into it rather than counted twice. Confirmations that
+    // are impossibly large or irregular for a mound (e.g. a whole spur saved
+    // by an older version of the check) are left off.
+    function knownMounds() {
+        const list = [];
+        const maxD = feetToMeters(Math.max(moundShapePresetDefs().platform.maxDiameter, moundShapePresetDefs().conical.maxDiameter));
+        for (const o of trainingData.outlines) if (o.label === 'mound' && o.outline) {
+            const O = o.outline;
+            list.push({ id: o.id, src: 'outline', lat: o.centroid[0], lon: o.centroid[1], d: O.eqDiameterM, h: O.heightM, circ: O.roundness, elong: O.elongation,
+                        bearing: O.longAxisBearing, lengthM: O.lengthM, widthM: O.widthM, areaM2: O.areaM2, volumeM3: O.volumeM3, shape: O.shape,
+                        name: o.name, ts: o.ts, polygon: o.polygon });
+        }
+        for (const ex of trainingData.mounds.examples) {
+            if (!(ex.diameter > 0) || ex.diameter > maxD || !(ex.circularity >= 0.2) || ex.elongation > 4) continue;
+            if (list.some(k => approxMetersBetween(k.lat, k.lon, ex.lat, ex.lon) < Math.max(10, 0.6 * k.d))) continue;
+            list.push({ id: 'ex' + ex.ts, src: 'check', lat: ex.lat, lon: ex.lon, d: ex.diameter, h: ex.maxMetric, circ: ex.circularity, elong: ex.elongation,
+                        name: ex.name || '', ts: ex.ts });
+        }
+        return list;
+    }
+    // A detectedFeatures entry for a confirmed mound. It carries its own
+    // one-cell grid centred on the mound, so exports and the 3D view work
+    // whether or not a DTM covering it is loaded.
+    function knownMoundFeature(km, scanScore) {
+        const dLat = 1 / 111320, dLon = 1 / (111320 * Math.cos(km.lat * Math.PI / 180));
+        const grid = { bounds: { n: km.lat + dLat / 2, s: km.lat - dLat / 2, w: km.lon - dLon / 2, e: km.lon + dLon / 2 }, w: 1, h: 1, res: 1 };
+        const b = (km.bearing || 0) * Math.PI / 180;
+        const k = { centroidR: 0.5, centroidC: 0.5, area: Math.PI * (km.d / 2) ** 2, count: 1, maxMetric: km.h, sumMetric: 0,
+                    circularity: km.circ || 0.6, elongation: Math.max(1, km.elong || 1), orientation: Math.atan2(Math.sin(b), -Math.cos(b)),
+                    fillRatio: 1, maxFlankSlope: 0, _sizeD: km.d };
+        return { mode: 'mounds', k, lat: km.lat, lon: km.lon, diameter: km.d, matchScore: 100, grid, known: km, polygon: km.polygon || null, scanScore: scanScore ?? null };
+    }
+    // Ring for exports: the outline you drew when there is one, else the ellipse
+    function featureRing(f) {
+        return f.polygon ? [...f.polygon, f.polygon[0]].map(([la, lo]) => [lo, la]) : ellipseRingLatLon(f.k, 32, f.grid);
+    }
+    function renderKnownMound(f) {
+        const km = f.known, ft = metersToFeetInches, layer = modeLayer('mounds');
+        const ft3 = (m3) => Math.round(m3 / (FT_TO_M ** 3)).toLocaleString();
+        const html = `<b>Confirmed mound</b> <span style="color:#16a34a;">&#10003;</span>${km.name ? ` &mdash; ${escapeHtml(km.name)}` : ''}<br>
+            <i style="color:#64748b">From your training data (${km.src === 'outline' ? 'outline you drew' : 'confirmed with the mound check'}, ${new Date(km.ts).toLocaleDateString()})</i><br>
+            <b>Height:</b> ${ft(km.h)}<br>
+            <b>Across:</b> ${ft(km.d)}${km.lengthM ? ` (${ft(km.lengthM)} long &times; ${ft(km.widthM)} wide, long axis ${km.bearing}&deg;)` : ''}<br>
+            ${km.areaM2 ? `<b>Area / volume:</b> ${Math.round(km.areaM2 / (FT_TO_M ** 2)).toLocaleString()} ft&sup2; / ${ft3(km.volumeM3)} ft&sup3;<br>` : ''}
+            ${km.shape ? `<b>Shape:</b> ${km.shape}<br>` : ''}
+            ${f.scanScore != null ? `<b>This scan:</b> also detected it (Match Score ${f.scanScore}%)<br>` : (f.scanned ? `<b>This scan:</b> did not pick it out; shown because you confirmed it<br>` : '')}
+            <b>Coords:</b> ${km.lat.toFixed(5)}, ${km.lon.toFixed(5)}`;
+        const marker = L.marker([km.lat, km.lon], { icon: featureIcon('mounds', true) }).bindPopup(html).addTo(layer);
+        const ring = f.polygon ? f.polygon : ellipseRingLatLon(f.k, 32, f.grid).map(([lo, la]) => [la, lo]);
+        const poly = L.polygon(ring, { color: MODE_STYLE.mounds.color, weight: 3, fillColor: MODE_STYLE.mounds.color, fillOpacity: 0.2, interactive: false }).addTo(layer);
+        f._layers = [marker, poly];
+    }
+    function removeFeatureLayers(f) {
+        for (const l of f._layers || []) for (const m in modeLayers) modeLayers[m].removeLayer(l);
+    }
+    // Put a confirmed mound on the map now, replacing any scan result or
+    // earlier confirmed marker for the same mound
+    function placeKnownMound(km) {
+        if (!km) return;
+        const near = (f) => f.mode === 'mounds' && (f.known ? f.known.id === km.id || approxMetersBetween(f.lat, f.lon, km.lat, km.lon) < Math.max(10, 0.6 * km.d)
+                                                             : approxMetersBetween(f.lat, f.lon, km.lat, km.lon) < Math.max(10, 0.6 * km.d));
+        let scanScore = null;
+        for (const f of detectedFeatures.filter(near)) { if (!f.known) scanScore = f.matchScore; removeFeatureLayers(f); }
+        detectedFeatures = detectedFeatures.filter(f => !near(f));
+        const f = knownMoundFeature(km, scanScore);
+        renderKnownMound(f);
+        detectedFeatures.push(f);
+        if (!modeVisible('mounds')) toggleModeLayer('mounds', true);
+        updateDetectionLegend();
+        if (typeof updateExportButtons === 'function') updateExportButtons();
+    }
+    function removeKnownMound(id) {
+        for (const f of detectedFeatures.filter(f => f.known && f.known.id === id)) removeFeatureLayers(f);
+        detectedFeatures = detectedFeatures.filter(f => !(f.known && f.known.id === id));
+        updateDetectionLegend();
+    }
+
     // ==== OUTLINE TOOL: hand-drawn training outlines ====
     // You trace a mound's base (where it meets the natural ground), or a
     // look-alike that is NOT a mound (tree throw, boulder, spoil pile...).
@@ -2402,13 +2486,15 @@
         rec.lookalike = rec.label === 'not' ? document.getElementById('olLook').value : '';
         rec.name = (document.getElementById('olName').value || '').trim().slice(0, 120);
         trainingData.outlines.push(rec);
-        saveTrainingData();
+        saveTrainingData(true);
         map.removeLayer(outlinePending.layer);
         outlinePending = null;
         map.closePopup();
         outlineLayerShown = true;
         refreshOutlineLayer();
         updateOutlineSummary();
+        if (rec.label === 'mound') placeKnownMound(knownMounds().find(k => k.id === rec.id));
+        refreshLearnedMoundSettings(true);
         document.getElementById('status').innerText = `Saved ${rec.label === 'mound' ? 'mound' : 'look-alike'} outline${rec.name ? ' "' + rec.name + '"' : ''}.` +
             (rec.scanner ? '' : ' The scanner does not see a closed high there, so it is stored for reference but cannot be used to rank candidates.');
     }
@@ -2416,6 +2502,7 @@
         if (!confirm('Delete this outline from your training data?')) return;
         trainingData.outlines = trainingData.outlines.filter(o => o.id !== id);
         saveTrainingData(); map.closePopup(); refreshOutlineLayer(); updateOutlineSummary();
+        removeKnownMound(id);
     }
     function refreshOutlineLayer() {
         if (outlineLayer) { map.removeLayer(outlineLayer); outlineLayer = null; }
@@ -2441,8 +2528,7 @@
         const m = trainingData.outlines.filter(o => o.label === 'mound'), n = trainingData.outlines.length - m.length;
         const usable = m.filter(o => o.scanner).length;
         el.innerText = `Outlined: ${m.length} mound${m.length === 1 ? '' : 's'} (${usable} the scanner can see), ${n} look-alike${n === 1 ? '' : 's'}.`;
-        const cb = document.getElementById('moundUseLearned');
-        if (cb) { cb.disabled = usable < 5; if (usable < 5) cb.checked = false; document.getElementById('moundUseLearnedNote').innerText = usable < 5 ? `(needs 5 outlined mounds the scanner can see; you have ${usable})` : `(from ${usable} outlined mounds)`; }
+        refreshLearnedMoundSettings(false);
     }
     function exportOutlines() {
         if (!trainingData.outlines.length) { document.getElementById('status').innerText = 'No outlines to export yet.'; return; }
@@ -2476,35 +2562,93 @@
         reader.readAsText(file);
     }
 
-    // ---- Using the outlines in the mound scan ----
-    // Similarity of a scan candidate to your outlined mounds and look-alikes,
-    // compared on what the scanner measures in both (size, height, shape,
-    // template fit, ground slope). Returns { mound, not } with the closest
-    // match of each kind ({ sim 0-1, rec }) or null.
+    // ---- Learning from your confirmations ----
+    // Every mound you confirm (outline, "This is a Mound", or the checkbox on
+    // a scan result) that the scanner can measure becomes a training example,
+    // compared on what the scanner measures (size, height, shape, template
+    // fit, ground slope). Look-alike outlines are the counter-examples.
+    function trainingPositives() {
+        const list = [];
+        for (const o of trainingData.outlines) if (o.label === 'mound' && o.scanner) list.push({ s: o.scanner, name: o.name || 'outlined mound', lat: o.centroid[0], lon: o.centroid[1] });
+        for (const ex of trainingData.mounds.examples) if (ex.scanner && !list.some(p => approxMetersBetween(p.lat, p.lon, ex.lat, ex.lon) < 10))
+            list.push({ s: ex.scanner, name: ex.name || `confirmed mound (${new Date(ex.ts).toLocaleDateString()})`, lat: ex.lat, lon: ex.lon });
+        return list;
+    }
+    function trainingNegatives() {
+        return trainingData.outlines.filter(o => o.label === 'not' && o.scanner).map(o => ({ s: o.scanner, name: o.name || '', lookalike: o.lookalike }));
+    }
+    // Closest match among your mounds and among your look-alikes: { sim 0-1, rec }
     function outlineSimilarity(k) {
         const d = k._sizeD || 2 * Math.sqrt(k.area / Math.PI), h = k.maxMetric;
-        let mound = null, not = null;
-        for (const o of trainingData.outlines) {
-            const s = o.scanner; if (!s) continue;
+        const simTo = (s) => {
             const t = [Math.log(d / s.diameterM) / 0.35, Math.log(Math.max(0.05, h) / Math.max(0.05, s.heightM)) / 0.4, (k.circularity - s.circularity) / 0.1,
                        Math.log(Math.max(1, k.elongation) / Math.max(1, s.elongation)) / 0.3,
                        k._template != null ? (k._template - s.template) / 0.15 : 0, k._gs != null ? (k._gs - s.groundSlopeDeg) / 6 : 0];
-            const sim = Math.exp(-0.5 * t.reduce((a, v) => a + v * v, 0) / t.length * 2);
-            const slot = o.label === 'mound' ? 'mound' : 'not';
-            if (slot === 'mound' ? (!mound || sim > mound.sim) : (!not || sim > not.sim)) (slot === 'mound' ? (mound = { sim, rec: o }) : (not = { sim, rec: o }));
-        }
+            return Math.exp(-t.reduce((a2, v) => a2 + v * v, 0) / t.length);
+        };
+        let mound = null, not = null;
+        for (const p of trainingPositives()) { const sim = simTo(p.s); if (!mound || sim > mound.sim) mound = { sim, rec: p }; }
+        for (const p of trainingNegatives()) { const sim = simTo(p.s); if (!not || sim > not.sim) not = { sim, rec: p }; }
         return { mound, not };
     }
-    // Size classes from your outlined mounds (opt-in): each limit set just
-    // outside the range the scanner measured on them. This narrows as well as
-    // widens, which is why it is a deliberate switch.
-    function moundLearnedPresets() {
-        const S = trainingData.outlines.filter(o => o.label === 'mound' && o.scanner).map(o => o.scanner);
-        if (S.length < 5) return null;
-        const mn = (f) => Math.min(...S.map(f)), mx = (f) => Math.max(...S.map(f));
-        return [{ name: 'learned', minHeight: Math.max(0.5, metersToFeet(mn(s => s.heightM)) * 0.85), minDiameter: Math.max(6, metersToFeet(mn(s => s.diameterM)) * 0.85),
-                  maxDiameter: metersToFeet(mx(s => s.diameterM)) * 1.25, minCircularity: Math.max(0.2, mn(s => s.circularity) - 0.05), maxCircularity: 1,
-                  maxElongation: Math.max(1.2, mx(s => s.elongation) * 1.15 / 1.3), maxFlankSlope: 70, trendRadius: 40 }];
+    // The best scan ranges for mounds like yours: everything your confirmed
+    // mounds span, plus a safety margin that is wide with few examples and
+    // tightens as you add more (15% + 50%/sqrt(N)); with 20 or more, the 5th
+    // and 95th percentiles are used, so one odd example can't stretch them.
+    const LEARN_MIN_EXAMPLES = 5;
+    function learnedMoundRanges() {
+        const S = trainingPositives().map(p => p.s);
+        const N = S.length;
+        if (N < LEARN_MIN_EXAMPLES) return null;
+        const m = 0.15 + 0.5 / Math.sqrt(N);
+        const q = (arr, p) => { const a2 = arr.slice().sort((x, y) => x - y); if (N < 20) return p < 0.5 ? a2[0] : a2[a2.length - 1]; const i = (a2.length - 1) * p, lo = Math.floor(i); return a2[lo] + (a2[Math.min(a2.length - 1, lo + 1)] - a2[lo]) * (i - lo); };
+        const h = S.map(s => s.heightM), dd = S.map(s => s.diameterM), c = S.map(s => s.circularity), e = S.map(s => Math.max(1, s.elongation)),
+              tm = S.map(s => s.template), hw = S.map(s => s.heightM / s.diameterM);
+        return {
+            n: N, margin: m,
+            minHeightFt: Math.max(0.5, metersToFeet(q(h, 0.05)) * (1 - m)),
+            minDiameterFt: Math.max(6, metersToFeet(q(dd, 0.05)) * (1 - m)),
+            maxDiameterFt: Math.min(1000, metersToFeet(q(dd, 0.95)) * (1 + m)),
+            minCircularity: Math.max(0.2, q(c, 0.05) - m / 2),
+            maxElongation: Math.max(1.2, q(e, 0.95) * (1 + m) / 1.3),   // the scan allows 1.3x the class's elongation
+            minTemplate: Math.min(0.85, Math.max(0.4, q(tm, 0.05) - m / 2)),
+            minHW: Math.max(0.01, q(hw, 0.05) * (1 - m)),
+        };
+    }
+    // Puts the learned ranges into the Mound settings sliders, where you can
+    // see and adjust them
+    function applyLearnedToSliders(L2) {
+        const set = (id, v, fmt) => { const el = document.getElementById(id); el.value = v; fmt(); };
+        set('minHeight', Math.round(L2.minHeightFt * 4) / 4, () => updateLengthVal('minHeight'));
+        set('minDiameter', Math.round(L2.minDiameterFt), () => updateLengthVal('minDiameter'));
+        set('maxDiameter', Math.round(L2.maxDiameterFt / 5) * 5, () => updateLengthVal('maxDiameter'));
+        set('minCircularity', Math.round(L2.minCircularity * 20) / 20, () => updateThresholdVal('minCircularity', '', 2));
+        set('maxCircularity', 1, () => updateThresholdVal('maxCircularity', '', 2));
+        set('maxElongation', Math.round(L2.maxElongation * 10) / 10, () => updateThresholdVal('maxElongation', '×', 1));
+        set('moundMinTemplate', Math.round(L2.minTemplate * 20) / 20, () => updateThresholdVal('moundMinTemplate', '', 2));
+        set('moundMinHW', Math.round(L2.minHW * 200) / 200, () => updateThresholdVal('moundMinHW', '', 3));
+        saveCurrentSlidersToMode('mounds');
+    }
+    // Keeps the "Learned" choice in the Mound Shape list current. The first
+    // time enough examples exist it is selected automatically; afterwards,
+    // while it stays selected, new confirmations update the sliders.
+    function refreshLearnedMoundSettings(announce) {
+        const sel = document.getElementById('moundShapeMode'); if (!sel) return;
+        const opt = sel.querySelector('option[value="learned"]');
+        const L2 = learnedMoundRanges();
+        const n = trainingPositives().length;
+        opt.disabled = !L2;
+        opt.textContent = L2 ? `Learned from my ${n} confirmed mounds (recommended)` : `Learned from my confirmed mounds (needs ${LEARN_MIN_EXAMPLES}; you have ${n})`;
+        if (!L2) { if (sel.value === 'learned') sel.value = 'all'; return; }
+        const prefs = trainingData.prefs || (trainingData.prefs = {});
+        if (!prefs.learnedOffered) { prefs.learnedOffered = true; prefs.moundShape = 'learned'; sel.value = 'learned'; window.__prevMoundShape = 'learned'; saveTrainingData(); }
+        if (sel.value === 'learned') {
+            applyLearnedToSliders(L2);
+            document.getElementById('geometricThresholdsGroup').querySelectorAll('.slider-row').forEach(row => { row.style.opacity = '1'; });
+            if (announce) document.getElementById('status').innerText =
+                `Mound settings updated from your ${L2.n} confirmed mounds: ${metersToFeetInches(feetToMeters(L2.minHeightFt))}+ tall, ` +
+                `${metersToFeetInches(feetToMeters(L2.minDiameterFt))} to ${metersToFeetInches(feetToMeters(L2.maxDiameterFt))} across, roundness ${L2.minCircularity.toFixed(2)}+, template ${L2.minTemplate.toFixed(2)}+. Adjust any slider, or choose another Mound Shape to go back to the built-in presets.`;
+        }
     }
 
     // Overlays candidate GeoJSON produced by pipeline/karst_pipeline.py (or
@@ -2697,11 +2841,21 @@
     // like the old preset buttons did, so it's still visible and adjustable.
     function onMoundShapeModeChange() {
         const mode = document.getElementById('moundShapeMode').value;
-        const slidersRelevant = (mode !== 'all' && mode !== 'custom');
+        if (window.__trainingReady) {   // remembered across sessions (not during start-up)
+            (trainingData.prefs || (trainingData.prefs = {})).moundShape = mode;
+            saveTrainingData();
+        }
+        const slidersRelevant = (mode !== 'all');
         document.getElementById('geometricThresholdsGroup').querySelectorAll('.slider-row').forEach(row => {
             row.style.opacity = slidersRelevant ? '1' : '0.45';
         });
         if (mode === 'conical' || mode === 'platform' || mode === 'broad') applyMoundPreset(mode);
+        if (mode === 'learned') { window.__prevMoundShape = mode; refreshLearnedMoundSettings(true); return; }
+        if (window.__prevMoundShape === 'learned') {   // back to the built-in template / height:width defaults
+            document.getElementById('moundMinTemplate').value = 0.6; updateThresholdVal('moundMinTemplate', '', 2);
+            document.getElementById('moundMinHW').value = 0.03; updateThresholdVal('moundMinHW', '', 3);
+        }
+        window.__prevMoundShape = mode;
         const label = mode === 'all' ? 'All Shapes (running Conical + Platform both on next scan)'
             : mode === 'custom' ? 'Custom (using the sliders below as-is)'
             : `"${mode}" shape selected`;
@@ -2835,11 +2989,94 @@
         } catch (e) { console.error('Could not load training data', e); }
         return normalizeTrainingData({});
     }
-    function saveTrainingData() {
+    // Training data is kept in two places in the browser - localStorage and
+    // IndexedDB (sturdier, and not size-limited the same way) - and the
+    // browser is asked to keep this site's storage persistent (not cleared
+    // to free space). On load, whichever copy is newer wins. Both still live
+    // in this browser at this exact address (host and port), so a backup
+    // file is the truly permanent copy: see the backup reminder and
+    // automatic backup file below.
+    const TRAINING_DB = 'lidarScannerDB', TRAINING_STORE = 'kv';
+    function idbOpen() {
+        return new Promise((res, rej) => {
+            if (!window.indexedDB) return rej(new Error('no IndexedDB'));
+            const rq = indexedDB.open(TRAINING_DB, 1);
+            rq.onupgradeneeded = () => rq.result.createObjectStore(TRAINING_STORE);
+            rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
+        });
+    }
+    async function idbGet(key) { const db = await idbOpen(); return new Promise((res, rej) => { const rq = db.transaction(TRAINING_STORE).objectStore(TRAINING_STORE).get(key); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); }); }
+    async function idbPut(key, val) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(TRAINING_STORE, 'readwrite'); tx.objectStore(TRAINING_STORE).put(val, key); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); }); }
+    let storagePersistAsked = false;
+    function saveTrainingData(isNewConfirmation) {
+        trainingData._savedAt = Date.now();
+        if (isNewConfirmation) trainingData._unbackedUp = (trainingData._unbackedUp || 0) + 1;
+        let lsOk = true;
         try { localStorage.setItem(TRAINING_KEY, JSON.stringify(trainingData)); }
-        catch (e) { console.error('Could not save training data (localStorage may be full or unavailable)', e); }
+        catch (e) { lsOk = false; console.error('Could not save training data to localStorage', e); }
+        idbPut('training', JSON.parse(JSON.stringify(trainingData))).catch(e => { console.error('Could not save training data to IndexedDB', e); if (!lsOk) document.getElementById('status').innerText = 'Warning: training data could not be saved in this browser. Use Export Training Data to keep a copy.'; });
+        if (!storagePersistAsked && navigator.storage && navigator.storage.persist) { storagePersistAsked = true; navigator.storage.persist().catch(() => {}); }
+        if (isNewConfirmation) autoBackupTrainingData();
+        if (typeof updateBackupNote === 'function') updateBackupNote();
     }
     let trainingData = loadTrainingData();
+    window.__trainingReady = true;
+    // IndexedDB copy newer (or localStorage lost)? Use it.
+    idbGet('training').then(d => {
+        if (!d) { if (trainingData._savedAt) idbPut('training', JSON.parse(JSON.stringify(trainingData))).catch(() => {}); return; }
+        if ((d._savedAt || 0) > (trainingData._savedAt || 0)) {
+            trainingData = normalizeTrainingData(d);
+            try { localStorage.setItem(TRAINING_KEY, JSON.stringify(trainingData)); } catch (e) {}
+            if (typeof updateTrainingSummary === 'function') updateTrainingSummary();
+            if (typeof refreshOutlineLayer === 'function') refreshOutlineLayer();
+            if (typeof updateBackupNote === 'function') updateBackupNote();
+            if (typeof restoreMoundShape === 'function') restoreMoundShape();
+        }
+    }).catch(() => {});
+
+    // ---- Backups ----
+    // A backup file outside the browser is the permanent copy. Where the
+    // browser allows it (Chrome/Edge on a computer; some Android versions),
+    // you pick a file once and it is rewritten after every new confirmation.
+    // Otherwise a reminder counts confirmations not yet in a backup, with a
+    // one-tap "Back up now".
+    let backupHandle = null;
+    idbGet('backupHandle').then(h => { backupHandle = h || null; if (typeof updateBackupNote === 'function') updateBackupNote(); }).catch(() => {});
+    async function writeBackupFile(handle) {
+        const w = await handle.createWritable();
+        await w.write(new Blob([JSON.stringify(trainingData, null, 1)], { type: 'application/json' }));
+        await w.close();
+        trainingData._unbackedUp = 0; trainingData._lastBackupAt = Date.now();
+        try { localStorage.setItem(TRAINING_KEY, JSON.stringify(trainingData)); } catch (e) {}
+        idbPut('training', JSON.parse(JSON.stringify(trainingData))).catch(() => {});
+    }
+    async function autoBackupTrainingData() {
+        if (!backupHandle || !backupHandle.queryPermission) return;
+        try { if (await backupHandle.queryPermission({ mode: 'readwrite' }) === 'granted') { await writeBackupFile(backupHandle); updateBackupNote(); } }
+        catch (e) { console.error('Automatic backup failed', e); }
+    }
+    async function setupAutoBackup() {
+        try {
+            const h = await window.showSaveFilePicker({ suggestedName: 'lidar-scanner-training-backup.json', types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }] });
+            backupHandle = h; await idbPut('backupHandle', h); await writeBackupFile(h);
+            document.getElementById('status').innerText = 'Automatic backup file set up; it will be updated after every new confirmation.';
+        } catch (e) { if (e.name !== 'AbortError') document.getElementById('status').innerText = `Could not set up the backup file: ${e.message || e}.`; }
+        updateBackupNote();
+    }
+    async function backupNow() {
+        if (backupHandle && backupHandle.requestPermission) {
+            try { if (await backupHandle.requestPermission({ mode: 'readwrite' }) === 'granted') { await writeBackupFile(backupHandle); updateBackupNote(); document.getElementById('status').innerText = 'Backup file updated.'; return; } } catch (e) {}
+        }
+        exportTrainingData();
+    }
+    function updateBackupNote() {
+        const el = document.getElementById('backupNote'); if (!el) return;
+        const n = trainingData._unbackedUp || 0, last = trainingData._lastBackupAt;
+        const auto = backupHandle ? `Automatic backup file: ${escapeHtml(backupHandle.name || 'set')}. ` : '';
+        el.innerHTML = (n ? `<b style="color:#b45309;">${n} confirmation${n > 1 ? 's' : ''} not in a backup file yet.</b> ` : (last ? `Last backup ${new Date(last).toLocaleString()}. ` : '')) + auto +
+            `<a href="#" onclick="event.preventDefault(); backupNow();">Back up now</a>` +
+            (!backupHandle && 'showSaveFilePicker' in window ? ` &middot; <a href="#" onclick="event.preventDefault(); setupAutoBackup();">Keep a backup file updated automatically</a>` : '');
+    }
 
     // Small mode-to-label lookups, used everywhere a popup or status message
     // needs to describe what's being detected - centralized so adding a mode
@@ -2934,13 +3171,29 @@
             (sigCount > 0 ? ` \u2014 ${sigCount} marked with burial/ritual significance` : '');
     }
     updateTrainingSummary();
+    updateBackupNote();
+    // Restore the Mound Shape you last chose (Learned stays selected, with its
+    // sliders refreshed from your confirmed mounds)
+    function restoreMoundShape() {
+        const want = trainingData.prefs && trainingData.prefs.moundShape, sel = document.getElementById('moundShapeMode');
+        const opt = want && sel.querySelector(`option[value="${want}"]`);
+        if (!opt || opt.disabled) return;
+        sel.value = want;
+        if (want === 'learned') { window.__prevMoundShape = 'learned'; refreshLearnedMoundSettings(false); }
+        else if (want === 'conical' || want === 'platform' || want === 'broad') applyMoundPreset(want);
+    }
+    restoreMoundShape();
 
     // Called from the checkbox on a scanner-found marker's popup.
-    function confirmFeature(mode, diameter, circularity, elongation, maxMetric, lat, lon, ev, checkboxEl) {
+    function confirmFeature(mode, diameter, circularity, elongation, maxMetric, lat, lon, ev, checkboxEl, template, groundSlope) {
         if (ev) { ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); }
         const list = trainingData[mode].examples;
         const dupIdx = list.findIndex(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
         const example = { diameter, circularity, elongation, maxMetric, lat, lon, ts: Date.now() };
+        // what the scanner measured on it, so every confirmed mound feeds the
+        // similarity ranking and the learned size ranges like for like
+        if (mode === 'mounds' && template != null && isFinite(template))
+            example.scanner = { heightM: maxMetric, diameterM: diameter, circularity, elongation, template, groundSlopeDeg: isFinite(groundSlope) ? groundSlope : 0 };
         // A re-confirmation (e.g. after adjusting thresholds and rescanning)
         // must not silently erase a previously-marked significance - that
         // marking took a deliberate, separate action and shouldn't be lost
@@ -2951,8 +3204,9 @@
         } else {
             list.push(example);
         }
-        saveTrainingData();
+        saveTrainingData(true);
         maybeWidenThresholds(mode, example);
+        if (mode === 'mounds') { placeKnownMound(knownMounds().find(k => approxMetersBetween(k.lat, k.lon, lat, lon) < Math.max(10, 0.6 * k.d))); refreshLearnedMoundSettings(true); }
         updateTrainingSummary();
         if (checkboxEl) {
             checkboxEl.disabled = true;
@@ -2980,7 +3234,7 @@
         const dupIdx = list.findIndex(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
         const entry = { lat, lon, ts: Date.now() };
         if (dupIdx >= 0) list[dupIdx] = entry; else list.push(entry);
-        saveTrainingData();
+        saveTrainingData(true);
         updateTrainingSummary();
         map.closePopup();
         document.getElementById('status').innerText = 'Marked as not a real feature - future scans near this spot will flag it as previously ruled out, rather than showing it fresh again.';
@@ -3200,7 +3454,7 @@
                 drawBorrowPits(bp, window.__moundCheckPits);
             }
             L.popup({ maxWidth: 420 }).setLatLng([tapLat, tapLon]).setContent(html.replace('</table>', '</table>' + bpHtml)).openOn(map);
-            if (saved) confirmFeature(mode, best.dM, comp.circularity, comp.elongation, hM, cLat, cLon, null, null);
+            if (saved) confirmFeature(mode, best.dM, comp.circularity, comp.elongation, hM, cLat, cLon, null, null, best.tm.score, gs);
             return;
         }
 
@@ -3276,6 +3530,8 @@
 
     function exportTrainingData() {
         downloadBlob(new Blob([JSON.stringify(trainingData, null, 2)], { type: 'application/json' }), 'lidar-scanner-training-data.json');
+        trainingData._unbackedUp = 0; trainingData._lastBackupAt = Date.now();
+        saveTrainingData();
     }
     function importTrainingData(fileInput) {
         const file = fileInput.files[0];
@@ -3285,11 +3541,22 @@
             try {
                 const parsed = JSON.parse(reader.result);
                 if (!parsed.caves || !parsed.mounds) throw new Error('unexpected format');
-                trainingData = normalizeTrainingData(parsed); // older exports predate some categories
+                // Merge, don't replace: restoring a backup never loses anything
+                // added since it was made
+                const inc = normalizeTrainingData(parsed);   // older exports predate some categories
+                let added = 0;
+                const same = (a2, b2) => approxMetersBetween(a2.lat, a2.lon, b2.lat, b2.lon) < 5 && Math.abs((a2.ts || 0) - (b2.ts || 0)) < 1000;
+                for (const m of [...GEOMETRIC_MODES, 'settlement']) {
+                    for (const ex of inc[m].examples || []) if (!trainingData[m].examples.some(e2 => same(e2, ex))) { trainingData[m].examples.push(ex); added++; }
+                    if (inc[m].rejected) for (const ex of inc[m].rejected) if (!trainingData[m].rejected.some(e2 => same(e2, ex))) { trainingData[m].rejected.push(ex); added++; }
+                }
+                for (const o of inc.outlines || []) if (!trainingData.outlines.some(o2 => o2.id === o.id)) { trainingData.outlines.push(o); added++; }
                 saveTrainingData();
+                if (typeof refreshOutlineLayer === 'function') refreshOutlineLayer();
+                refreshLearnedMoundSettings(true);
                 applyModeThresholds(activeThresholdMode);
                 updateTrainingSummary();
-                document.getElementById('status').innerText = 'Training data imported.';
+                document.getElementById('status').innerText = `Training data imported: ${added} new item(s) merged with what was already here.`;
             } catch (e) {
                 document.getElementById('status').innerText = 'Could not import - not a valid training data file.';
             }
@@ -5230,12 +5497,14 @@
     }
     // Draws a borrow-pit result on a layer: dashed blue circles over the pits
     function drawBorrowPits(bp, layer) {
-        if (!bp) return;
+        const out = [];
+        if (!bp) return out;
         for (const p of bp.pits) {
             const lat = demBounds.n - ((p.cR + 0.5) / demHeight) * (demBounds.n - demBounds.s);
             const lon = demBounds.w + ((p.cC + 0.5) / demWidth) * (demBounds.e - demBounds.w);
-            L.circle([lat, lon], { radius: Math.max(1, p.eqD / 2), color: '#0369a1', weight: 2, dashArray: '4 3', fillColor: p.water ? '#1d4ed8' : '#38bdf8', fillOpacity: p.water ? 0.45 : 0.2, interactive: false }).addTo(layer);
+            out.push(L.circle([lat, lon], { radius: Math.max(1, p.eqD / 2), color: '#0369a1', weight: 2, dashArray: '4 3', fillColor: p.water ? '#1d4ed8' : '#38bdf8', fillOpacity: p.water ? 0.45 : 0.2, interactive: false }).addTo(layer));
         }
+        return out;
     }
     const MOUND_HOST_RATIO = 4, MOUND_HOST_MIN_M = 60;
     function moundHostOk(hostDiam, diameter) {
@@ -6122,9 +6391,10 @@
             let presetsToRun;
             if (moundShapeMode === 'all') {
                 presetsToRun = [{ name: 'conical', ...presetDefs.conical }, { name: 'platform', ...presetDefs.platform }];
-            } else if (moundShapeMode === 'custom') {
+            } else if (moundShapeMode === 'custom' || moundShapeMode === 'learned') {
+                // Learned = the sliders, filled from your confirmed mounds (and adjustable)
                 presetsToRun = [{
-                    name: 'custom',
+                    name: moundShapeMode,
                     minHeight: parseFloat(document.getElementById('minHeight').value),
                     minCircularity: parseFloat(document.getElementById('minCircularity').value),
                     maxCircularity: parseFloat(document.getElementById('maxCircularity').value),
@@ -6137,8 +6407,7 @@
             } else {
                 presetsToRun = [{ name: moundShapeMode, ...presetDefs[moundShapeMode] }];
             }
-            const learned = document.getElementById('moundUseLearned').checked ? moundLearnedPresets() : null;
-            if (learned) presetsToRun = learned;   // opt-in: size classes from your outlined mounds
+
 
             const tick0 = (msg) => { status.innerText = msg; return new Promise(r => setTimeout(r, 0)); };
             await tick0('Mounds: denoising DTM (low-pass)...');
@@ -6428,13 +6697,22 @@
         // New results for this mode replace only this mode's previous ones;
         // other modes' completed scans stay on the map.
         clearModeDetections(mode);
-        for (const { k, lat, lon, diameter, extra, matchScore } of finalists.slice(0, maxResults)) {
+        // Confirmed mounds in the scanned area are always shown, with the size
+        // you recorded; a scan hit on one is merged into it
+        const knownHere = mode === 'mounds' ? knownMounds().filter(km => km.lat <= demBounds.n && km.lat >= demBounds.s && km.lon >= demBounds.w && km.lon <= demBounds.e) : [];
+        const knownScore = new Map();
+        const shownFinalists = finalists.filter(fz => {
+            const km = knownHere.find(km2 => approxMetersBetween(km2.lat, km2.lon, fz.lat, fz.lon) < Math.max(10, 0.6 * km2.d));
+            if (km) { if (!knownScore.has(km.id)) knownScore.set(km.id, fz.matchScore); return false; }
+            return true;
+        });
+        for (const { k, lat, lon, diameter, extra, matchScore } of shownFinalists.slice(0, maxResults)) {
             const volume = k.sumMetric * effRes * effRes;
 
             const already = trainingData[mode].examples.find(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
             const confirmHtml = already
                 ? `<label style="display:block;margin-top:8px;"><input type="checkbox" checked disabled> Confirmed real (${new Date(already.ts).toLocaleDateString()})</label>`
-                : `<label style="display:block;margin-top:8px;"><input type="checkbox" onclick="confirmFeature('${mode}', ${diameter.toFixed(2)}, ${k.circularity.toFixed(3)}, ${k.elongation.toFixed(3)}, ${k.maxMetric.toFixed(3)}, ${lat.toFixed(6)}, ${lon.toFixed(6)}, event, this)"> Confirm this is real</label>
+                : `<label style="display:block;margin-top:8px;"><input type="checkbox" onclick="confirmFeature('${mode}', ${diameter.toFixed(2)}, ${k.circularity.toFixed(3)}, ${k.elongation.toFixed(3)}, ${k.maxMetric.toFixed(3)}, ${lat.toFixed(6)}, ${lon.toFixed(6)}, event, this, ${mode === 'mounds' && k._template != null ? k._template.toFixed(3) : 'null'}, ${mode === 'mounds' && k._gs != null ? k._gs.toFixed(1) : 'null'})"> Confirm this is real</label>
                    <button style="width:auto;padding:3px 6px;font-size:0.72rem;margin-top:6px;" onclick="markNotReal('${mode}', ${lat.toFixed(6)}, ${lon.toFixed(6)}, event)">Not a real feature (dirt pile/disturbance)&hellip;</button>`;
 
             // Marking burial/ritual significance is only offered for caves and
@@ -6488,8 +6766,8 @@
                                 <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}
                                 ${shapeWarning}${confirmHtml}${significanceHtml}`;
 
-            L.marker([lat, lon], {icon: iconInst}).bindPopup(popupHtml).addTo(modeLayer(mode));
-            if (mode === 'mounds' && k._borrowPits) drawBorrowPits(k._borrowPits, modeLayer(mode));
+            const fLayers = [L.marker([lat, lon], {icon: iconInst}).bindPopup(popupHtml).addTo(modeLayer(mode))];
+            if (mode === 'mounds' && k._borrowPits) fLayers.push(...drawBorrowPits(k._borrowPits, modeLayer(mode)));
             // Same oriented-ellipse geometry used for the shapefile export, so the
             // map view and the exported file always agree - an elongated feature
             // shows elongated here too, not a generic circle. Leaflet wants
@@ -6497,8 +6775,14 @@
             // convention), so each point gets swapped going in. Non-interactive so
             // it's purely visual and doesn't steal clicks from the marker/map.
             const ring = ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
-            L.polygon(ring, { color: modeColor, weight: 2, fillColor: modeColor, fillOpacity: 0.15, interactive: false }).addTo(modeLayer(mode));
-            detectedFeatures.push({ mode, k, lat, lon, diameter, matchScore, grid: gridInfo() });
+            fLayers.push(L.polygon(ring, { color: modeColor, weight: 2, fillColor: modeColor, fillOpacity: 0.15, interactive: false }).addTo(modeLayer(mode)));
+            detectedFeatures.push({ mode, k, lat, lon, diameter, matchScore, grid: gridInfo(), _layers: fLayers });
+        }
+        for (const km of knownHere) {
+            const f = knownMoundFeature(km, knownScore.has(km.id) ? knownScore.get(km.id) : null);
+            f.scanned = true;
+            renderKnownMound(f);
+            detectedFeatures.push(f);
         }
 
         lastMetricRaster = baseScaleMetricRaster; lastScanMode = mode; lastMetricGrid = gridInfo();
@@ -6521,8 +6805,9 @@
         }
         if (ov3) { ov3.grid = gridInfo(); ov3.mode = mode; last3DOverlays.push(ov3); }
         updateDetectionLegend();
-        const shownCount = Math.min(maxResults, finalists.length);
+        const shownCount = Math.min(maxResults, shownFinalists.length);
         status.innerText = `Scan complete. Showing the top ${shownCount} candidate(s)` +
+            (knownHere.length ? ` plus ${knownHere.length} mound(s) you confirmed (${knownScore.size} also detected by this scan)` : '') +
             (mergedCount ? `; ${mergedCount} duplicate hit(s) on the same landforms were merged` : '') +
             (droppedCount ? `; ${droppedCount} failed a required check` : '') +
             (heldBackCount ? `; ${heldBackCount} lower-ranked candidate(s) held back (raise Max results per mode to see them)` : '') +
@@ -6744,7 +7029,7 @@
     function exportShapefile() {
         if (detectedFeatures.length === 0) return;
         const features = detectedFeatures.map(f => ({
-            ring: ellipseRingLatLon(f.k, 32, f.grid),
+            ring: featureRing(f),
             attrs: {
                 type: featureTypeCode(f.mode),
                 diameter_ft: metersToFeet(f.diameter),
@@ -7056,16 +7341,16 @@
                 const i = gridIndexAt(fullDemGrid, f.lat, f.lon);
                 if (i >= 0 && fullDemGrid.data[i] >= -100) ele = `<ele>${fullDemGrid.data[i].toFixed(1)}</ele>`;
             }
-            const confirmed = trainingData[f.mode] && trainingData[f.mode].examples &&
-                trainingData[f.mode].examples.some(ex => approxMetersBetween(ex.lat, ex.lon, f.lat, f.lon) < 20);
-            const desc = `${typeName} - algorithmic candidate, verify in the field. Match score ${f.matchScore}%. ` +
+            const confirmed = !!f.known || (trainingData[f.mode] && trainingData[f.mode].examples &&
+                trainingData[f.mode].examples.some(ex => approxMetersBetween(ex.lat, ex.lon, f.lat, f.lon) < 20));
+            const desc = f.known ? `Confirmed mound${f.known.name ? ' "' + f.known.name + '"' : ''} (your training data). Height ${(f.known.h * M2FT).toFixed(1)} ft, about ${Math.round(f.known.d * M2FT)} ft across.` : `${typeName} - algorithmic candidate, verify in the field. Match score ${f.matchScore}%. ` +
                 (f.mode === 'settlement' ? '' : `${modeMetricLabel(f.mode)}: ${(f.k.maxMetric * M2FT).toFixed(1)} ft. `) +
                 `About ${Math.round(f.diameter * M2FT)} ft across.` +
                 (f.k._borrowPits && f.k._borrowPits.pits.length ? ` Borrow pits: ${f.k._borrowPits.pits.length} (${f.k._borrowPits.evidence}).` : '') + (confirmed ? ' Confirmed real by you.' : '');
             return `  <wpt lat="${f.lat.toFixed(7)}" lon="${f.lon.toFixed(7)}">
     ${ele}<time>${now}</time>
     <name>${xmlEsc(name)}</name>
-    <cmt>${xmlEsc(`${typeName}, match ${f.matchScore}%`)}</cmt>
+    <cmt>${xmlEsc(f.known ? `${typeName}, confirmed` : `${typeName}, match ${f.matchScore}%`)}</cmt>
     <desc>${xmlEsc(desc)}</desc>
     <sym>${xmlEsc(GPX_SYMBOLS[f.mode] || 'Flag, Blue')}</sym>
     <type>${xmlEsc(typeName)}</type>
@@ -7098,7 +7383,7 @@ ${wpts.join('\n')}
             type: 'FeatureCollection',
             features: detectedFeatures.map((f, idx) => ({
                 type: 'Feature',
-                geometry: { type: 'Polygon', coordinates: [ellipseRingLatLon(f.k, 32, f.grid)] },
+                geometry: { type: 'Polygon', coordinates: [featureRing(f)] },
                 properties: {
                     id: idx + 1,
                     type: featureTypeCode(f.mode),
