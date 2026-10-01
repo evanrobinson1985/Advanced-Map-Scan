@@ -77,12 +77,12 @@ Comparisons use the scanner's view of each outline, so they are like for like. W
 
 **Learning from your mounds.** Every confirmed mound also stores what the scanner measured on it. Later scans rank candidates like your mounds higher and name the closest one. Once 5 confirmed mounds have scanner measurements, *Mound Shape* gets **Learned from my confirmed mounds**, selected automatically the first time and remembered after that. It fills the Mound settings sliders with the best ranges for mounds like yours: minimum height, width range, roundness, stretch, template match and height-to-width. The ranges cover what your mounds span plus a safety margin that is wide with few examples and tightens as you add more (15% + 50%/√N); from 20 examples on, the 5th and 95th percentiles are used, so one odd example can't stretch them. Every new confirmation updates them. The sliders stay adjustable, and choosing another shape goes back to the built-in presets. The learned ranges look for mounds like the ones you've confirmed, so confirm a range of types (conical and platform, large and small).
 
-**Not a real feature.** The button on a result's popup removes it from the map and the legend straight away, and remembers what it looked like: its width, height, roundness and stretch, plus the template match and ground slope for mounds. This works in every scan mode:
+**Not a real feature.** Each result's popup has two well-separated buttons, a green **✓ Yes, it's real** and a red **✗ Not real**. Not real removes the result from the map and the legend straight away, and remembers what it looked like: width, height, roundness, stretch and side steepness, plus the template match and ground slope for mounds. This works in every scan mode:
 - scans skip that spot;
-- a candidate that closely matches something you rejected (90% or more similar), and resembles it more than anything you've confirmed as real, is skipped, both on the current map and in later scans, and the scan message counts them;
-- a looser resemblance only lowers the ranking, with a warning in the popup.
+- candidates resembling it are skipped, on the current map and in later scans, at the level set by **Avoid look-alikes** in Training Data: Light (90% similar), **Normal (80%, the default)**, Strict (65%), or Off (only ranked lower);
+- a looser resemblance lowers the ranking, with a warning in the popup.
 
-Similarity to confirmed real features wins over similarity to rejected ones, so a genuine mound that happens to resemble a dirt pile you rejected is not thrown away.
+Similarity to anything you confirmed real wins a tie. That matters because a small real mound and a dirt pile can measure almost the same: confirming the real mounds of that size keeps them from being dropped. "Not real" marks made before features were recorded learn what the spot looks like the next time a scan covers it.
 
 **Undoing mistakes.** **Undo last training change** in the Training Data panel reverses your most recent training actions, one at a time, up to the last 30. Undo steps are saved with the training data, so they survive a reload. It covers:
 - a confirmed feature (any size limits it had loosened are put back);

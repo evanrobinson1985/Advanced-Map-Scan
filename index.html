@@ -643,6 +643,15 @@
         <h4>5. Training Data</h4>
         <div id="trainingSummary" style="font-size:0.85rem; text-align:center; margin-bottom:8px; color:#334155;">Confirmed: 0 cave/sinkhole, 0 mound example(s)</div>
         <div id="backupNote" style="font-size:0.74rem; text-align:center; margin-bottom:8px; color:#475569; line-height:1.4;"></div>
+        <div class="slider-row" style="margin-bottom:6px;">
+            <label title="How closely a scan result must match something you marked Not real to be skipped">Avoid look-alikes</label>
+            <select id="rejectStrictness" onchange="setRejectStrictness(this.value)" style="width:auto; flex-grow:1; margin:0 0 0 10px; padding:6px;">
+                <option value="light">Light (skip only near-identical, 90%)</option>
+                <option value="normal" selected>Normal (skip at 80% similar)</option>
+                <option value="strict">Strict (skip at 65% similar)</option>
+                <option value="off">Off (only rank them lower)</option>
+            </select>
+        </div>
         <div style="display:flex; gap:6px; margin-bottom:6px;">
             <button id="undoTrainingBtn" onclick="undoLastTraining()" style="font-size:0.8rem;" disabled>&#8630; Undo last training change</button>
             <button onclick="openTrainingReview()" style="font-size:0.8rem;">Review Training Data</button>
@@ -3399,6 +3408,7 @@
     updateTrainingSummary();
     updateBackupNote();
     updateUndoButton();
+    if (trainingData.prefs && trainingData.prefs.rejectStrictness) document.getElementById('rejectStrictness').value = trainingData.prefs.rejectStrictness;
     // Restore the Mound Shape you last chose (Learned stays selected, with its
     // sliders refreshed from your confirmed mounds)
     function restoreMoundShape() {
@@ -3439,8 +3449,13 @@
         updateTrainingSummary();
         if (checkboxEl) {
             checkboxEl.disabled = true;
-            checkboxEl.checked = true;
-            if (checkboxEl.nextSibling) checkboxEl.nextSibling.textContent = ' Confirmed - thanks!';
+            if (checkboxEl.tagName === 'BUTTON') {
+                checkboxEl.innerText = '\u2713 Confirmed real';
+                for (const b of checkboxEl.parentElement.querySelectorAll('button')) if (b !== checkboxEl) b.remove();   // no "Not real" right next to it any more
+            } else {
+                checkboxEl.checked = true;
+                if (checkboxEl.nextSibling) checkboxEl.nextSibling.textContent = ' Confirmed - thanks!';
+            }
         }
     }
 
@@ -3487,7 +3502,8 @@
     // description, so scans can avoid features like them.
     function featureVector(k, diameter) {
         return { diameterM: diameter || k._sizeD || 2 * Math.sqrt(k.area / Math.PI), heightM: k.maxMetric, circularity: k.circularity, elongation: k.elongation,
-                 template: k._template != null ? k._template : null, groundSlopeDeg: k._gs != null ? k._gs : null };
+                 template: k._template != null ? k._template : null, groundSlopeDeg: k._gs != null ? k._gs : null,
+                 flankSlopeDeg: k.maxFlankSlope > 0 ? k.maxFlankSlope : null };
     }
     function featureSimilarity(a, b) {
         const t = [Math.log(Math.max(0.1, a.diameterM) / Math.max(0.1, b.diameterM)) / 0.35,
@@ -3496,6 +3512,7 @@
                    Math.log(Math.max(1, a.elongation) / Math.max(1, b.elongation)) / 0.3];
         if (a.template != null && b.template != null) t.push((a.template - b.template) / 0.15);
         if (a.groundSlopeDeg != null && b.groundSlopeDeg != null) t.push((a.groundSlopeDeg - b.groundSlopeDeg) / 6);
+        if (a.flankSlopeDeg != null && b.flankSlopeDeg != null) t.push((a.flankSlopeDeg - b.flankSlopeDeg) / 8);
         return Math.exp(-t.reduce((s2, v) => s2 + v * v, 0) / t.length);
     }
     // Closest confirmed-real and closest rejected example for a feature of
@@ -3515,8 +3532,13 @@
     // Rule shared by scans and by "Not a real feature": a feature that closely
     // matches something you rejected (90%+) and resembles it more than
     // anything you confirmed is dropped; a looser resemblance only lowers it
-    const REJECT_DROP_SIM = 0.9, REJECT_PENALTY_SIM = 0.5;
-    function rejectsDrop(v) { return v.neg && v.neg.sim >= REJECT_DROP_SIM && (!v.pos || v.neg.sim > v.pos.sim); }
+    // How closely a feature must match one you rejected to be skipped, set by
+    // "Avoid look-alikes" in Training Data (similarity to anything you
+    // confirmed real always wins a tie)
+    const REJECT_LEVELS = { light: 0.9, normal: 0.8, strict: 0.65, off: Infinity }, REJECT_PENALTY_SIM = 0.5;
+    function rejectDropSim() { const lv = trainingData.prefs && trainingData.prefs.rejectStrictness; return REJECT_LEVELS[lv] != null ? REJECT_LEVELS[lv] : REJECT_LEVELS.normal; }
+    function rejectsDrop(v) { return v.neg && v.neg.sim >= rejectDropSim() && (!v.pos || v.neg.sim > v.pos.sim); }
+    function setRejectStrictness(v) { (trainingData.prefs || (trainingData.prefs = {})).rejectStrictness = v; saveTrainingData(); }
     function pruneLookalikesOnMap(mode, takenOff) {
         let n = 0;
         for (const f of detectedFeatures.filter(g => g.mode === mode && !g.known && g.k)) {
@@ -6910,8 +6932,17 @@
         //  4. show the top "Max results per mode".
         const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
         const spacingM = { basecamp: 60, huntcamp: 60, shelter: 40, mounds: 25, caves: 10, ceremonial: 15, entrance: 40 }[mode] || 20;
-        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0, resembledCount = 0;
+        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0, resembledCount = 0, rejectionsLearned = 0;
         const ranked = [];
+        // Spots you marked not real before features were recorded: learn what
+        // is there now (first, so it applies to this whole scan)
+        for (const k of filtered) {
+            const kR0 = k._footR != null ? k._footR : k.centroidR, kC0 = k._footC != null ? k._footC : k.centroidC;
+            const la0 = demBounds.n - (kR0 / demHeight) * (demBounds.n - demBounds.s), lo0 = demBounds.w + (kC0 / demWidth) * (demBounds.e - demBounds.w);
+            const rj = trainingData[mode].rejected.find(ex => !ex.features && approxMetersBetween(ex.lat, ex.lon, la0, lo0) < 20);
+            if (rj) { rj.features = featureVector(k, k._sizeD || 2 * Math.sqrt(k.area / Math.PI)); rejectionsLearned++; }
+        }
+        if (rejectionsLearned) saveTrainingData();
         for (const k of filtered) {
             // mounds on tilted ground are placed and sized by their full footprint
             const kR = k._footR != null ? k._footR : k.centroidR, kC = k._footC != null ? k._footC : k.centroidC;
@@ -6919,7 +6950,10 @@
             const lon = demBounds.w + (kC / demWidth) * (demBounds.e - demBounds.w);
             // Skip candidates already field-checked and marked not real - a
             // deliberate human decision, so full suppression is appropriate.
-            if (trainingData[mode].rejected.some(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20)) {
+            const rejHere = trainingData[mode].rejected.find(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
+            if (rejHere) {
+                // a mark made before features were recorded: record what is there now,
+                // so it starts helping to avoid look-alikes
                 suppressedCount++;
                 continue;
             }
@@ -6993,8 +7027,11 @@
             const already = trainingData[mode].examples.find(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
             const confirmHtml = already
                 ? `<label style="display:block;margin-top:8px;"><input type="checkbox" checked disabled> Confirmed real (${new Date(already.ts).toLocaleDateString()})</label>`
-                : `<label style="display:block;margin-top:8px;"><input type="checkbox" onclick="confirmFeature('${mode}', ${diameter.toFixed(2)}, ${k.circularity.toFixed(3)}, ${k.elongation.toFixed(3)}, ${k.maxMetric.toFixed(3)}, ${lat.toFixed(6)}, ${lon.toFixed(6)}, event, this, ${mode === 'mounds' && k._template != null ? k._template.toFixed(3) : 'null'}, ${mode === 'mounds' && k._gs != null ? k._gs.toFixed(1) : 'null'})"> Confirm this is real</label>
-                   <button style="width:auto;padding:3px 6px;font-size:0.72rem;margin-top:6px;" onclick="markNotReal('${mode}', ${lat.toFixed(6)}, ${lon.toFixed(6)}, event)">Not a real feature (dirt pile/disturbance)&hellip;</button>`;
+                : `<div style="display:flex;gap:28px;margin-top:12px;">
+                     <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;" onclick="confirmFeature('${mode}', ${diameter.toFixed(2)}, ${k.circularity.toFixed(3)}, ${k.elongation.toFixed(3)}, ${k.maxMetric.toFixed(3)}, ${lat.toFixed(6)}, ${lon.toFixed(6)}, event, this, ${mode === 'mounds' && k._template != null ? k._template.toFixed(3) : 'null'}, ${mode === 'mounds' && k._gs != null ? k._gs.toFixed(1) : 'null'})">&#10003; Yes, it's real</button>
+                     <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#fee2e2;color:#991b1b;border:2px solid #ef4444;border-radius:8px;" onclick="markNotReal('${mode}', ${lat.toFixed(6)}, ${lon.toFixed(6)}, event)">&#10007; Not real</button>
+                   </div>
+                   <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;line-height:1.3;">"Not real" = dirt pile, disturbance or natural bump; scans then avoid features like it. Either choice can be undone in Training Data.</div>`;
 
             // Marking burial/ritual significance is only offered for caves and
             // shelters (matching how this was asked for), and only once the
@@ -7094,6 +7131,7 @@
             (heldBackCount ? `; ${heldBackCount} lower-ranked candidate(s) held back (raise Max results per mode to see them)` : '') +
             (suppressedCount > 0 ? `; ${suppressedCount} matched a spot you marked not real` : '') +
             (resembledCount > 0 ? `; ${resembledCount} closely resembled features you marked not real and were skipped` : '') +
+            (rejectionsLearned > 0 ? `; learned what ${rejectionsLearned} earlier "not real" mark(s) look like, so look-alikes are avoided from now on` : '') +
             (moundUnchecked ? `; ${moundUnchecked} weaker mound candidate(s) were not tested (only the best 400 get the LiDAR-error test; zoom in to scan a smaller area)` : '') + '.' +
             (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '') +
             (!scanAllActive && detectedFeatures.some(f => f.mode !== mode) ? ' Results from your other scans are still shown (see the legend, top left).' : '');
