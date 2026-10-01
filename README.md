@@ -91,6 +91,25 @@ Similarity to anything you confirmed real wins a tie. That matters because a sma
 
 **Review Training Data** lists everything you've taught the app, newest first, with **Go to** and **Remove** for each item. A confirmed mound's popup also has "Added by mistake? Remove this confirmation". Removing or undoing a confirmed mound takes it off the map and brings back the scan's own result for that spot. The legend and learned settings update with every change.
 
+**Show Training Data on Map** (in the Training panel, or **Show all on map** in the review list) puts everything on the map at once and zooms to fit it all:
+
+- confirmed features: the scan mode's colour with a green ✓;
+- "Not real" marks: red squares with a ✗;
+- outlines: green for mounds, red dashed for look-alikes;
+- known settlement sites.
+
+A bar at the top counts each kind and has **Fit all**, **List** and **Hide**.
+
+Tap an item for its details and **Edit**, **Zoom in** or **Remove**. **Edit** changes:
+
+- what it is: real ↔ not real, or mound ↔ look-alike for an outline;
+- its height (or depth) and width in feet;
+- its name or note.
+
+**Move** lets you drag the marker to where the feature really is; an outline moves with it.
+
+Every edit is one Undo step. Confirmed mounds on the map, the look-alike avoidance and the learned settings follow each edit straight away.
+
 **Keeping training data.** Training data is saved in two places in the browser (localStorage and IndexedDB, the newer copy wins on load), and the app asks the browser to keep the site's storage persistent. Both copies belong to the exact address the app is opened from, including the port, and are lost if the site's data is cleared. So the Training Data panel counts confirmations not yet in a backup file, with **Back up now**. Where the browser supports it, **Keep a backup file updated automatically** rewrites a backup file after every confirmation. **Import Training Data** merges with what is already there, so restoring an older backup never loses newer work.
 
 **Horizontal Cave Entrances.** A walk-in cave mouth in a bluff face can't be seen in bare-earth LiDAR. This mode finds the settings such entrances open into: gentle ground or a talus apron at the foot of a real cliff. By default a site must also show a karst drainage sign:

@@ -656,6 +656,7 @@
             <button id="undoTrainingBtn" onclick="undoLastTraining()" style="font-size:0.8rem;" disabled>&#8630; Undo last training change</button>
             <button onclick="openTrainingReview()" style="font-size:0.8rem;">Review Training Data</button>
         </div>
+        <button id="trainingMapBtn" onclick="toggleTrainingOnMap()" style="font-size:0.8rem;background:#dbeafe;color:#1e3a8a;">Show Training Data on Map</button>
         <button onclick="exportTrainingData()">Export Training Data</button>
         <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importTrainingData(this)">
         <button onclick="document.getElementById('importFileInput').click()">Import Training Data</button>
@@ -2284,6 +2285,16 @@
             const ex = trainingData[u.mode].examples.find(e => e.ts === u.exTs);
             if (ex) { if (u.prev) ex.significance = u.prev; else delete ex.significance; }
             msg = 'Undid the burial/ritual significance mark.';
+        } else if (u.kind === 'edited') {
+            const cur = trainingItemByKey(u.toKey);
+            if (cur.item) cur.list.splice(cur.idx, 1);
+            const back = trainingItemByKey(u.fromKey);   // same list when the type wasn't changed
+            back.list.push(u.before);
+            msg = 'Undid the edit; the item is back the way it was.';
+            syncAfterTrainingChange();
+            refreshKnownMoundIds([knownIdForKey(u.fromKey), knownIdForKey(u.toKey)]);
+            status.innerText = msg + ((trainingData._undo || []).length ? ` (${trainingData._undo.length} more step${trainingData._undo.length > 1 ? 's' : ''} can be undone.)` : '');
+            return;
         } else if (u.kind === 'removed') {
             const it = u.item, k = u.key;
             if (k.list === 'outlines') trainingData.outlines.push(it);
@@ -2328,26 +2339,32 @@
         }
         renderTrainingReview();
     }
-    function renderTrainingReview() {
-        const d = document.getElementById('trainingReview'); if (!d) return;
+    // Every training item as a row {ts, lat, lon, key, kind, mode, title, detail, polygon?}
+    function trainingReviewRows() {
         const ft = metersToFeetInches, rows = [];
-        const dt = (ts) => ts > 1e9 ? new Date(ts).toLocaleDateString() : '';
         for (const m of [...GEOMETRIC_MODES]) {
-            for (const ex of trainingData[m].examples) rows.push({ ts: ex.ts, lat: ex.lat, lon: ex.lon, key: { list: 'examples', mode: m, ts: ex.ts },
-                title: `Confirmed ${trainingItemLabel(m)}`, detail: `${ex.maxMetric != null ? ft(ex.maxMetric) + (m === 'caves' || m === 'ceremonial' ? ' deep, ' : ' tall, ') : ''}${ex.diameter ? ft(ex.diameter) + ' across' : ''}${ex.significance ? `; marked ${ex.significance.type}` : ''}` });
-            for (const r of trainingData[m].rejected) rows.push({ ts: r.ts, lat: r.lat, lon: r.lon, key: { list: 'rejected', mode: m, ts: r.ts },
-                title: `Not a real ${trainingItemLabel(m)}`, detail: r.features ? `${ft(r.features.heightM)}, ${ft(r.features.diameterM)} across` : '' });
+            for (const ex of trainingData[m].examples) rows.push({ ts: ex.ts, lat: ex.lat, lon: ex.lon, key: { list: 'examples', mode: m, ts: ex.ts }, kind: 'confirmed', mode: m,
+                title: `Confirmed ${trainingItemLabel(m)}`, detail: `${ex.name ? '"' + ex.name + '", ' : ''}${ex.maxMetric != null ? ft(ex.maxMetric) + (m === 'caves' || m === 'ceremonial' ? ' deep, ' : ' tall, ') : ''}${ex.diameter ? ft(ex.diameter) + ' across' : ''}${ex.significance ? `; marked ${ex.significance.type}` : ''}` });
+            for (const r of trainingData[m].rejected) rows.push({ ts: r.ts, lat: r.lat, lon: r.lon, key: { list: 'rejected', mode: m, ts: r.ts }, kind: 'reject', mode: m,
+                title: `Not a real ${trainingItemLabel(m)}`, detail: (r.name ? '"' + r.name + '"' + (r.features ? ', ' : '') : '') + (r.features ? `${ft(r.features.heightM)}, ${ft(r.features.diameterM)} across` : '') });
         }
-        for (const ex of trainingData.settlement.examples) rows.push({ ts: ex.ts, lat: ex.lat, lon: ex.lon, key: { list: 'examples', mode: 'settlement', ts: ex.ts },
-            title: 'Known settlement site', detail: ex.evidence ? `evidence: ${ex.evidence}` : '' });
-        for (const o of trainingData.outlines) rows.push({ ts: o.ts, lat: o.centroid[0], lon: o.centroid[1], key: { list: 'outlines', id: o.id },
+        for (const ex of trainingData.settlement.examples) rows.push({ ts: ex.ts, lat: ex.lat, lon: ex.lon, key: { list: 'examples', mode: 'settlement', ts: ex.ts }, kind: 'settlement', mode: 'settlement',
+            title: 'Known settlement site', detail: (ex.name ? '"' + ex.name + '"' + (ex.evidence ? ', ' : '') : '') + (ex.evidence ? `evidence: ${ex.evidence}` : '') });
+        for (const o of trainingData.outlines) rows.push({ ts: o.ts, lat: o.centroid[0], lon: o.centroid[1], key: { list: 'outlines', id: o.id }, kind: o.label === 'mound' ? 'outline' : 'outline-not', mode: 'mounds', polygon: o.polygon,
             title: o.label === 'mound' ? 'Outlined mound' : `Outlined look-alike${o.lookalike ? ' (' + o.lookalike + ')' : ''}`,
             detail: `${o.name ? '"' + o.name + '", ' : ''}${ft(o.outline.heightM)} tall, ${ft(o.outline.eqDiameterM)} across` });
         rows.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        return rows;
+    }
+    function renderTrainingReview() {
+        const d = document.getElementById('trainingReview'); if (!d) return;
+        const dt = (ts) => ts > 1e9 ? new Date(ts).toLocaleDateString() : '';
+        const rows = trainingReviewRows();
         window.__reviewRows = rows;
         d.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:560px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
             <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:8px;">
               <b style="flex:1;">Your training data (${rows.length})</b>
+              <button onclick="document.getElementById('trainingReview').remove(); showTrainingOnMap(true);" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;background:#dbeafe;color:#1e3a8a;" ${rows.length ? '' : 'disabled'}>&#128506; Show all on map</button>
               <button onclick="undoLastTraining()" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;" ${(trainingData._undo || []).length ? '' : 'disabled'}>&#8630; Undo last</button>
               <button onclick="document.getElementById('trainingReview').remove()" style="width:auto;margin:0;padding:4px 10px;">Close</button></div>
             ${rows.length ? rows.map((r, i) => `<div style="padding:7px 12px;border-bottom:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;">
@@ -2357,6 +2374,242 @@
               <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fee2e2;color:#991b1b;" onclick="removeTrainingItem(window.__reviewRows[${i}].key)">Remove</button></div>`).join('')
               : '<div style="padding:14px;color:#64748b;">Nothing yet: confirmations, "Not a real feature" marks, outlines and settlement sites will be listed here.</div>'}</div>`;
     }
+
+    // ==== TRAINING DATA ON THE MAP ====
+    // "Show all on map" puts every training item on the map at once, on its
+    // own layer: confirmed features (green tick, in the scan mode's colour),
+    // "Not a real feature" marks (red cross), outlines (green for mounds,
+    // red dashed for look-alikes) and known settlement sites. Each one's popup
+    // has its details and a Remove button. A bar at the top of the map counts
+    // them and hides the layer again. While it is shown it follows every
+    // change (Remove, Undo, new confirmations).
+    var trainingMapLayer = null, trainingMapShown = false;
+    function trainingMarkerIcon(r) {
+        const st = MODE_STYLE[r.mode] || { color: '#475569', letter: '?' };
+        const reject = r.kind === 'reject' || r.kind === 'outline-not';
+        const bg = reject ? '#dc2626' : st.color;
+        const badge = reject ? '&#10007;' : '&#10003;';
+        const badgeBg = reject ? '#7f1d1d' : '#16a34a';
+        return L.divIcon({
+            className: 'det-icon',
+            html: `<div style="position:relative;background:${bg};color:#fff;width:20px;height:20px;border-radius:${reject ? '4px' : '50%'};border:2px solid ${badgeBg};box-shadow:0 1px 4px rgba(0,0,0,0.5);font:bold 11px/20px sans-serif;text-align:center;">${st.letter}<div style="position:absolute;right:-7px;top:-7px;background:${badgeBg};color:#fff;width:14px;height:14px;border-radius:50%;border:1.5px solid #fff;font:bold 9px/14px sans-serif;text-align:center;">${badge}</div></div>`,
+            iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12]
+        });
+    }
+    function trainingMapCounts(rows) {
+        const c = { confirmed: 0, reject: 0, outline: 0, 'outline-not': 0, settlement: 0 };
+        for (const r of rows) c[r.kind]++;
+        return c;
+    }
+    // onlyIfChanged: skip when nothing shown has changed (saves that only
+    // touch settings must not close a popup you have open)
+    function renderTrainingMapLayer(onlyIfChanged) {
+        if (!trainingMapLayer) trainingMapLayer = L.layerGroup();
+        const dt = (ts) => ts > 1e9 ? new Date(ts).toLocaleDateString() : '';
+        const rows = trainingReviewRows();
+        const sig = JSON.stringify(rows);
+        if (onlyIfChanged && sig === window.__trainingMapSig) return rows;
+        window.__trainingMapSig = sig;
+        trainingMapLayer.clearLayers();
+        window.__trainingMapRows = rows;
+        rows.forEach((r, i) => {
+            const popup = `<div class="tm-popup" style="font:13px sans-serif;min-width:180px;"><b>${escapeHtml(r.title)}</b> <span style="color:#64748b;font-size:0.75rem;">${dt(r.ts)}</span><br>
+                <span style="font-size:0.8rem;color:#475569;">${escapeHtml(r.detail)}</span><br>
+                <span style="font-size:0.72rem;color:#94a3b8;">${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</span>
+                <div style="display:flex;gap:6px;margin-top:6px;">
+                <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fef3c7;color:#92400e;" onclick="event.stopPropagation(); setTimeout(() => openTrainingEdit(${i}), 0)">&#9998; Edit</button>
+                <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;" onclick="const r = window.__trainingMapRows[${i}]; map.setView([r.lat, r.lon], 18);">Zoom in</button>
+                <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fee2e2;color:#991b1b;" onclick="map.closePopup(); removeTrainingItem(window.__trainingMapRows[${i}].key)">Remove</button></div></div>`;
+            if (r.polygon && r.polygon.length >= 3) {
+                const good = r.kind === 'outline';
+                L.polygon(r.polygon, { color: good ? '#16a34a' : '#dc2626', weight: 2, dashArray: good ? null : '5,4', fillOpacity: 0.12 })
+                    .bindPopup(popup).addTo(trainingMapLayer);
+            }
+            const mk = L.marker([r.lat, r.lon], { icon: trainingMarkerIcon(r), zIndexOffset: 500 }).bindPopup(popup).addTo(trainingMapLayer);
+            mk._tmIndex = i;
+        });
+        const c = trainingMapCounts(rows);
+        const bar = document.getElementById('trainingMapBar');
+        if (bar) {
+            const parts = [];
+            if (c.confirmed) parts.push(`<span style="color:#16a34a;">&#10003;</span> ${c.confirmed} confirmed`);
+            if (c.reject) parts.push(`<span style="color:#dc2626;">&#10007;</span> ${c.reject} not real`);
+            if (c.outline) parts.push(`${c.outline} mound outline${c.outline > 1 ? 's' : ''}`);
+            if (c['outline-not']) parts.push(`${c['outline-not']} look-alike outline${c['outline-not'] > 1 ? 's' : ''}`);
+            if (c.settlement) parts.push(`${c.settlement} settlement site${c.settlement > 1 ? 's' : ''}`);
+            document.getElementById('trainingMapBarText').innerHTML = `<b>Training data (${rows.length}):</b> ${parts.join(' &middot; ') || 'none yet'}`;
+        }
+        return rows;
+    }
+    function showTrainingOnMap(fit) {
+        if (!document.getElementById('trainingMapBar')) {
+            const bar = document.createElement('div');
+            bar.id = 'trainingMapBar';
+            const phone = window.innerWidth < 700;
+            bar.style.cssText = 'position:absolute;z-index:1000;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.3);padding:6px 10px;font:12px sans-serif;color:#1e293b;display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap;box-sizing:border-box;'
+                + (phone ? 'top:56px;left:8px;right:56px;' : 'top:10px;left:50%;transform:translateX(-50%);max-width:calc(100% - 520px);min-width:360px;');
+            bar.innerHTML = `<span id="trainingMapBarText" style="flex:1 1 ${phone ? '100%' : '200px'};min-width:0;"></span>
+                <button onclick="fitTrainingOnMap()" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;">Fit all</button>
+                <button onclick="openTrainingReview()" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;">List</button>
+                <button onclick="hideTrainingOnMap()" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;">Hide</button>`;
+            L.DomEvent.disableClickPropagation(bar);
+            map.getContainer().appendChild(bar);
+        }
+        const rows = renderTrainingMapLayer();
+        if (!map.hasLayer(trainingMapLayer)) trainingMapLayer.addTo(map);
+        trainingMapShown = true;
+        const btn = document.getElementById('trainingMapBtn');
+        if (btn) btn.innerText = 'Hide Training Data on Map';
+        // fold the settings panel away so it doesn't cover the markers and their popups
+        if (document.getElementById('panelContent').style.display !== 'none') togglePanel();
+        if (fit) fitTrainingOnMap();
+        const status = document.getElementById('status');
+        if (status) status.innerText = rows.length ? `Showing all ${rows.length} training item${rows.length > 1 ? 's' : ''} on the map. Tap one for details or to remove it.` : 'No training data yet.';
+    }
+    function fitTrainingOnMap() {
+        const rows = window.__trainingMapRows || [];
+        if (!rows.length) return;
+        const pts = [];
+        for (const r of rows) { pts.push([r.lat, r.lon]); if (r.polygon) for (const p of r.polygon) pts.push(p); }
+        if (pts.length === 1) map.setView(pts[0], 17);
+        else map.fitBounds(L.latLngBounds(pts), { paddingTopLeft: [50, 110], paddingBottomRight: [70, 100], maxZoom: 18 });
+    }
+    // ---- Editing training data from the map ----
+    // Edit in a popup changes what the item is (real / not real, mound /
+    // look-alike), its height, width and name, and Move lets you drag it to
+    // where it really is (an outline moves with its marker). Each edit is one
+    // Undo step, and confirmed mounds on the map follow it at once.
+    function trainingItemByKey(key) {
+        const list = key.list === 'outlines' ? trainingData.outlines : trainingData[key.mode][key.list];
+        const idx = key.list === 'outlines' ? list.findIndex(o => o.id === key.id) : list.findIndex(e => e.ts === key.ts);
+        return { list, idx, item: idx >= 0 ? list[idx] : null };
+    }
+    function knownIdForKey(key) { return key.list === 'outlines' ? key.id : (key.mode === 'mounds' && key.list === 'examples' ? 'ex' + key.ts : null); }
+    function refreshKnownMoundIds(ids) {
+        const known = knownMounds();
+        for (const id of ids) {
+            if (!id) continue;
+            removeKnownMound(id);
+            placeKnownMound(known.find(k => k.id === id));
+        }
+    }
+    function openTrainingEdit(i) {
+        const r = (window.__trainingMapRows || [])[i]; if (!r) return;
+        const { item } = trainingItemByKey(r.key); if (!item) return;
+        let open = null;
+        trainingMapLayer.eachLayer(l => { if (l.isPopupOpen && l.isPopupOpen()) open = l; });
+        if (!open) return;
+        const orig = open.getPopup().getContent();
+        const toFt = (m) => m != null && isFinite(m) ? (m / FT_TO_M).toFixed(1) : '';
+        const inp = 'width:100%;box-sizing:border-box;padding:3px 5px;margin:2px 0 6px;font-size:0.8rem;';
+        let typeSel = '', h = null, d = null, hLabel = 'Height (ft)';
+        if (r.key.list === 'outlines') {
+            typeSel = `<select id="tmType" style="${inp}"><option value="mound" ${item.label === 'mound' ? 'selected' : ''}>Mound</option><option value="not" ${item.label !== 'mound' ? 'selected' : ''}>Not a mound (look-alike)</option></select>`;
+            h = item.outline.heightM; d = item.outline.eqDiameterM;
+        } else if (r.mode !== 'settlement') {
+            typeSel = `<select id="tmType" style="${inp}"><option value="examples" ${r.key.list === 'examples' ? 'selected' : ''}>Real ${trainingItemLabel(r.mode)} (confirmed)</option><option value="rejected" ${r.key.list === 'rejected' ? 'selected' : ''}>Not real</option></select>`;
+            if (r.key.list === 'examples') { h = item.maxMetric; d = item.diameter; }
+            else if (item.features) { h = item.features.heightM; d = item.features.diameterM; }
+            if (r.mode === 'caves' || r.mode === 'ceremonial') hLabel = 'Depth (ft)';
+        }
+        const sizes = r.mode === 'settlement' ? '' : `<div style="display:flex;gap:6px;"><label style="flex:1;font-size:0.75rem;">${hLabel}<input id="tmH" type="number" step="0.1" min="0" value="${toFt(h)}" style="${inp}"></label>
+            <label style="flex:1;font-size:0.75rem;">Across (ft)<input id="tmD" type="number" step="0.5" min="0" value="${toFt(d)}" style="${inp}"></label></div>`;
+        open.getPopup().setContent(`<div class="tm-popup" style="font:13px sans-serif;min-width:200px;"><b>Edit: ${escapeHtml(r.title)}</b><br>
+            ${typeSel ? `<label style="font-size:0.75rem;">What it is${typeSel}</label>` : ''}
+            ${sizes}
+            <label style="font-size:0.75rem;">Name / note<input id="tmName" type="text" maxlength="80" value="${escapeHtml(item.name || '')}" style="${inp}"></label>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;">
+              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#16a34a;color:#fff;" onclick="event.stopPropagation(); saveTrainingEdit(${i})">Save</button>
+              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;" onclick="event.stopPropagation(); startTrainingMove(${i})">&#10021; Move</button>
+              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;" onclick="map.closePopup()">Cancel</button></div></div>`);
+        // a cancelled edit leaves the popup as it was
+        open.once('popupclose', () => open.getPopup().setContent(orig));
+    }
+    function applyTrainingEdit(key, change, verb) {
+        const cur = trainingItemByKey(key); if (!cur.item) return null;
+        const before = JSON.parse(JSON.stringify(cur.item));
+        const ids = new Set([knownIdForKey(key)]);
+        const res = change(cur);   // returns the item's key afterwards
+        recordUndo({ kind: 'edited', fromKey: key, toKey: res, before });
+        ids.add(knownIdForKey(res));
+        syncAfterTrainingChange();
+        refreshKnownMoundIds([...ids]);
+        document.getElementById('status').innerText = `${verb} Undo can put it back the way it was.`;
+        return res;
+    }
+    function saveTrainingEdit(i) {
+        const r = (window.__trainingMapRows || [])[i]; if (!r) return;
+        const val = (id) => { const e = document.getElementById(id); if (!e || e.value.trim() === '') return null; const v = parseFloat(e.value); return isFinite(v) && v > 0 ? feetToMeters(v) : null; };
+        const type = document.getElementById('tmType') ? document.getElementById('tmType').value : null;
+        const h = val('tmH'), d = val('tmD');
+        const name = (document.getElementById('tmName') || { value: '' }).value.trim();
+        map.closePopup();
+        applyTrainingEdit(r.key, ({ list, idx, item }) => {
+            if (name) item.name = name; else delete item.name;
+            if (r.key.list === 'outlines') {
+                if (type && type !== item.label) { item.label = type; if (type === 'mound') delete item.lookalike; }
+                if (h != null) item.outline.heightM = h;
+                if (d != null) item.outline.eqDiameterM = d;
+                return r.key;
+            }
+            if (r.mode === 'settlement') return r.key;
+            // size: confirmed items keep it on the example, "not real" ones in
+            // the description scans compare look-alikes against
+            const target = type || r.key.list;
+            if (target === 'examples') {
+                const f = item.features || {};
+                if (r.key.list === 'rejected') {   // now confirmed real
+                    item.diameter = f.diameterM; item.maxMetric = f.heightM;
+                    item.circularity = f.circularity != null ? f.circularity : 0.7; item.elongation = f.elongation != null ? f.elongation : 1.2;
+                    if (r.mode === 'mounds' && f.template != null) item.scanner = { heightM: f.heightM, diameterM: f.diameterM, circularity: f.circularity, elongation: f.elongation, template: f.template, groundSlopeDeg: f.groundSlopeDeg || 0 };
+                    delete item.features;
+                }
+                if (h != null) item.maxMetric = h;
+                if (d != null) item.diameter = d;
+            } else {
+                if (r.key.list === 'examples') {   // now marked not real
+                    const sc = item.scanner || {};
+                    item.features = { diameterM: item.diameter, heightM: item.maxMetric, circularity: item.circularity, elongation: item.elongation,
+                                      template: sc.template != null ? sc.template : null, groundSlopeDeg: sc.groundSlopeDeg != null ? sc.groundSlopeDeg : null, flankSlopeDeg: null };
+                    for (const k of ['diameter', 'maxMetric', 'circularity', 'elongation', 'scanner', 'significance']) delete item[k];
+                }
+                if (item.features) { if (h != null) item.features.heightM = h; if (d != null) item.features.diameterM = d; }
+                else if (h != null && d != null) item.features = { diameterM: d, heightM: h, circularity: 0.7, elongation: 1.2, template: null, groundSlopeDeg: null, flankSlopeDeg: null };
+            }
+            if (target !== r.key.list) { list.splice(idx, 1); trainingData[r.mode][target].push(item); }
+            return { list: target, mode: r.mode, ts: r.key.ts };
+        }, 'Training item updated.');
+    }
+    function startTrainingMove(i) {
+        const r = (window.__trainingMapRows || [])[i]; if (!r) return;
+        const mk = trainingMapLayer.getLayers().find(l => l._tmIndex === i); if (!mk) return;
+        map.closePopup();
+        mk.dragging.enable();
+        mk.setZIndexOffset(2000);
+        const status = document.getElementById('status');
+        if (status) status.innerText = 'Drag the marker to where the feature really is.';
+        const bar = document.getElementById('trainingMapBarText');
+        if (bar) bar.innerHTML = '<b>Moving:</b> drag the marker to where it really is.';
+        mk.once('dragend', () => {
+            const ll = mk.getLatLng(), dLat = ll.lat - r.lat, dLon = ll.lng - r.lon;
+            applyTrainingEdit(r.key, ({ item }) => {
+                if (r.key.list === 'outlines') {
+                    item.centroid = [item.centroid[0] + dLat, item.centroid[1] + dLon];
+                    item.polygon = item.polygon.map(([a, b]) => [a + dLat, b + dLon]);
+                } else { item.lat += dLat; item.lon += dLon; }
+                return r.key;
+            }, `Moved ${Math.round(approxMetersBetween(r.lat, r.lon, ll.lat, ll.lng) / FT_TO_M)} ft.`);
+        });
+    }
+
+    function hideTrainingOnMap() {
+        if (trainingMapLayer) map.removeLayer(trainingMapLayer);
+        const bar = document.getElementById('trainingMapBar'); if (bar) bar.remove();
+        trainingMapShown = false;
+        const btn = document.getElementById('trainingMapBtn');
+        if (btn) btn.innerText = 'Show Training Data on Map';
+    }
+    function toggleTrainingOnMap() { if (trainingMapShown) hideTrainingOnMap(); else showTrainingOnMap(true); }
 
     // ==== CONFIRMED MOUNDS ====
     // Mounds you have confirmed (an outline saved as a mound, "This is a
@@ -3244,6 +3497,8 @@
     let storagePersistAsked = false;
     function saveTrainingData(isNewConfirmation) {
         trainingData._savedAt = Date.now();
+        // keep "Show all on map" in step with every change
+        if (trainingMapShown && !window.__trainingMapPending) { window.__trainingMapPending = true; setTimeout(() => { window.__trainingMapPending = false; if (trainingMapShown) renderTrainingMapLayer(true); }, 0); }
         if (isNewConfirmation) trainingData._unbackedUp = (trainingData._unbackedUp || 0) + 1;
         let lsOk = true;
         try { localStorage.setItem(TRAINING_KEY, JSON.stringify(trainingData)); }
