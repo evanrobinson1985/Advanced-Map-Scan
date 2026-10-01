@@ -2654,7 +2654,7 @@
     // honoured. TensorFlow.js runs it in the browser (on the graphics card
     // where possible); it's only loaded when this section is used.
     const DL = { PATCH: 48, INPUT: 40, RES: 1.0, BORDER: 3, STRIDE: 4, BG_PER_AREA: 150, BG_MAX: 1500, MAX_SCAN_CELLS: 2.5e6,
-                 MODEL_URL: 'indexeddb://lidar-dl-mounds-v1', EPOCHS: 40 };
+                 CH: 3, MODEL_VERSION: 2, MODEL_URL: 'indexeddb://lidar-dl-mounds-v2', EPOCHS: 40 };
     let dlPatches = null, dlModel = null, dlBusy = false, dlCancel = false;
     MODE_STYLE.dlmounds = { color: '#9333ea', letter: 'D', label: 'Mounds (deep learning)' };
 
@@ -2777,18 +2777,52 @@
             w[i] = v > 5 ? 5 : v < -5 ? -5 : v;
         }
     }
-    // One network input from a stored patch: crop at (dr, dc), one of the 8
-    // rotations/mirrors, height scaled, then detrended
-    function dlInputFromPatch(cm, out, off, dr, dc, t, hScale) {
-        const P = DL.PATCH, N = DL.INPUT;
+    // The three views the network gets of a window of raw elevations
+    // (N x N at woff in w), written interleaved (N x N x 3) to out at ooff:
+    //  1. relief: height above the tilted ground (plane through the
+    //     window's border), in metres;
+    //  2. fine relief: relief minus its 7 x 7 m average, which brings out
+    //     small sharp bumps (tree throws, boulders, knobs) next to broad,
+    //     smooth rises like mounds;
+    //  3. steepness of the relief (1 = 27 degrees, 2 = 45 or steeper).
+    const dlRel = new Float32Array(DL.INPUT * DL.INPUT), dlInt = new Float64Array((DL.INPUT + 1) ** 2);
+    function dlFeatures(w, woff, out, ooff) {
+        const N = DL.INPUT, M = N + 1, C = DL.CH, R = dlRel;
+        for (let i = 0; i < N * N; i++) R[i] = w[woff + i];
+        dlDetrend(R, 0);
+        for (let r = 0; r < N; r++) { let rs = 0; for (let c = 0; c < N; c++) { rs += R[r * N + c]; dlInt[(r + 1) * M + c + 1] = dlInt[r * M + c + 1] + rs; } }
+        for (let r = 0; r < N; r++) {
+            const r0 = Math.max(0, r - 3), r1 = Math.min(N, r + 4);
+            for (let c = 0; c < N; c++) {
+                const c0 = Math.max(0, c - 3), c1 = Math.min(N, c + 4), i = r * N + c, o = ooff + i * C;
+                const mean = (dlInt[r1 * M + c1] - dlInt[r0 * M + c1] - dlInt[r1 * M + c0] + dlInt[r0 * M + c0]) / ((r1 - r0) * (c1 - c0));
+                const fine = 2 * (R[i] - mean);
+                const gx = (R[r * N + Math.min(N - 1, c + 1)] - R[r * N + Math.max(0, c - 1)]) / (c > 0 && c < N - 1 ? 2 : 1);
+                const gy = (R[Math.min(N - 1, r + 1) * N + c] - R[Math.max(0, r - 1) * N + c]) / (r > 0 && r < N - 1 ? 2 : 1);
+                out[o] = R[i];
+                out[o + 1] = fine > 4 ? 4 : fine < -4 ? -4 : fine;
+                out[o + 2] = Math.min(2, 2 * Math.hypot(gx, gy));
+            }
+        }
+    }
+    // Copies an N x N window turned/mirrored by t (0-7: the 8 ways a square
+    // can be rotated or flipped); src is read at row stride sStride
+    function dlOrient(src, soff, sStride, dst, t, scale) {
+        const N = DL.INPUT;
         for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
             let rr = r, cc = c;
             if (t & 1) cc = N - 1 - cc;
             if (t & 2) rr = N - 1 - rr;
             if (t & 4) { const tmp = rr; rr = cc; cc = tmp; }
-            out[off + r * N + c] = cm[(rr + dr) * P + (cc + dc)] * 0.01 * hScale;
+            dst[r * N + c] = src[soff + rr * sStride + cc] * scale;
         }
-        dlDetrend(out, off);
+    }
+    // One network input from a stored patch: crop at (dr, dc), one of the 8
+    // rotations/mirrors, height scaled, then the three views
+    const dlRaw = new Float32Array(DL.INPUT * DL.INPUT);
+    function dlInputFromPatch(cm, out, off, dr, dc, t, hScale) {
+        dlOrient(cm, dr * DL.PATCH + dc, DL.PATCH, dlRaw, t, 0.01 * hScale);
+        dlFeatures(dlRaw, 0, out, off);
     }
 
     // Training items that can teach the network, with labels as they are now
@@ -2857,7 +2891,7 @@
         const areas = new Set(dlPatches.bg.map(b => b.area)).size;
         el.innerHTML = `<b>Samples:</b> ${s.pos.length} mound${s.pos.length === 1 ? '' : 's'}, ${s.neg.length} not-mound${s.neg.length === 1 ? '' : 's'}, ${s.bg.length} background (${areas} area${areas === 1 ? '' : 's'})` +
             (s.missing.pos + s.missing.neg ? `<br><span style="color:#92400e;">${s.missing.pos ? s.missing.pos + ' mound' + (s.missing.pos > 1 ? 's' : '') : ''}${s.missing.pos && s.missing.neg ? ' and ' : ''}${s.missing.neg ? s.missing.neg + ' not-mound' + (s.missing.neg > 1 ? 's' : '') : ''} still need a sample: load a DTM that covers ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'}.</span>` : '') +
-            `<br><b>Model:</b> ` + (m ? `trained ${new Date(m.at).toLocaleString()} on ${m.pos} mounds and ${m.neg} not-mounds${m.val ? `; held-out check: found ${m.val.posHit} of ${m.val.pos} mounds, wrongly flagged ${m.val.negHit} of ${m.val.neg} not-mounds` : ' (too few mounds for a held-out check)'}` : 'not trained yet');
+            `<br><b>Model:</b> ` + (m && dlModelOutdated() ? '<span style="color:#92400e;">the method was upgraded; press Train model again (samples are kept)</span>' : m ? `trained ${new Date(m.at).toLocaleString()} on ${m.pos} mounds and ${m.neg} not-mounds${m.val ? `; held-out check: found ${m.val.posHit} of ${m.val.pos} mounds, wrongly flagged ${m.val.negHit} of ${m.val.neg} not-mounds` : ' (too few mounds for a held-out check)'}` : 'not trained yet');
     }
     async function dlCollectNow() {
         if (dlBusy) return;
@@ -2877,7 +2911,7 @@
     // ---- The network ----
     function dlBuildModel(tf) {
         const m = tf.sequential();
-        m.add(tf.layers.conv2d({ inputShape: [DL.INPUT, DL.INPUT, 1], filters: 16, kernelSize: 3, padding: 'same', activation: 'relu' }));
+        m.add(tf.layers.conv2d({ inputShape: [DL.INPUT, DL.INPUT, DL.CH], filters: 16, kernelSize: 3, padding: 'same', activation: 'relu' }));
         m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
         m.add(tf.layers.conv2d({ filters: 32, kernelSize: 3, padding: 'same', activation: 'relu' }));
         m.add(tf.layers.maxPooling2d({ poolSize: 2 }));
@@ -2914,7 +2948,7 @@
             const pos = dlShuffle([...S.pos], rnd), neg = dlShuffle([...negAll], rnd);
             const nvp = pos.length >= 5 ? Math.max(1, Math.round(pos.length / 5)) : 0, nvn = nvp ? Math.round(neg.length / 5) : 0;
             const valPos = pos.slice(0, nvp), valNeg = neg.slice(0, nvn), trPos = pos.slice(nvp), trNeg = neg.slice(nvn);
-            const N = DL.INPUT, sz = N * N, c0 = (DL.PATCH - N) / 2;
+            const N = DL.INPUT, CH = DL.CH, sz = N * N * CH, c0 = (DL.PATCH - N) / 2;
             // mounds are rare: each epoch shows every mound several times
             // (shifted, turned, mirrored, a little taller or lower)
             const reps = Math.max(1, Math.round(0.5 * trNeg.length / trPos.length));
@@ -2930,7 +2964,7 @@
                     dlInputFromPatch(s.cm, xs, i * sz, dr, dc, Math.floor(rnd() * 8), y ? 0.8 + rnd() * 0.45 : 0.9 + rnd() * 0.2);
                     ys[i] = y;
                 });
-                const X = tf.tensor4d(xs, [set.length, N, N, 1]), Y = tf.tensor2d(ys, [set.length, 1]);
+                const X = tf.tensor4d(xs, [set.length, N, N, CH]), Y = tf.tensor2d(ys, [set.length, 1]);
                 const h = await model.fit(X, Y, { epochs: 1, batchSize: 32, shuffle: false, verbose: 0 });
                 X.dispose(); Y.dispose();
                 dlSetStatus(`Training: round ${ep + 1} of ${DL.EPOCHS} (accuracy ${Math.round(100 * h.history.acc[0])}%, ${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}...`);
@@ -2940,15 +2974,17 @@
             let val = null;
             if (nvp) {
                 const vs = [...valPos.map(s => [s, 1]), ...valNeg.map(s => [s, 0])];
-                const xs = new Float32Array(vs.length * sz);
-                vs.forEach(([s], i) => dlInputFromPatch(s.cm, xs, i * sz, c0, c0, 0, 1));
-                const p = tf.tidy(() => model.predict(tf.tensor4d(xs, [vs.length, N, N, 1])).dataSync());
+                // each scored all 8 ways and averaged, as the scan does
+                const xs = new Float32Array(vs.length * 8 * sz);
+                vs.forEach(([s], i) => { for (let t = 0; t < 8; t++) dlInputFromPatch(s.cm, xs, (i * 8 + t) * sz, c0, c0, t, 1); });
+                const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs, [vs.length * 8, N, N, CH])).dataSync());
+                const p = vs.map((_, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; return m / 8; });
                 const thr = dlThreshold();
                 val = { pos: valPos.length, neg: valNeg.length, posHit: vs.filter(([, y], i) => y && p[i] >= thr).length, negHit: vs.filter(([, y], i) => !y && p[i] >= thr).length };
             }
             await model.save(DL.MODEL_URL);
             dlModel = model;
-            dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val };
+            dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val, version: DL.MODEL_VERSION };
             saveTrainingData();
             await updateDLSummary();
             dlSetStatus(`Trained in ${Math.round((Date.now() - t0) / 1000)} s on ${S.pos.length} mounds and ${negAll.length} not-mound samples.` +
@@ -2960,7 +2996,9 @@
         } finally { dlSetBusy(false); }
     }
     function dlThreshold() { const e = document.getElementById('dlThreshold'); return e ? parseFloat(e.value) : 0.8; }
+    function dlModelOutdated() { const m = dlPrefs().model; return !!m && m.version !== DL.MODEL_VERSION; }
     async function dlGetModel(tf) {
+        if (dlModelOutdated()) return null;
         if (dlModel) return dlModel;
         try { dlModel = await tf.loadLayersModel(DL.MODEL_URL); } catch (e) { dlModel = null; }
         return dlModel;
@@ -2982,7 +3020,7 @@
             const tf = await loadTF();
             await dlUseBackend(tf, 'scan');
             const model = await dlGetModel(tf);
-            if (!model) { dlSetStatus('Train the model first.'); return; }
+            if (!model) { dlSetStatus(dlModelOutdated() ? 'The deep-learning method was upgraded since this model was trained: press Train model again (your samples are kept).' : 'Train the model first.'); return; }
             const g = fullDemGrid, v = visibleWindow(g);
             if (!v) { dlSetStatus('The map view is outside the loaded DTM.'); return; }
             const b = g.bounds, dLat = (b.n - b.s) / g.h, dLon = (b.e - b.w) / g.w;
@@ -2990,19 +3028,19 @@
             const lat0 = (area.n + area.s) / 2, mLat = 1 / 111320, mLon = 1 / (111320 * Math.cos(lat0 * Math.PI / 180));
             const RW = Math.floor((area.e - area.w) / mLon / DL.RES), RH = Math.floor((area.n - area.s) / mLat / DL.RES);
             if (RW * RH > DL.MAX_SCAN_CELLS) { dlSetStatus(`The area in view is ${(RW * RH / 1e6).toFixed(1)} km²; the deep-learning scan handles up to ${DL.MAX_SCAN_CELLS / 1e6} km² at a time. Zoom in and scan again.`); return; }
-            const N = DL.INPUT, sz = N * N;
+            const N = DL.INPUT, CH = DL.CH, sz = N * N * CH;
             if (RW < N || RH < N) { dlSetStatus('Zoom out a little: the view must be at least 40 m across.'); return; }
             dlSetStatus('Preparing the terrain...'); await dlTick();
             const sample = dlSampler(g), R = new Float32Array(RW * RH);
             for (let r = 0; r < RH; r++) for (let c = 0; c < RW; c++) R[r * RW + c] = sample(area.n - (r + 0.5) * DL.RES * mLat, area.w + (c + 0.5) * DL.RES * mLon);
             const st = DL.STRIDE, GW = Math.floor((RW - N) / st) + 1, GH = Math.floor((RH - N) / st) + 1, total = GW * GH;
             const prob = new Float32Array(total);
-            const BATCH = 256, xs = new Float32Array(BATCH * sz), which = new Int32Array(BATCH);
+            const BATCH = 256, xs = new Float32Array(BATCH * sz), which = new Int32Array(BATCH), win = new Float32Array(N * N);
             const t0 = Date.now();
             let k = 0, nb = 0;
             const flush = async () => {
                 if (!nb) return;
-                const p = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, nb * sz), [nb, N, N, 1])).dataSync());
+                const p = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, nb * sz), [nb, N, N, CH])).dataSync());
                 for (let i = 0; i < nb; i++) prob[which[i]] = p[i];
                 nb = 0;
             };
@@ -3012,10 +3050,10 @@
                     let bad = false;
                     for (let r = 0; r < N && !bad; r++) {
                         const src = (r0 + r) * RW + c0;
-                        for (let c = 0; c < N; c++) { const z = R[src + c]; if (z !== z) { bad = true; break; } xs[off + r * N + c] = z; }
+                        for (let c = 0; c < N; c++) { const z = R[src + c]; if (z !== z) { bad = true; break; } win[r * N + c] = z; }
                     }
                     if (bad) continue;
-                    dlDetrend(xs, off);
+                    dlFeatures(win, 0, xs, off);
                     which[nb++] = k;
                     if (nb === BATCH) await flush();
                 }
@@ -3023,10 +3061,14 @@
             }
             await flush();
             if (dlCancel) { dlSetStatus('Scan stopped.'); return; }
-            // peaks: highest in their 3 x 3 neighbourhood, then at least 15 m apart
-            const thr = dlThreshold(), peaks = [];
+            // peaks: highest in their 3 x 3 neighbourhood, then at least 15 m
+            // apart. Near-misses are included here because every peak is then
+            // scored again all 8 ways (turned and mirrored) and the average
+            // decides, so a lucky angle can't make a false alarm and an
+            // unlucky one can't hide a mound.
+            const thr = dlThreshold(), pre = Math.max(0.3, thr - 0.2), peaks = [];
             for (let gi = 0; gi < GH; gi++) for (let gj = 0; gj < GW; gj++) {
-                const p = prob[gi * GW + gj]; if (p < thr) continue;
+                const p = prob[gi * GW + gj]; if (p < pre) continue;
                 let top = true;
                 for (let a = -1; a <= 1 && top; a++) for (let bq = -1; bq <= 1; bq++) {
                     if (!a && !bq) continue;
@@ -3038,11 +3080,26 @@
                 let sw = 0, sy = 0, sx = 0;
                 for (let a = -1; a <= 1; a++) for (let bq = -1; bq <= 1; bq++) { const y = gi + a, x = gj + bq; if (y < 0 || y >= GH || x < 0 || x >= GW) continue; const w = prob[y * GW + x]; sw += w; sy += w * y; sx += w * x; }
                 const cy = (sy / sw) * st + (N - 1) / 2 + 0.5, cx = (sx / sw) * st + (N - 1) / 2 + 0.5;
-                peaks.push({ p, lat: area.n - cy * DL.RES * mLat, lon: area.w + cx * DL.RES * mLon });
+                peaks.push({ p, gi, gj, lat: area.n - cy * DL.RES * mLat, lon: area.w + cx * DL.RES * mLon });
             }
             peaks.sort((a, b2) => b2.p - a.p);
+            peaks.length = Math.min(peaks.length, 800);
+            dlSetStatus(`Double-checking ${peaks.length} possible candidates 8 ways...`); await dlTick();
+            const raw = new Float32Array(N * N), per = Math.floor(BATCH / 8);
+            for (let i0 = 0; i0 < peaks.length && !dlCancel; i0 += per) {
+                const grp = peaks.slice(i0, i0 + per);
+                grp.forEach((pk, i) => {
+                    const off0 = pk.gi * st * RW + pk.gj * st;
+                    for (let t = 0; t < 8; t++) { dlOrient(R, off0, RW, raw, t, 1); dlFeatures(raw, 0, xs, (i * 8 + t) * sz); }
+                });
+                const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, grp.length * 8 * sz), [grp.length * 8, N, N, CH])).dataSync());
+                grp.forEach((pk, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; pk.p = m / 8; });
+                await dlTick();
+            }
+            if (dlCancel) { dlSetStatus('Scan stopped.'); return; }
+            const sure = peaks.filter(pk => pk.p >= thr).sort((a, b2) => b2.p - a.p);
             const kept = [];
-            for (const pk of peaks) if (!kept.some(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < 15)) kept.push(pk);
+            for (const pk of sure) if (!kept.some(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < 15)) kept.push(pk);
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
             let skippedRejected = 0;
             const results = [];
@@ -3054,9 +3111,17 @@
                 results.push({ ...pk, meas: dlMeasure(g, pk.lat, pk.lon) });
                 if (results.length % 5 === 0) { dlSetStatus(`Measuring candidates: ${results.length}...`); await dlTick(); }
             }
-            // ones with a measurable rise first: a confident peak with no closed
-            // high under it is usually a false alarm
-            results.sort((a, b2) => (!!b2.meas - !!a.meas) || b2.p - a.p);
+            // Order: spots the regular mound scan also found (or your
+            // confirmed mounds), then ones with a measurable rise (a confident
+            // peak with no closed high under it is usually a false alarm),
+            // then by confidence
+            const regular = detectedFeatures.filter(f => f.mode === 'mounds' && !f.known);
+            for (const res of results) {
+                const la = res.meas ? res.meas.lat : res.lat, lo = res.meas ? res.meas.lon : res.lon;
+                res.agree = regular.some(f => approxMetersBetween(f.lat, f.lon, la, lo) < Math.max(10, 0.6 * (f.diameter || 10)));
+                res.known = knownMounds().some(k2 => approxMetersBetween(k2.lat, k2.lon, la, lo) < Math.max(10, 0.6 * k2.d));
+            }
+            results.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (!!b2.meas - !!a.meas) || b2.p - a.p);
             const heldBack = Math.max(0, kept.length - skippedRejected - maxResults);
             results.length = Math.min(results.length, maxResults);
             clearModeDetections('dlmounds');
@@ -3065,9 +3130,10 @@
             if (results.length && document.getElementById('panelContent').style.display !== 'none') togglePanel();
             updateDetectionLegend();
             if (typeof updateExportButtons === 'function') updateExportButtons();
-            const known = window.__dlFeats.filter(f => f.dlKnown).length;
+            const known = window.__dlFeats.filter(f => f.dlKnown).length, agreed = results.filter(r2 => r2.agree).length;
             const msg = `Deep-learning scan: ${results.length} candidate${results.length === 1 ? '' : 's'} at ${Math.round(thr * 100)}%+ confidence` +
                 (known ? ` (${known} of them your confirmed mounds)` : '') +
+                (regular.length ? `; the regular mound scan agrees on ${agreed}` : '; run the regular mound scan too, then this one again, to see where both agree') +
                 (skippedRejected ? `; ${skippedRejected} skipped at spots you marked not real` : '') +
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
                 ` (${Math.round((Date.now() - t0) / 1000)} s). They're purple "D" markers; answer Yes / Not real on each to teach it more, then train again.`;
@@ -3114,7 +3180,8 @@
                <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;line-height:1.3;">Your answer goes into the training data (the regular scans use it too). Train again to update the network.</div>`;
         const html = `<b>Possible Native Mound</b> <span style="background:#9333ea;color:#fff;border-radius:4px;padding:0 4px;font-size:0.7rem;">deep learning, experimental</span><br>
             <i style="color:#64748b">Found by the neural network trained on your data &mdash; confirm in the field; mounds may be legally protected</i><br>
-            <b>Network confidence:</b> ${Math.round(res.p * 100)}%<br>
+            <b>Network confidence:</b> ${Math.round(res.p * 100)}% (averaged over 8 rotations)<br>
+            ${res.agree ? '<div style="margin:3px 0;color:#166534;background:#dcfce7;padding:3px 6px;border-radius:4px;font-size:0.8rem;"><b>&#10003; The regular mound scan found this too</b>: both methods agree.</div>' : ''}
             ${m ? `<b>Height:</b> ${ft(m.h)}<br><b>Across:</b> ${ft(m.d)}<br><b>Roundness:</b> ${m.circ.toFixed(2)}, <b>stretch</b> ${m.elong.toFixed(2)}&times;<br>${m.rugged ? '<span style="color:#92400e;">&#9888; Rugged ground: measurements are rough.</span><br>' : ''}`
                  : '<span style="color:#92400e;">&#9888; No closed high to measure here: the network sees something mound-like, but the ground doesn\'t rise above a closed contour. Often a false alarm. If it is a mound, outline it to record its true size.</span><br>'}
             <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}${answer}`;
