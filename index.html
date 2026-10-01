@@ -3047,23 +3047,29 @@
             let skippedRejected = 0;
             const results = [];
             for (const pk of kept) {
-                if (results.length >= maxResults) break;
+                if (results.length >= 2 * maxResults) break;
                 // your "Not real" marks and look-alike outlines always win
                 if (trainingData.mounds.rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, pk.lat, pk.lon) < 20) ||
                     trainingData.outlines.some(o => o.label === 'not' && pointInPoly(pk.lon, pk.lat, o.polygon.map(([a2, b2]) => [b2, a2])))) { skippedRejected++; continue; }
                 results.push({ ...pk, meas: dlMeasure(g, pk.lat, pk.lon) });
                 if (results.length % 5 === 0) { dlSetStatus(`Measuring candidates: ${results.length}...`); await dlTick(); }
             }
+            // ones with a measurable rise first: a confident peak with no closed
+            // high under it is usually a false alarm
+            results.sort((a, b2) => (!!b2.meas - !!a.meas) || b2.p - a.p);
+            const heldBack = Math.max(0, kept.length - skippedRejected - maxResults);
+            results.length = Math.min(results.length, maxResults);
             clearModeDetections('dlmounds');
             window.__dlFeats = [];
             for (const res of results) dlRenderResult(res);
+            if (results.length && document.getElementById('panelContent').style.display !== 'none') togglePanel();
             updateDetectionLegend();
             if (typeof updateExportButtons === 'function') updateExportButtons();
             const known = window.__dlFeats.filter(f => f.dlKnown).length;
             const msg = `Deep-learning scan: ${results.length} candidate${results.length === 1 ? '' : 's'} at ${Math.round(thr * 100)}%+ confidence` +
                 (known ? ` (${known} of them your confirmed mounds)` : '') +
                 (skippedRejected ? `; ${skippedRejected} skipped at spots you marked not real` : '') +
-                (kept.length > results.length + skippedRejected ? `; ${kept.length - results.length - skippedRejected} more held back by Max results` : '') +
+                (heldBack ? `; ${heldBack} more held back by Max results` : '') +
                 ` (${Math.round((Date.now() - t0) / 1000)} s). They're purple "D" markers; answer Yes / Not real on each to teach it more, then train again.`;
             dlSetStatus(msg); status.innerText = msg;
         } catch (e) {
