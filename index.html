@@ -3116,12 +3116,17 @@
             // peak with no closed high under it is usually a false alarm),
             // then by confidence
             const regular = detectedFeatures.filter(f => f.mode === 'mounds' && !f.known);
+            // smaller across than the smallest mound the regular scan accepts
+            // (tree throws, boulders and knobs usually are): listed last
+            const pd = moundShapePresetDefs();
+            const minD = feetToMeters(Math.min(pd.conical.minDiameter, pd.platform.minDiameter, parseFloat(document.getElementById('minDiameter').value) || Infinity));
             for (const res of results) {
+                res.small = !!res.meas && res.meas.d < minD; res.minD = minD;
                 const la = res.meas ? res.meas.lat : res.lat, lo = res.meas ? res.meas.lon : res.lon;
                 res.agree = regular.some(f => approxMetersBetween(f.lat, f.lon, la, lo) < Math.max(10, 0.6 * (f.diameter || 10)));
                 res.known = knownMounds().some(k2 => approxMetersBetween(k2.lat, k2.lon, la, lo) < Math.max(10, 0.6 * k2.d));
             }
-            results.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (!!b2.meas - !!a.meas) || b2.p - a.p);
+            results.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!b2.meas - !!a.meas) || b2.p - a.p);
             const heldBack = Math.max(0, kept.length - skippedRejected - maxResults);
             results.length = Math.min(results.length, maxResults);
             clearModeDetections('dlmounds');
@@ -3181,6 +3186,7 @@
         const html = `<b>Possible Native Mound</b> <span style="background:#9333ea;color:#fff;border-radius:4px;padding:0 4px;font-size:0.7rem;">deep learning, experimental</span><br>
             <i style="color:#64748b">Found by the neural network trained on your data &mdash; confirm in the field; mounds may be legally protected</i><br>
             <b>Network confidence:</b> ${Math.round(res.p * 100)}% (averaged over 8 rotations)<br>
+            ${res.small ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; Smaller across than your smallest mound size setting (${Math.round(res.minD / FT_TO_M)} ft): could be a tree throw, boulder or natural knob.</div>` : ''}
             ${res.agree ? '<div style="margin:3px 0;color:#166534;background:#dcfce7;padding:3px 6px;border-radius:4px;font-size:0.8rem;"><b>&#10003; The regular mound scan found this too</b>: both methods agree.</div>' : ''}
             ${m ? `<b>Height:</b> ${ft(m.h)}<br><b>Across:</b> ${ft(m.d)}<br><b>Roundness:</b> ${m.circ.toFixed(2)}, <b>stretch</b> ${m.elong.toFixed(2)}&times;<br>${m.rugged ? '<span style="color:#92400e;">&#9888; Rugged ground: measurements are rough.</span><br>' : ''}`
                  : '<span style="color:#92400e;">&#9888; No closed high to measure here: the network sees something mound-like, but the ground doesn\'t rise above a closed contour. Often a false alarm. If it is a mound, outline it to record its true size.</span><br>'}
