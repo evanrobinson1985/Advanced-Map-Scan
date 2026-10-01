@@ -65,6 +65,9 @@
         .shelter-marker { filter: hue-rotate(270deg); }
         .hunt-marker { filter: hue-rotate(90deg); }
         #panelHeader:hover { opacity: 0.8; }
+    /* Scale bar: readable over hillshade; on phones it sits above the folded panel */
+    .leaflet-control-scale-line { background: rgba(255,255,255,0.85); border-color: #1e293b; color: #1e293b; font-weight: bold; font-size: 12px; }
+    @media (max-width: 700px) { .leaflet-bottom.leaflet-left { bottom: 84px; } }
     .outline-drawing .leaflet-interactive { pointer-events: none !important; }
     .outline-drawing { cursor: crosshair; }
 </style>
@@ -841,6 +844,9 @@
         if (res.length === 1) { list.style.display = 'none'; goToLocation(res[0].lat, res[0].lon, res[0].label, res[0].bbox); return; }
         list.innerHTML = res.map((r2, i) => `<div class="loc-result" style="padding:5px 6px;border-top:1px solid #e2e8f0;cursor:pointer;" onclick="const r2 = window.__locResults[${i}]; document.getElementById('locSearchResults').style.display='none'; goToLocation(r2.lat, r2.lon, r2.label, r2.bbox);">${escapeHtml(r2.label)}</div>`).join('');
     }
+    // Scale bar in feet / miles (switches to miles past 5,280 ft)
+    L.control.scale({ position: 'bottomleft', imperial: true, metric: false, maxWidth: 160 }).addTo(map);
+
     const locSearch = L.control({ position: 'topright' });
     locSearch.onAdd = function () {
         const div = L.DomUtil.create('div');

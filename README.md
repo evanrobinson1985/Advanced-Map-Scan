@@ -110,6 +110,8 @@ Tap an item for its details and **Edit**, **Zoom in** or **Remove**. **Edit** ch
 
 Every edit is one Undo step. Confirmed mounds on the map, the look-alike avoidance and the learned settings follow each edit straight away.
 
+**Scale bar.** A scale bar at the bottom left of the map shows distance in feet, switching to miles when zoomed out. On phones it sits just above the folded settings panel.
+
 **Keeping training data.** Training data is saved in two places in the browser (localStorage and IndexedDB, the newer copy wins on load), and the app asks the browser to keep the site's storage persistent. Both copies belong to the exact address the app is opened from, including the port, and are lost if the site's data is cleared. So the Training Data panel counts confirmations not yet in a backup file, with **Back up now**. Where the browser supports it, **Keep a backup file updated automatically** rewrites a backup file after every confirmation. **Import Training Data** merges with what is already there, so restoring an older backup never loses newer work.
 
 **Horizontal Cave Entrances.** A walk-in cave mouth in a bluff face can't be seen in bare-earth LiDAR. This mode finds the settings such entrances open into: gentle ground or a talus apron at the foot of a real cliff. By default a site must also show a karst drainage sign:
