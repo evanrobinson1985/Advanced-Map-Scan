@@ -121,6 +121,23 @@ Sinks upslope, a south/southeast-facing cliff and a match in a loaded cave surve
 
 The original scan modes (caves/sinkholes, mounds, rockshelters, settlement likelihood) and training-data features are unchanged.
 
+**Experimental: deep-learning mound detection** (panel section 6). A small convolutional neural network learns what mounds look like from your own training data, instead of following the scan's hand-written rules.
+
+What it learns from:
+
+- **Mounds:** every confirmed mound and every outline saved as a mound.
+- **Not mounds:** every "Not real" mound mark, every look-alike outline, and random ground from each area you load. Almost all ground is not a mound, and that random ground keeps 35 m clear of every mound you know of.
+
+How it works:
+
+- **Terrain samples.** It looks at a 40 m × 40 m square of bare-earth terrain at 1 m, with the ground's overall tilt removed, so a mound on a hillside looks like one on flat ground. It needs a sample of the terrain under each training item, taken whenever a DTM covering that item is loaded. After you first use the section, every DTM you load adds its samples automatically; **Collect samples from this DTM** does it on demand. Samples are kept in this browser (IndexedDB) and build up across areas and sessions. The panel shows which items still need a DTM loaded around them.
+- **Train model.** Training happens in the browser with TensorFlow.js, which loads from a CDN on first use. Each round shows every mound shifted, rotated, mirrored and a little taller or lower, because mounds are rare compared with ordinary ground. Training always starts from the current data, so edits, removals and Undo are honoured. With 5 or more mounds, about 1 in 5 of each kind is held back and the panel reports how many of those unseen mounds it found and how many unseen not-mounds it wrongly flagged.
+- **Scan with deep learning.** It scores a 40 m window every 4 m over the area in view, up to 2.5 km² at a time, and keeps peaks above the **Confidence** setting at least 15 m apart. Each peak is measured with the same mound measurer as "This is a Mound". A peak with no closed high under it is shown but flagged as a likely false alarm. Your "Not real" marks and look-alike outlines always win.
+- **Results.** Results are purple "D" markers on their own layer and legend entry, separate from the regular scan. A candidate on one of your confirmed mounds says so, which is a quick sanity check.
+- **Answering.** **Yes** / **Not real** on a candidate saves to the same training data as the regular scan and takes its terrain sample at once. Train again to update the network.
+
+Expect rough results with fewer than about 20 confirmed mounds. Random ground can occasionally contain an unrecorded mound, which slightly confuses the network. Mounds wider than about 35 m don't fit in its window.
+
 ## Batch pipeline
 
 ```bash
