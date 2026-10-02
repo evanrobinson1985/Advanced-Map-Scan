@@ -201,7 +201,7 @@ Every DTM you load collects samples for both models once you have used them. Sav
 **Training-site tour.** **🗺 Training-site tour (public mound sites)** in the Deep Learning section collects training candidates from known mound sites without you driving the map. The list starts with the 34 public parks and monuments in `docs/mound-training-sites.csv`. Each site is marked *Mounds*, *Effigies* or *Mounds + effigies*.
 
 - **Run tour.** For each waiting site, the app:
-  1. downloads about a mile square of terrain (addresses are looked up first);
+  1. zooms in on the site and downloads only a square around it at 1 m: 500 m (1,650 ft) by default, or 300 m or 1 km, chosen with *Area scanned at each site* (addresses are looked up first);
   2. runs the mound scan, the effigy scan, or both;
   3. queues every candidate with a terrain sample for both models;
   4. collects ordinary ground for both models, kept clear of the candidates.

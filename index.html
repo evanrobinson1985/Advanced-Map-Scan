@@ -1131,8 +1131,8 @@
     // is memory: 4 bytes per cell, plus scan working space, hence the budget.
     const DL_TILE_PX = 2048, DL_PARALLEL = 4;
     function planDownload() {
-        const mb = map.getBounds();
-        const bb = { n: Math.min(85, mb.getNorth()), s: Math.max(-85, mb.getSouth()), e: Math.min(180, mb.getEast()), w: Math.max(-180, mb.getWest()) };
+        const mb = map.getBounds(), ov = window.__dlBoundsOverride;   // the training tour downloads an exact square around a site
+        const bb = ov ? { ...ov } : { n: Math.min(85, mb.getNorth()), s: Math.max(-85, mb.getSouth()), e: Math.min(180, mb.getEast()), w: Math.max(-180, mb.getWest()) };
         const midLat = (bb.n + bb.s) / 2 * Math.PI / 180;
         const width_m = 6371000 * (bb.e - bb.w) * Math.PI / 180 * Math.cos(midLat);
         const height_m = 6371000 * (bb.n - bb.s) * Math.PI / 180;
@@ -4390,7 +4390,9 @@
         ['Oakville Indian Mounds Park (AL)', 'mounds', null, null, '1219 County Road 187, Danville, AL'],
         ['Florence Indian Mound (AL)', 'mounds', null, null, '110 W College St, Florence, AL']
     ];
-    const TOUR_RADIUS_M = 800;   // each site's download: a square this far around the point
+    // each site's download: a square this size centred on the site
+    const TOUR_SIZES = [[300, 'Small: 300 m (1,000 ft) square'], [500, 'Medium: 500 m (1,650 ft) square'], [1000, 'Large: 1 km (0.6 mile) square']];
+    function tourHalf() { return (tourData().sizeM || 500) / 2; }
     let tourQueue = null, tourBusy = false, tourStop = false, tourReview = null, tourSaveTimer = null;
     function tourData() {
         const t = trainingData.tour || (trainingData.tour = { sites: [], done: [] });
@@ -4469,7 +4471,7 @@
         const t = tourData(), q = tourQueue || [];
         const waiting = t.sites.filter(s => s.status === 'waiting' || s.status === 'failed').length;
         const kindTxt = { both: 'Mounds + effigies', mounds: 'Mounds', effigy: 'Effigies' };
-        const btn = 'width:auto;margin:0;padding:4px 10px;font-size:0.78rem;', tourMiles = Math.round(2 * TOUR_RADIUS_M / FT_TO_M / 5280 * 10) / 10;
+        const btn = 'width:auto;margin:0;padding:4px 10px;font-size:0.78rem;';
         el.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:620px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
             <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;z-index:1;">
               <div style="display:flex;align-items:center;gap:8px;"><b style="flex:1;">Training-site tour (${t.sites.length} site${t.sites.length === 1 ? '' : 's'})</b>
@@ -4478,7 +4480,9 @@
                 <button onclick="document.getElementById('tourModal').remove(); tourRun();" style="${btn}background:#0f766e;color:#fff;border:none;" ${waiting && !tourBusy ? '' : 'disabled'}>&#9654; Run tour (${waiting} waiting)</button>
                 <button onclick="document.getElementById('tourModal').remove(); tourStartReview();" style="${btn}background:#dcfce7;color:#166534;" ${q.length ? '' : 'disabled'}>Review candidates (${q.length})</button>
               </div>
-              <div style="font-size:0.74rem;color:#64748b;margin-top:6px;line-height:1.4;">The tour downloads ${tourMiles} mile${tourMiles === 1 ? '' : 's'} square around each waiting site, runs the scans and keeps every candidate. Review them afterwards; your answers become training data. A site leaves this list once it's reviewed and its model trained. ${t.done.length ? `${t.done.length} site${t.done.length === 1 ? '' : 's'} finished so far.` : ''}</div>
+              <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:0.8rem;">Area scanned at each site:
+                <select style="width:auto;margin:0;padding:3px;" onchange="tourData().sizeM = +this.value; saveTrainingData(); renderTourManager();">${TOUR_SIZES.map(([v, l]) => `<option value="${v}" ${(t.sizeM || 500) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+              <div style="font-size:0.74rem;color:#64748b;margin-top:6px;line-height:1.4;">The tour zooms in on each waiting site and downloads only that square, at 1 m, runs the scans and keeps every candidate. Review them afterwards; your answers become training data. A site leaves this list once it's reviewed and its model trained. ${t.done.length ? `${t.done.length} site${t.done.length === 1 ? '' : 's'} finished so far.` : ''}</div>
             </div>
             <div style="padding:8px 12px;border-bottom:1px solid #e2e8f0;background:#f8fafc;">
               <b>Add a site</b>
@@ -4530,7 +4534,8 @@
     function tourGoTo(id) {
         const s = tourData().sites.find(x => x.id === id); if (!s || s.lat == null) return;
         const m = document.getElementById('tourModal'); if (m) m.remove();
-        map.setView([s.lat, s.lon], 16);
+        const half = tourHalf(), dLat = half / 111320, dLon = half / (111320 * Math.cos(s.lat * Math.PI / 180));
+        map.fitBounds([[s.lat - dLat, s.lon - dLon], [s.lat + dLat, s.lon + dLon]]);
     }
 
     // ---- Running the tour ----
@@ -4571,11 +4576,12 @@
                         if (!r.length) throw new Error('address not found');
                         s.lat = r[0].lat; s.lon = r[0].lon;
                     }
-                    const dLat = TOUR_RADIUS_M / 111320, dLon = TOUR_RADIUS_M / (111320 * Math.cos(s.lat * Math.PI / 180));
+                    const half = tourHalf(), dLat = half / 111320, dLon = half / (111320 * Math.cos(s.lat * Math.PI / 180));
                     map.fitBounds([[s.lat - dLat, s.lon - dLon], [s.lat + dLat, s.lon + dLon]], { animate: false, padding: [0, 0] });
                     tourBar(head + ': downloading the terrain...', true);
                     const gBefore = fullDemGrid;
-                    await fetchDEM();
+                    window.__dlBoundsOverride = { n: s.lat + dLat, s: s.lat - dLat, e: s.lon + dLon, w: s.lon - dLon };
+                    try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
                     const g = fullDemGrid;
                     if (!g || g === gBefore || gridIndexAt(g, s.lat, s.lon) < 0) throw new Error('the download failed (check the connection)');
                     if (document.getElementById('enforce1m').checked && g.res > 1.05) throw new Error(`no 1 m LiDAR here (${g.res.toFixed(1)} m data)`);
@@ -4591,7 +4597,7 @@
                     const already = (mode, lat, lon) => trainingData[mode].examples.concat(trainingData[mode].rejected).some(e => approxMetersBetween(e.lat, e.lon, lat, lon) < 20);
                     let added = 0;
                     for (const f of found) {
-                        if (approxMetersBetween(f.lat, f.lon, s.lat, s.lon) > TOUR_RADIUS_M * 1.2 || already(f.mode, f.lat, f.lon)) continue;
+                        if ((Math.abs(f.lat - s.lat) > dLat || Math.abs(f.lon - s.lon) > dLon) || already(f.mode, f.lat, f.lon)) continue;
                         if (tourQueue.some(c => c.mode === f.mode && approxMetersBetween(c.lat, c.lon, f.lat, f.lon) < 20)) continue;
                         const moundCm = dlWithProfile('mounds', () => dlExtractPatch(sample, f.lat, f.lon));
                         const effCm = dlWithProfile('effigy', () => dlExtractPatch(sample, f.lat, f.lon));
@@ -4616,7 +4622,7 @@
                 saveTrainingData(); tourSaveQueueSoon();
             }
         } finally {
-            tourBusy = false; window.__dlExtraAvoid = null;
+            tourBusy = false; window.__dlExtraAvoid = null; window.__dlBoundsOverride = null;
             scanModeEl.value = modeBefore; onScanModeChange();
             updateDLSummary().catch(() => {});
         }
