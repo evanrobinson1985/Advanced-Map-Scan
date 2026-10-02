@@ -202,6 +202,7 @@
             <optgroup label="General Feature Scans">
                 <option value="caves">Caves / Sinkholes</option>
                 <option value="mounds">Native Mounds</option>
+                <option value="effigy">Effigy &amp; Linear Mounds (birds, animals)</option>
                 <option value="shelter">Rockshelters / Overhangs</option>
                 <option value="settlement">Settlement Likelihood</option>
             </optgroup>
@@ -547,6 +548,32 @@
                 <span class="val-display" id="darkZoneLenMVal">150m</span>
             </div>
             <div style="font-size:0.7rem; color:#94a3b8; margin-bottom:6px; line-height:1.4;">Surface topography can't show how deep a cave goes. Load known cave footprints or entrances, for example a state cave survey export, as GeoJSON (points, lines or polygons) or CSV (<code>lat,lon[,name,length_m,depth_m]</code>). A candidate sink only counts as verified when it opens into a mapped system long enough to have a true Dark Zone. The survey data stays in this browser: it is kept only in memory and never uploaded or saved. Cave locations, mud-glyph sites and burial caves are protected by ARPA and state cave-protection laws. Don't publish or share coordinates.</div>
+        </div>
+        <div id="effigyParamsGroup" style="display:none;">
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin-bottom:4px;">Effigy &amp; linear mound settings</div>
+            <div class="slider-row">
+                <label>Min height</label>
+                <input type="range" id="effMinHeight" min="0.3" max="4" step="0.1" value="0.8" oninput="updateLengthVal('effMinHeight')">
+                <span class="val-display" id="effMinHeightVal">0ft 10in</span>
+            </div>
+            <div class="slider-row">
+                <label>Max width</label>
+                <input type="range" id="effMaxWidth" min="15" max="100" step="1" value="50" oninput="updateLengthVal('effMaxWidth')">
+                <span class="val-display" id="effMaxWidthVal">50ft 0in</span>
+            </div>
+            <div class="slider-row">
+                <label>Min length</label>
+                <input type="range" id="effMinLength" min="20" max="300" step="5" value="60" oninput="updateLengthVal('effMinLength')">
+                <span class="val-display" id="effMinLengthVal">60ft 0in</span>
+            </div>
+            <div class="slider-row">
+                <label>Min side steepness</label>
+                <input type="range" id="effMinFlank" min="0" max="25" step="0.5" value="4" oninput="updateThresholdVal('effMinFlank','°',1)">
+                <span class="val-display" id="effMinFlankVal">4.0°</span>
+            </div>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem;"><input type="checkbox" id="effLinear" checked> Include linear (straight) mounds</label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem;"><input type="checkbox" id="effSkipFields" checked> Skip sets of parallel strips (plough ridges, terraces)</label>
+            <div style="font-size:0.7rem; color:#94a3b8; margin:4px 0 6px; line-height:1.4;">Effigies are often only 1&ndash;2 ft high after a century of ploughing: lower <i>Min height</i> to 0.5 ft for plough-worn groups. <i>Max width</i> should cover the widest body you expect; wider rises are treated as natural. Effigy mounds are burial sites protected by state law: never dig or disturb them.</div>
         </div>
         <div id="settlementWeightsGroup" style="display:none;">
             <div class="slider-row">
@@ -937,7 +964,7 @@
         shelter:    { color: '#db2777', letter: 'R', label: 'Rockshelters' },
         settlement: { color: '#dc2626', letter: 'S', label: 'Settlement hotspots' },
     };
-    const SCAN_ALL_ORDER = ['basecamp', 'huntcamp', 'ceremonial', 'entrance', 'caves', 'mounds', 'shelter', 'settlement'];
+    const SCAN_ALL_ORDER = ['basecamp', 'huntcamp', 'ceremonial', 'entrance', 'caves', 'mounds', 'effigy', 'shelter', 'settlement'];
     const modeLayers = {};
     let scanAllActive = false, scanAllCancel = false;
     let last3DOverlays = []; // [{ mode, candidateMask, highlightMask?, grid }] tinted onto the 3D terrain
@@ -2657,6 +2684,456 @@
     }
     function toggleTrainingOnMap() { if (trainingMapShown) hideTrainingOnMap(); else showTrainingOnMap(true); }
 
+    // ==== EFFIGY AND LINEAR MOUNDS ====
+    // Effigy mounds (birds, bears, panthers, water spirits) and linear mounds
+    // are long, narrow and low: typically 1-3 ft high and 15-40 ft wide, but
+    // tens to hundreds of feet long, with wings, legs and tails. The mound
+    // scan looks for round, closed highs, so it misses them. This scan:
+    //  1. keeps every raised feature narrower than "Max width", at its true
+    //     height, with a morphological top-hat (the ground minus its opening
+    //     with a square as wide as that): long, thin bodies survive whatever
+    //     their length or shape, while hills, slopes and broad swells drop out;
+    //  2. outlines the features at least "Min height" high, following their
+    //     tapering ends down to 40% of that;
+    //  3. thins each one to its centre line (skeleton) and reads its shape:
+    //     limbs, length, width along it, height and side steepness;
+    //  4. classifies it: two long, roughly opposite limbs = a bird (wingspan
+    //     reported); other branched shapes = an animal effigy; a single strip
+    //     = a linear mound;
+    //  5. drops look-alikes: dead-straight features hundreds of feet long or
+    //     running off the edge (roads, fences, railroads), embankments taller
+    //     than any effigy, broad gentle swells with no real sides, and sets of
+    //     parallel strips side by side (plough ridges, terraces, crop rows).
+    // Results rank higher when they look like effigies you've confirmed, and
+    // lower or not at all when they look like ones you marked not real.
+    MODE_STYLE.effigy = { color: '#65a30d', letter: 'F', label: 'Effigy & linear mounds' };
+    function effigySettings() {
+        const ft = (id, d) => { const e = document.getElementById(id); return feetToMeters(e ? parseFloat(e.value) : d); };
+        const chk = (id, d) => { const e = document.getElementById(id); return e ? e.checked : d; };
+        const fl = document.getElementById('effMinFlank');
+        return { minH: ft('effMinHeight', 0.8), maxW: ft('effMaxWidth', 50), minL: ft('effMinLength', 60), minFlank: fl ? parseFloat(fl.value) : 4,
+                 linear: chk('effLinear', true), skipFields: chk('effSkipFields', true) };
+    }
+    // Running min (or max) over a 2r+1 window along rows or columns, in
+    // constant time per cell (van Herk / Gil-Werman)
+    function vhFilter(src, W, H, r, isMax, horizontal) {
+        const out = new Float32Array(W * H), k = 2 * r + 1, L = horizontal ? W : H, M = horizontal ? H : W, n = L + 2 * r;
+        const g = new Float32Array(n), h = new Float32Array(n), buf = new Float32Array(n), pad = isMax ? -Infinity : Infinity;
+        for (let m = 0; m < M; m++) {
+            for (let i = 0; i < n; i++) { const j = i - r; buf[i] = (j < 0 || j >= L) ? pad : (horizontal ? src[m * W + j] : src[j * W + m]); }
+            for (let i = 0; i < n; i++) { const v = buf[i]; g[i] = (i % k === 0) ? v : (isMax ? (g[i - 1] > v ? g[i - 1] : v) : (g[i - 1] < v ? g[i - 1] : v)); }
+            for (let i = n - 1; i >= 0; i--) { const v = buf[i]; h[i] = (i === n - 1 || (i + 1) % k === 0) ? v : (isMax ? (h[i + 1] > v ? h[i + 1] : v) : (h[i + 1] < v ? h[i + 1] : v)); }
+            for (let j = 0; j < L; j++) {
+                const a = h[j], b = g[j + 2 * r], v = isMax ? (a > b ? a : b) : (a < b ? a : b);
+                if (horizontal) out[m * W + j] = v; else out[j * W + m] = v;
+            }
+        }
+        return out;
+    }
+    // Height above the ground's opening with a (2r+1)-cell square: the
+    // raised features narrower than the square, at their own height
+    function topHat(z, W, H, r, nd) {
+        const src = new Float32Array(W * H);
+        for (let i = 0; i < W * H; i++) src[i] = z[i] < nd ? Infinity : z[i];   // nodata ignored by the erosion
+        let e = vhFilter(vhFilter(src, W, H, r, false, true), W, H, r, false, false);
+        for (let i = 0; i < W * H; i++) if (!isFinite(e[i])) e[i] = -Infinity;
+        const o = vhFilter(vhFilter(e, W, H, r, true, true), W, H, r, true, false);
+        const out = new Float32Array(W * H);
+        for (let i = 0; i < W * H; i++) { const v = z[i] < nd || !isFinite(o[i]) ? 0 : z[i] - o[i]; out[i] = v > 0 ? v : 0; }
+        return out;
+    }
+    // Zhang-Suen thinning of a binary image (w x h, 1 = feature), in place
+    function thinZS(img, w, h) {
+        const nb = (i) => [img[i - w], img[i - w + 1], img[i + 1], img[i + w + 1], img[i + w], img[i + w - 1], img[i - 1], img[i - w - 1]];
+        let changed = true;
+        const del = [];
+        while (changed) {
+            changed = false;
+            for (let pass = 0; pass < 2; pass++) {
+                del.length = 0;
+                for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+                    const i = y * w + x; if (!img[i]) continue;
+                    const p = nb(i); let B = 0, A = 0;
+                    for (let k = 0; k < 8; k++) { B += p[k]; if (!p[k] && p[(k + 1) % 8]) A++; }
+                    if (B < 2 || B > 6 || A !== 1) continue;
+                    if (pass === 0 ? (p[0] * p[2] * p[4] === 0 && p[2] * p[4] * p[6] === 0) : (p[0] * p[2] * p[6] === 0 && p[0] * p[4] * p[6] === 0)) del.push(i);
+                }
+                for (const i of del) img[i] = 0;
+                if (del.length) changed = true;
+            }
+        }
+    }
+    // Removes the extra corner cells Zhang-Suen leaves on diagonal lines (an
+    // L-shaped step), which would read as junctions: a cell goes when its
+    // neighbours stay connected without it and it isn't a line end
+    function thinCorners(img, w, h) {
+        const ring = [-w, -w + 1, 1, w + 1, w, w - 1, -1, -w - 1];   // N NE E SE S SW W NW
+        let changed = true;
+        while (changed) {
+            changed = false;
+            for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+                const i = y * w + x; if (!img[i]) continue;
+                const on = ring.map(o => img[i + o] ? 1 : 0), cnt = on.reduce((a, b) => a + b, 0);
+                if (cnt < 2) continue;
+                // components among the set neighbours (8-adjacency on the ring)
+                const parent = [0, 1, 2, 3, 4, 5, 6, 7], find = (a) => parent[a] === a ? a : (parent[a] = find(parent[a]));
+                for (let k = 0; k < 8; k++) {
+                    if (!on[k]) continue;
+                    const k1 = (k + 1) % 8; if (on[k1]) parent[find(k)] = find(k1);
+                    if (k % 2 === 0) { const k2 = (k + 2) % 8; if (on[k2]) parent[find(k)] = find(k2); }
+                }
+                const roots = new Set(); for (let k = 0; k < 8; k++) if (on[k]) roots.add(find(k));
+                if (roots.size === 1 && cnt <= 3) { img[i] = 0; changed = true; }
+            }
+        }
+    }
+    // The skeleton as a graph: its branches as pixel paths between nodes
+    // (ends, deg 1, and junctions, deg 3+)
+    function skeletonGraph(sk, w, h) {
+        const N8 = [-w - 1, -w, -w + 1, -1, 1, w - 1, w, w + 1];
+        const deg = new Uint8Array(w * h);
+        for (let i = 0; i < w * h; i++) if (sk[i]) { let d = 0; for (const o of N8) if (sk[i + o]) d++; deg[i] = d; }
+        const isNode = (i) => deg[i] !== 2, seen = new Set(), edges = [];
+        const walk = (start, first) => {
+            const path = [start, first]; let prev = start, cur = first;
+            while (!isNode(cur)) {
+                let next = -1;
+                for (const o of N8) { const j = cur + o; if (sk[j] && j !== prev && !path.includes(j)) { next = j; break; } }
+                if (next < 0) break;
+                prev = cur; cur = next; path.push(cur);
+                if (path.length > 20000) break;
+            }
+            return path;
+        };
+        const nodes = [];
+        for (let i = 0; i < w * h; i++) if (sk[i] && isNode(i)) nodes.push(i);
+        for (const s of nodes) for (const o of N8) {
+            const f = s + o; if (!sk[f]) continue;
+            const key = Math.min(s, f) + ':' + Math.max(s, f);
+            if (seen.has(key)) continue;
+            const p = walk(s, f);
+            for (let k = 0; k + 1 < p.length; k++) seen.add(Math.min(p[k], p[k + 1]) + ':' + Math.max(p[k], p[k + 1]));
+            edges.push(p);
+        }
+        // a closed loop with no nodes at all (a ring)
+        if (!nodes.length) { const s = sk.findIndex(v => v); if (s >= 0) { const f = N8.map(o => s + o).find(j => sk[j]); if (f != null) edges.push(walk(s, f)); } }
+        return { deg, edges, nodes };
+    }
+    function pathLenPx(p, w) { let L = 0; for (let k = 0; k + 1 < p.length; k++) { const d = Math.abs(p[k + 1] - p[k]); L += (d === 1 || d === w) ? 1 : Math.SQRT2; } return L; }
+    // Analyses one connected feature (pixel list in grid indices); returns a
+    // description, or null for specks
+    function effigyDescribe(pix, resid, slopeDeg, W, H, res, S) {
+        let r0 = H, r1 = 0, c0 = W, c1 = 0;
+        for (const i of pix) { const r = (i / W) | 0, c = i % W; if (r < r0) r0 = r; if (r > r1) r1 = r; if (c < c0) c0 = c; if (c > c1) c1 = c; }
+        const w = c1 - c0 + 3, h = r1 - r0 + 3, img = new Uint8Array(w * h);
+        const toL = (i) => (((i / W) | 0) - r0 + 1) * w + (i % W) - c0 + 1;
+        const toG = (j) => (((j / w) | 0) - 1 + r0) * W + (j % w) - 1 + c0;
+        for (const i of pix) img[toL(i)] = 1;
+        // chamfer distance to the edge (3-4), for the width along the centre line
+        const dt = new Float32Array(w * h);
+        for (let j = 0; j < w * h; j++) dt[j] = img[j] ? 1e9 : 0;
+        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const j = y * w + x; if (!img[j]) continue; dt[j] = Math.min(dt[j], dt[j - 1] + 3, dt[j - w] + 3, dt[j - w - 1] + 4, dt[j - w + 1] + 4); }
+        for (let y = h - 2; y >= 1; y--) for (let x = w - 2; x >= 1; x--) { const j = y * w + x; if (!img[j]) continue; dt[j] = Math.min(dt[j], dt[j + 1] + 3, dt[j + w] + 3, dt[j + w + 1] + 4, dt[j + w - 1] + 4); }
+        const sk = img.slice(); thinZS(sk, w, h); thinCorners(sk, w, h);
+        let G = skeletonGraph(sk, w, h);
+        const widthAt = (j) => 2 * (dt[j] / 3) * res;   // full width at a centre-line cell
+        let meanW = 0, nW = 0;
+        for (let j = 0; j < w * h; j++) if (sk[j]) { meanW += widthAt(j); nW++; }
+        meanW = nW ? meanW / nW : 0;
+        // prune spurs: end branches shorter than the feature is wide
+        const spur = Math.max(4, 1.2 * meanW) / res;
+        let pruned = false;
+        for (const e of G.edges) {
+            const a = e[0], b = e[e.length - 1];
+            const endA = G.deg[a] === 1, endB = G.deg[b] === 1;
+            if ((endA && G.deg[b] >= 3) || (endB && G.deg[a] >= 3)) {
+                if (pathLenPx(e, w) < spur) { for (const j of e) if (G.deg[j] <= 2) sk[j] = 0; pruned = true; }
+            }
+        }
+        if (pruned) { thinZS(sk, w, h); thinCorners(sk, w, h); G = skeletonGraph(sk, w, h); }
+        let skelPx = 0, wSum = 0, wSq = 0;
+        for (let j = 0; j < w * h; j++) if (sk[j]) { const ww = widthAt(j); skelPx++; wSum += ww; wSq += ww * ww; }
+        if (!skelPx) return null;
+        meanW = wSum / skelPx;
+        const widthCV = Math.sqrt(Math.max(0, wSq / skelPx - meanW * meanW)) / Math.max(0.1, meanW);
+        const L = G.edges.reduce((s, e) => s + pathLenPx(e, w), 0) * res;
+        const ends = []; let junctions = 0;
+        for (let j = 0; j < w * h; j++) if (sk[j]) { if (G.deg[j] === 1) ends.push(j); else if (G.deg[j] >= 3) junctions++; }
+        // limbs: branches from an end to a junction, with direction outward
+        const xy = (j) => [(j % w) * res, ((j / w) | 0) * res];
+        const limbs = G.edges.filter(e => (G.deg[e[0]] === 1) !== (G.deg[e[e.length - 1]] === 1) && (G.deg[e[0]] >= 3 || G.deg[e[e.length - 1]] >= 3)).map(e => {
+            const tip = G.deg[e[0]] === 1 ? e[0] : e[e.length - 1], base = tip === e[0] ? e[e.length - 1] : e[0];
+            const [tx, ty] = xy(tip), [bx, by] = xy(base);
+            return { len: pathLenPx(e, w) * res, dx: tx - bx, dy: ty - by, tip, base };
+        }).sort((a, b) => b.len - a.len);
+        let span = 0;
+        for (let a = 0; a < ends.length; a++) for (let b = a + 1; b < ends.length; b++) { const [x1, y1] = xy(ends[a]), [x2, y2] = xy(ends[b]); span = Math.max(span, Math.hypot(x2 - x1, y2 - y1)); }
+        // shape class
+        let kind = 'linear', bird = null;
+        if (ends.length >= 3 && limbs.length >= 2) {
+            kind = 'effigy';
+            const [a, b] = limbs;
+            const ang = Math.acos(Math.max(-1, Math.min(1, (a.dx * b.dx + a.dy * b.dy) / (Math.hypot(a.dx, a.dy) * Math.hypot(b.dx, b.dy) || 1)))) * 180 / Math.PI;
+            if (ang >= 115 && b.len >= 0.5 * a.len && a.len + b.len >= 0.45 * L) {
+                const [x1, y1] = xy(a.tip), [x2, y2] = xy(b.tip);
+                bird = { wingspan: Math.hypot(x2 - x1, y2 - y1), angle: ang };
+            }
+        } else if (!ends.length) kind = 'ring';
+        const straight = ends.length === 2 && L > 0 ? (() => { const [x1, y1] = xy(ends[0]), [x2, y2] = xy(ends[1]); return Math.hypot(x2 - x1, y2 - y1) / L; })() : 0;
+        // height, side steepness, centre, orientation
+        let maxH = 0, sumH = 0, sr = 0, sc = 0, mrr = 0, mcc = 0, mrc = 0;
+        const flanks = [];
+        for (const i of pix) {
+            const v = resid[i]; if (v > maxH) maxH = v; sumH += v;
+            const r = (i / W) | 0, c = i % W; sr += r; sc += c;
+            if (slopeDeg) flanks.push(slopeDeg[i]);
+        }
+        const n = pix.length; sr /= n; sc /= n;
+        for (const i of pix) { const dr = ((i / W) | 0) - sr, dc = (i % W) - sc; mrr += dr * dr; mcc += dc * dc; mrc += dr * dc; }
+        flanks.sort((a, b) => a - b);
+        const flank = flanks.length ? flanks[Math.floor(flanks.length * 0.85)] : 0;
+        let edgeTouch = r0 <= 1 || c0 <= 1 || r1 >= H - 2 || c1 >= W - 2;
+        // marker: the body (the junction the two longest limbs meet at) or the middle of the strip
+        let anchor = null;
+        if (limbs.length) anchor = limbs[0].base;
+        else { const e = G.edges.slice().sort((a, b) => b.length - a.length)[0]; anchor = e ? e[e.length >> 1] : toL(pix[0]); }
+        const paths = G.edges.map(e => e.filter((_, k) => k % 2 === 0 || k === e.length - 1).map(toG));
+        let perim = 0;
+        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const j = y * w + x; if (img[j] && (!img[j - 1] || !img[j + 1] || !img[j - w] || !img[j + w])) perim++; }
+        const areaM2 = n * res * res;
+        return { kind, bird, L, span, meanW, widthCV, ends: ends.length, junctions, limbs: limbs.length, maxH, volume: sumH * res * res, flank, straight, edgeTouch,
+                 cr: sr, cc: sc, orientation: 0.5 * Math.atan2(2 * mrc, mcc - mrr), areaM2, circ: Math.min(1, 4 * Math.PI * areaM2 / Math.max(1, (perim * res) ** 2)),
+                 anchor: toG(anchor), paths, pix };
+    }
+    // Finds and describes every narrow raised feature on the current grid.
+    // Returns { resid, feats } (feats unfiltered, with .why for rejections).
+    function effigyFind(S, onlyNear) {
+        const nd = -100, W = demWidth, H = demHeight, res = effRes;
+        const z = boxSmooth(currentDEM, W, H, Math.max(1, Math.round(0.75 / res)), nd);
+        const r = Math.max(2, Math.round((S.maxW / 2 + 2) / res));
+        // remove the general tilt and shape of the ground first: on a slope
+        // a flat square would otherwise take part of a feature as ground
+        const trend = boxSmooth(z, W, H, 2 * r, nd);
+        const zd = new Float32Array(W * H);
+        for (let i = 0; i < W * H; i++) zd[i] = z[i] < nd ? z[i] : z[i] - trend[i];
+        const resid = topHat(zd, W, H, r, nd);
+        const slopeDeg = computeSlopeDegrees(resid, W, H, res, nd);
+        const hi = S.minH, lo = 0.4 * S.minH, n = W * H;
+        const lab = new Int32Array(n), feats = [];
+        const N8 = [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
+        let id = 0;
+        const minPx = Math.max(12, (S.minL * 2.5) / (res * res));
+        for (let s = 0; s < n; s++) {
+            if (lab[s] || resid[s] < hi) continue;
+            if (onlyNear && Math.hypot(((s / W) | 0) - onlyNear.r, (s % W) - onlyNear.c) > onlyNear.px) continue;
+            id++;
+            const pix = [s]; lab[s] = id;
+            for (let k = 0; k < pix.length; k++) {
+                const i = pix[k], c = i % W;
+                for (const o of N8) {
+                    const j = i + o; if (j < 0 || j >= n || lab[j]) continue;
+                    const cj = j % W; if (Math.abs(cj - c) > 1) continue;
+                    if (resid[j] >= lo) { lab[j] = id; pix.push(j); }
+                }
+                if (pix.length > 400000) break;
+            }
+            if (pix.length < minPx) continue;
+            const d = effigyDescribe(pix, resid, slopeDeg, W, H, res, S);
+            if (d) feats.push(d);
+        }
+        // why each would be dropped
+        for (const d of feats) {
+            const why = [];
+            if (d.L < S.minL) why.push(`shorter than the ${Math.round(S.minL / FT_TO_M)} ft minimum`);
+            if (d.meanW > S.maxW * 1.15) why.push(`wider than the ${Math.round(S.maxW / FT_TO_M)} ft maximum`);
+            if (d.meanW < 2.5) why.push('too thin for a mound (under 8 ft wide): a bank, ditch edge or plough ridge');
+            if (d.maxH > 3) why.push('taller than any effigy (over 10 ft): an embankment or natural ridge');
+            if (d.flank < S.minFlank) why.push(`sides too gentle (${d.flank.toFixed(1)}&deg;, needs ${S.minFlank}&deg;): a broad natural swell`);
+            if (d.straight > 0.97 && d.L > 200) why.push('dead straight for over 650 ft: a road, fence line or railroad');
+            if (d.edgeTouch && d.L > 150) why.push('long and running off the edge of the area: probably a road, levee or ridge');
+            if (d.kind === 'ring') why.push('a closed ring (enclosure or pond bank), not an effigy');
+            if (d.kind === 'linear' && !S.linear) why.push('a single strip (linear mounds are switched off)');
+            d.why = why;
+        }
+        // parallel strips side by side: plough ridges, terraces, crop rows
+        if (S.skipFields) {
+            const lin = feats.filter(d => d.kind === 'linear' && !d.why.length);
+            for (const a of lin) {
+                let par = 0;
+                for (const b of lin) {
+                    if (a === b) continue;
+                    let dth = Math.abs(a.orientation - b.orientation) % Math.PI; dth = Math.min(dth, Math.PI - dth);
+                    if (dth > 10 * Math.PI / 180) continue;
+                    const dr = (b.cr - a.cr) * res, dc = (b.cc - a.cc) * res;
+                    const along = Math.abs(dc * Math.cos(a.orientation) + dr * Math.sin(a.orientation)), across = Math.abs(-dc * Math.sin(a.orientation) + dr * Math.cos(a.orientation));
+                    if (across < 30 && along < Math.max(a.L, b.L) * 0.6) par++;
+                }
+                if (par >= 2) a.why.push('one of a set of parallel strips side by side: plough ridges, terraces or crop rows');
+            }
+        }
+        return { resid, feats };
+    }
+    // shape class in the similarity "template" slot, so a strip you marked
+    // not real doesn't make birds look alike to it: 0 linear, 0.5 effigy, 1 bird
+    function effigyShapeCode(d) { return d.bird ? 1 : d.kind === 'effigy' ? 0.5 : 0; }
+    function effigyVector(d) {
+        return { diameterM: d.L, heightM: d.maxH, circularity: d.circ, elongation: Math.max(1, d.L / Math.max(0.5, d.meanW)), template: effigyShapeCode(d), groundSlopeDeg: null, flankSlopeDeg: d.flank };
+    }
+    function effigyKind(d) {
+        return d.bird ? `Bird effigy? (wingspan ${metersToFeetInches(d.bird.wingspan)})` : d.kind === 'effigy' ? `Effigy mound (${d.limbs} limbs)` : 'Linear mound';
+    }
+    function effigyLatLon(i) {
+        const r = (i / demWidth) | 0, c = i % demWidth;
+        return [demBounds.n - ((r + 0.5) / demHeight) * (demBounds.n - demBounds.s), demBounds.w + ((c + 0.5) / demWidth) * (demBounds.e - demBounds.w)];
+    }
+    // convex hull of the feature's cells, as [lat, lon] (for exports)
+    function effigyHull(pix) {
+        const pts = [];
+        const step = Math.max(1, Math.floor(pix.length / 4000));
+        for (let k = 0; k < pix.length; k += step) { const i = pix[k]; pts.push([i % demWidth, (i / demWidth) | 0]); }
+        pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+        const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        const lower = [], upper = [];
+        for (const p of pts) { while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop(); lower.push(p); }
+        for (let k = pts.length - 1; k >= 0; k--) { const p = pts[k]; while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop(); upper.push(p); }
+        return lower.slice(0, -1).concat(upper.slice(0, -1)).map(([c, r]) => effigyLatLon(r * demWidth + c));
+    }
+    function effigyFeatureRecord(d, score, extraHtml, grid) {
+        const [lat, lon] = effigyLatLon(d.anchor);
+        const k = { centroidR: d.cr, centroidC: d.cc, area: d.pix.length, count: d.pix.length, maxMetric: d.maxH, sumMetric: d.volume / (effRes * effRes),
+                    circularity: d.circ, elongation: Math.max(1, d.L / Math.max(0.5, d.meanW)), orientation: d.orientation, fillRatio: 1, maxFlankSlope: d.flank, _sizeD: d.L, _template: effigyShapeCode(d) };
+        return { mode: 'effigy', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon: effigyHull(d.pix), effigy: d };
+    }
+    function effigyPopup(f, extraHtml, confirmHtml) {
+        const d = f.effigy, ft = metersToFeetInches;
+        return `<b>Possible ${effigyKind(d)}</b><br>
+            <i style="color:#64748b">Algorithmic candidate &mdash; confirm in the field; effigy mounds are protected burial sites</i><br>
+            <b>${d.kind === 'linear' ? 'Length' : 'Length along its limbs'}:</b> ${ft(d.L)}${d.kind !== 'linear' ? ` (${ft(d.span)} tip to tip)` : ''}<br>
+            <b>Width:</b> ${ft(d.meanW)} on average<br>
+            <b>Height:</b> ${ft(d.maxH)}<br>
+            <b>Side steepness:</b> ${d.flank.toFixed(1)}&deg;<br>
+            ${d.kind !== 'linear' ? `<b>Limbs:</b> ${d.limbs}${d.bird ? `, wings meet at ${Math.round(d.bird.angle)}&deg;` : ''}<br>` : ''}
+            <b>Est. volume:</b> ${Math.round(d.volume / (FT_TO_M ** 3)).toLocaleString()} ft&sup3;<br>
+            ${extraHtml || ''}<b>Match Score:</b> ${f.matchScore}%<br>
+            <b>Coords:</b> ${f.lat.toFixed(5)}, ${f.lon.toFixed(5)}${confirmHtml || ''}`;
+    }
+    function effigyDraw(f, popupHtml) {
+        const d = f.effigy, layer = modeLayer('effigy'), col = MODE_STYLE.effigy.color;
+        const layers = [L.marker([f.lat, f.lon], { icon: featureIcon('effigy', f.confirmed) }).bindPopup(popupHtml, { maxWidth: 320 }).addTo(layer)];
+        if (f.polygon && f.polygon.length >= 3) layers.push(L.polygon(f.polygon, { color: col, weight: 1, dashArray: '4,4', fillColor: col, fillOpacity: 0.06, interactive: false }).addTo(layer));
+        for (const p of d.paths) if (p.length >= 2) layers.push(L.polyline(p.map(effigyLatLon), { color: col, weight: 4, opacity: 0.9, interactive: false }).addTo(layer));
+        f._layers = layers;
+    }
+    async function runEffigyScan() {
+        const status = document.getElementById('status');
+        const scanBtn = document.getElementById('scanBtn'); if (scanBtn) scanBtn.disabled = true;
+        try {
+            const S = effigySettings();
+            status.innerText = 'Effigy & linear mounds: finding narrow raised features...';
+            await new Promise(r => setTimeout(r, 0));
+            const { resid, feats } = effigyFind(S);
+            const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
+            let skipped = 0, resembled = 0;
+            const ranked = [];
+            for (const d of feats) {
+                if (d.why.length) continue;
+                const [lat, lon] = effigyLatLon(d.anchor);
+                if (trainingData.effigy.rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, lat, lon) < Math.max(20, 0.3 * d.L))) { skipped++; continue; }
+                let score = 40 + 15 * Math.min(1, d.maxH / 0.8) + 15 * Math.min(1, d.flank / 15) + 10 * (1 - Math.min(1, d.widthCV)) + (d.bird ? 20 : d.kind === 'effigy' ? 12 : 5);
+                score = Math.min(99, Math.round(score));
+                const sv = similarityVerdict('effigy', effigyVector(d));
+                let simHtml = '';
+                if (rejectsDrop(sv)) { resembled++; continue; }
+                if (sv.pos && sv.pos.sim > 0.2) { score = Math.round(score + (100 - score) * 0.5 * sv.pos.sim); if (sv.pos.sim > 0.5) simHtml += `<b>Like your confirmed effigy</b> (${Math.round(sv.pos.sim * 100)}% similar)<br>`; }
+                if (sv.neg && sv.neg.sim > REJECT_PENALTY_SIM && (!sv.pos || sv.neg.sim > sv.pos.sim)) {
+                    score = Math.round(score * (1 - 0.5 * sv.neg.sim));
+                    simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles something you marked not real (${Math.round(sv.neg.sim * 100)}% similar), so it is ranked lower</div>`;
+                }
+                ranked.push({ d, score, simHtml });
+            }
+            ranked.sort((a, b) => b.score - a.score);
+            clearModeDetections('effigy');
+            const shown = ranked.slice(0, maxResults), mask = new Uint8Array(demWidth * demHeight);
+            for (const { d, score, simHtml } of shown) {
+                const f = effigyFeatureRecord(d, score);
+                const already = trainingData.effigy.examples.find(ex => approxMetersBetween(ex.lat, ex.lon, f.lat, f.lon) < Math.max(20, 0.3 * d.L));
+                f.confirmed = !!already;
+                const confirmHtml = already
+                    ? `<label style="display:block;margin-top:8px;"><input type="checkbox" checked disabled> Confirmed real (${new Date(already.ts).toLocaleDateString()})</label>`
+                    : `<div style="display:flex;gap:28px;margin-top:12px;">
+                         <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;" onclick="confirmFeature('effigy', ${d.L.toFixed(2)}, ${f.k.circularity.toFixed(3)}, ${f.k.elongation.toFixed(3)}, ${d.maxH.toFixed(3)}, ${f.lat.toFixed(6)}, ${f.lon.toFixed(6)}, event, this, null, null)">&#10003; Yes, it's real</button>
+                         <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#fee2e2;color:#991b1b;border:2px solid #ef4444;border-radius:8px;" onclick="markNotReal('effigy', ${f.lat.toFixed(6)}, ${f.lon.toFixed(6)}, event)">&#10007; Not real</button>
+                       </div>
+                       <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;line-height:1.3;">"Not real" = road, field edge, terrace, plough ridge or natural ridge; scans then avoid features like it.</div>`;
+                effigyDraw(f, effigyPopup(f, simHtml, confirmHtml));
+                detectedFeatures.push(f);
+                for (const i of d.pix) mask[i] = 1;
+            }
+            lastMetricRaster = resid; lastScanMode = 'effigy'; lastMetricGrid = gridInfo();
+            lastExportRaster = { data: resid, name: 'effigy_narrow_relief_m', mode: 'effigy', grid: gridInfo(true) };
+            last3DOverlays.push({ mode: 'effigy', candidateMask: mask, grid: gridInfo() });
+            updateDetectionLegend();
+            if (typeof updateExportButtons === 'function') updateExportButtons();
+            const birds = shown.filter(x => x.d.bird).length, eff = shown.filter(x => x.d.kind === 'effigy').length;
+            const dropped = feats.filter(d => d.why.length).length;
+            status.innerText = `Effigy & linear mounds: ${shown.length} found` + (shown.length ? ` (${birds} possible bird${birds === 1 ? '' : 's'}, ${eff - birds} other effigy shape${eff - birds === 1 ? '' : 's'}, ${shown.length - eff} linear)` : '') +
+                `. ${dropped} narrow raised feature${dropped === 1 ? ' was' : 's were'} ruled out (roads, terraces, ridges, plough ridges, too small or too gentle)` +
+                (skipped ? `; ${skipped} skipped at spots you marked not real` : '') + (resembled ? `; ${resembled} skipped as look-alikes` : '') +
+                (ranked.length > shown.length ? `; ${ranked.length - shown.length} more held back by Max results` : '') + '. Tap the map on one it missed and choose "This is an Effigy" to see why.';
+        } finally { if (scanBtn) scanBtn.disabled = false; }
+    }
+    // "This is an Effigy / Linear Mound": the same analysis around the tap,
+    // reporting every check, with a button to save it as a confirmed example
+    async function effigyCheckAt(lat, lon) {
+        if (!fullDemGrid || scanInProgress) return;
+        map.closePopup();
+        const g = fullDemGrid, idx = gridIndexAt(g, lat, lon);
+        if (idx < 0) return;
+        const S = effigySettings(), r = Math.floor(idx / g.w), c = idx % g.w;
+        const half = Math.round(Math.max(250, 4 * S.minL) / g.res);
+        const r0 = Math.max(0, r - half), c0 = Math.max(0, c - half), r1 = Math.min(g.h, r + half), c1 = Math.min(g.w, c + half);
+        scanInProgress = true;
+        try {
+            await withGrid(cropGrid(g, r0, c0, r1, c1), async () => {
+                const rr = r - r0, cc = c - c0, snap = Math.round(10 / effRes);
+                const { feats } = effigyFind({ ...S, minL: Math.min(S.minL, 10) }, null);
+                // the feature under (or nearest within 10 m of) the tap
+                let best = null, bd = Infinity;
+                for (const d of feats) for (let k = 0; k < d.pix.length; k += Math.max(1, d.pix.length >> 10)) {
+                    const i = d.pix[k], dist = Math.hypot(((i / demWidth) | 0) - rr, (i % demWidth) - cc);
+                    if (dist < bd) { bd = dist; best = d; }
+                }
+                if (!best || bd > snap) {
+                    L.popup({ maxWidth: 360 }).setLatLng([lat, lon]).setContent(`<b>No narrow raised feature here</b><br>Nothing at least ${metersToFeetInches(S.minH)} high and under ${metersToFeetInches(S.maxW)} wide within 33 ft of where you tapped. Try a lower <b>Min height</b> or a wider <b>Max width</b> in the Effigy settings, or tap right on the mound.`).openOn(map);
+                    return;
+                }
+                // full checks with your settings
+                const why = [];
+                if (best.L < S.minL) why.push(`shorter than the ${Math.round(S.minL / FT_TO_M)} ft minimum length`);
+                for (const w2 of best.why) if (!/minimum$/.test(w2)) why.push(w2);
+                const f = effigyFeatureRecord(best, 0);
+                const chk = (ok, text) => `<tr style="background:${ok ? '#dcfce7' : '#fee2e2'}"><td>${ok ? '&#10003;' : '&#10007;'}</td><td>${text}</td></tr>`;
+                const ft = metersToFeetInches;
+                const rows = chk(best.maxH >= S.minH, `Height ${ft(best.maxH)} (min ${ft(S.minH)})`) +
+                    chk(best.meanW <= S.maxW * 1.15 && best.meanW >= 2.5, `Width ${ft(best.meanW)} (8 ft to ${ft(S.maxW)})`) +
+                    chk(best.L >= S.minL, `Length ${ft(best.L)} (min ${ft(S.minL)})`) +
+                    chk(best.flank >= S.minFlank, `Side steepness ${best.flank.toFixed(1)}&deg; (min ${S.minFlank}&deg;)`) +
+                    chk(best.maxH <= 3, 'Not an embankment (under 10 ft high)') +
+                    chk(!(best.straight > 0.97 && best.L > 200), 'Not a long, dead-straight road or fence line') +
+                    chk(!best.why.some(w2 => /parallel/.test(w2)), 'Not one of a set of parallel strips');
+                const hl = L.layerGroup().addTo(map);
+                for (const p of best.paths) if (p.length >= 2) L.polyline(p.map(effigyLatLon), { color: '#b45309', weight: 4 }).addTo(hl);
+                L.polygon(f.polygon, { color: '#b45309', weight: 1, dashArray: '4,4', fillOpacity: 0.05 }).addTo(hl);
+                const pop = L.popup({ maxWidth: 380 }).setLatLng([f.lat, f.lon]).setContent(`<b>${effigyKind(best)}</b><br>
+                    <table style="font-size:0.8rem;border-collapse:collapse;margin:4px 0;">${rows}</table>
+                    ${why.length ? `<div style="font-size:0.78rem;color:#991b1b;">Why the scan skips it: ${why.join('; ')}.</div>` : '<div style="font-size:0.78rem;color:#166534;">It passes every check; the scan should list it (unless Max results is full or it resembles something you marked not real).</div>'}
+                    <button style="margin-top:8px;padding:6px 10px;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;font-weight:bold;" onclick="confirmFeature('effigy', ${best.L.toFixed(2)}, ${f.k.circularity.toFixed(3)}, ${f.k.elongation.toFixed(3)}, ${best.maxH.toFixed(3)}, ${f.lat.toFixed(6)}, ${f.lon.toFixed(6)}, event, this, null, null)">&#10003; Save as a confirmed effigy / linear mound</button>
+                    <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">The brown line is the shape the app traced.</div>`).openOn(map);
+                pop.on('remove', () => map.removeLayer(hl));
+            });
+        } finally { scanInProgress = false; }
+    }
+
     // ==== EXPERIMENTAL: DEEP-LEARNING MOUND DETECTION ====
     // A small convolutional neural network (CNN) learns what your mounds look
     // like in the terrain itself, instead of following hand-written rules. It
@@ -4278,6 +4755,7 @@
     // the scanMode <select>'s inline onchange in the HTML).
     const scanModeEl = document.getElementById('scanMode');
     const MODE_DESCRIPTIONS = {
+        effigy: '<b>Effigy &amp; linear mounds.</b> Long, low earthworks shaped like birds, bears, panthers and water spirits, and straight linear mounds: usually 1&ndash;3 ft high and 15&ndash;40 ft wide but tens to hundreds of feet long. Keeps every raised feature narrower than <i>Max width</i>, traces its centre line, and reads its limbs: two long, opposite limbs = a bird, with its wingspan. Roads, fence lines, terraces, plough ridges and embankments are ruled out. Tap the map on one it misses and choose <i>This is an Effigy</i> to see why.',
         basecamp: '<b>Phase 2: Long-term habitation.</b> Shelters that could carry families through a hard winter: large south/southeast-facing bluff overhangs (passive solar heat) with a flat, dry dirt bench at their base, near year-round water and above the 100-year floodplain.',
         huntcamp: '<b>Phase 3: Transient hunt camps.</b> Small outcrops and overhangs facing any direction, with quick cover, placed beside game choke points (saddles, ridgeline gaps, canyon funnels) and with a commanding view over valley floors or stream crossings.',
         entrance: '<b>Horizontal cave entrances.</b> Walk-in cave mouths in bluff faces can\'t be seen from above in LiDAR, so this finds the settings they open into: cliff feet with karst drainage signs (amphitheater coves, springs or stream heads at the bluff foot, sinks upslope). South/southeast-facing cliffs and known caves score higher.',
@@ -4303,7 +4781,8 @@
         document.getElementById('sinkShapeGroup').style.display = (mode === 'caves' || mode === 'ceremonial') ? 'block' : 'none';
         document.getElementById('modeDescription').innerHTML = MODE_DESCRIPTIONS[mode] || '';
         document.getElementById('moundPresetRow').style.display = mode === 'mounds' ? 'block' : 'none';
-        document.getElementById('geometricThresholdsGroup').style.display = mode === 'settlement' ? 'none' : 'block';
+        document.getElementById('geometricThresholdsGroup').style.display = (mode === 'settlement' || mode === 'effigy') ? 'none' : 'block';
+        document.getElementById('effigyParamsGroup').style.display = mode === 'effigy' ? 'block' : 'none';
         document.getElementById('settlementWeightsGroup').style.display = mode === 'settlement' ? 'block' : 'none';
         // "Min Depth/Relief" doesn't quite describe what's being measured in
         // every mode - relabeled per mode so the number alongside it stays
@@ -4550,7 +5029,7 @@
     }
     // Every threshold-learning mode, in one place, so adding a mode means
     // updating this list once rather than every load/import/clear path.
-    const GEOMETRIC_MODES = ['caves', 'mounds', 'shelter', 'basecamp', 'huntcamp', 'ceremonial', 'entrance'];
+    const GEOMETRIC_MODES = ['caves', 'mounds', 'shelter', 'basecamp', 'huntcamp', 'ceremonial', 'entrance', 'effigy'];
     // Fills in anything missing - older saved/exported data predates the
     // rejected lists and the karst workflow modes - so every code path can
     // rely on trainingData[mode].examples/.thresholds/.rejected existing.
@@ -4670,7 +5149,7 @@
     // needs to describe what's being detected - centralized so adding a mode
     // means updating these once, not hunting down every inline ternary.
     function modeFeatureName(mode) {
-        return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'dlmounds' ? 'Native Mound (deep learning)' : mode === 'shelter' ? 'Rockshelter / Overhang'
+        return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'effigy' ? 'Effigy / Linear Mound' : mode === 'dlmounds' ? 'Native Mound (deep learning)' : mode === 'shelter' ? 'Rockshelter / Overhang'
             : mode === 'basecamp' ? 'Base Camp Shelter (bluff-base bench)' : mode === 'huntcamp' ? 'Hunt Camp (outcrop at choke point)'
             : mode === 'ceremonial' ? 'Ceremonial Karst Entrance' : mode === 'entrance' ? 'Horizontal Cave Entrance Setting' : 'Feature';
     }
@@ -4755,7 +5234,7 @@
         const el = document.getElementById('trainingSummary');
         if (!el) return;
         const sigCount = ['caves', 'shelter', 'ceremonial'].reduce((n, m) => n + trainingData[m].examples.filter(e => e.significance).length, 0);
-        el.innerText = `Confirmed: ${trainingData.basecamp.examples.length} base camp, ${trainingData.huntcamp.examples.length} hunt camp, ${trainingData.ceremonial.examples.length} ceremonial karst, ${trainingData.entrance.examples.length} cave entrance, ${trainingData.caves.examples.length} cave/sinkhole, ${trainingData.mounds.examples.length} mound, ${trainingData.shelter.examples.length} shelter, ${trainingData.settlement.examples.length} settlement example(s)` +
+        el.innerText = `Confirmed: ${trainingData.basecamp.examples.length} base camp, ${trainingData.huntcamp.examples.length} hunt camp, ${trainingData.ceremonial.examples.length} ceremonial karst, ${trainingData.entrance.examples.length} cave entrance, ${trainingData.caves.examples.length} cave/sinkhole, ${trainingData.mounds.examples.length} mound, ${trainingData.effigy.examples.length} effigy/linear mound, ${trainingData.shelter.examples.length} shelter, ${trainingData.settlement.examples.length} settlement example(s)` +
             (sigCount > 0 ? ` \u2014 ${sigCount} marked with burial/ritual significance` : '');
     }
     updateTrainingSummary();
@@ -4798,7 +5277,7 @@
             list.push(example);
         }
         saveTrainingData(true);
-        maybeWidenThresholds(mode, example);
+        if (mode !== 'effigy') maybeWidenThresholds(mode, example);   // effigy scans use their own settings
         if (mode === 'mounds') { placeKnownMound(knownMounds().find(k => approxMetersBetween(k.lat, k.lon, lat, lon) < Math.max(10, 0.6 * k.d))); refreshLearnedMoundSettings(true); }
         updateTrainingSummary();
         if (checkboxEl) {
@@ -8010,6 +8489,7 @@
         if (!currentDEM) return;
         const mode0 = document.getElementById('scanMode').value;
         if (mode0 === 'settlement') { await runSettlementScan(); return; }
+        if (mode0 === 'effigy') { await runEffigyScan(); return; }
 
         const status = document.getElementById("status");
         const scanBtn = document.getElementById("scanBtn");
@@ -8948,7 +9428,7 @@
     // scan's results drop straight into QGIS/ArcGIS or a Python pipeline.
     let lastExportRaster = null; // { data: Float32Array, name, mode } - the last scan's analysis raster
     function featureTypeCode(mode) {
-        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', dlmounds: 'DLMound', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial', entrance: 'CaveEntrnc' }[mode] || 'Feature';
+        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', dlmounds: 'DLMound', effigy: 'Effigy', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial', entrance: 'CaveEntrnc' }[mode] || 'Feature';
     }
     function updateExportButtons() {
         const hasFeatures = detectedFeatures.length > 0;
@@ -8997,11 +9477,11 @@
     //  - OsmAnd colour extension matching the app's marker colours
     const GPX_SYMBOLS = {
         basecamp: 'Campground', huntcamp: 'Hunting Area', ceremonial: 'Tunnel', entrance: 'Mine',
-        caves: 'Pin, Blue', mounds: 'Summit', shelter: 'Block, Red', settlement: 'Residence'
+        caves: 'Pin, Blue', mounds: 'Summit', effigy: 'Trail Head', shelter: 'Block, Red', settlement: 'Residence'
     };
     const GPX_TYPE_NAMES = {
         basecamp: 'Base camp', huntcamp: 'Hunt camp', ceremonial: 'Ceremonial karst', entrance: 'Cave entrance setting',
-        caves: 'Cave or sinkhole', mounds: 'Mound', shelter: 'Rockshelter', settlement: 'Settlement hotspot'
+        caves: 'Cave or sinkhole', mounds: 'Mound', effigy: 'Effigy or linear mound', shelter: 'Rockshelter', settlement: 'Settlement hotspot'
     };
     const xmlEsc = (v) => String(v).replace(/[<>&"']/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[ch]));
     function buildGPX(features, title) {
@@ -9535,6 +10015,7 @@ ${wpts.join('\n')}
             html += `<div style="margin-top:8px;">
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="confirmMissedFeature('caves', ${r}, ${c})">This is a Cave/Sinkhole</button>
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="confirmMissedFeature('mounds', ${r}, ${c})">This is a Mound</button>
+                        <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="effigyCheckAt(${e.latlng.lat.toFixed(7)}, ${e.latlng.lng.toFixed(7)})">This is an Effigy</button>
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="confirmMissedFeature('shelter', ${r}, ${c})">This is a Shelter</button>
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;" onclick="confirmSettlementSite(${e.latlng.lat.toFixed(6)}, ${e.latlng.lng.toFixed(6)}, event)">Confirm Known Site</button>
                      </div>
