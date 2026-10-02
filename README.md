@@ -198,6 +198,19 @@ How it works:
 
 Every DTM you load collects samples for both models once you have used them. Save files are named per model, and loading one selects its model.
 
+**Training-site tour.** **🗺 Training-site tour (public mound sites)** in the Deep Learning section collects training candidates from known mound sites without you driving the map. The list starts with the 34 public parks and monuments in `docs/mound-training-sites.csv`. Each site is marked *Mounds*, *Effigies* or *Mounds + effigies*.
+
+- **Run tour.** For each waiting site, the app:
+  1. downloads about a mile square of terrain (addresses are looked up first);
+  2. runs the mound scan, the effigy scan, or both;
+  3. queues every candidate with a terrain sample for both models;
+  4. collects ordinary ground for both models, kept clear of the candidates.
+
+  Nothing is added to your training data until you review it. A site whose download fails, or has no 1 m LiDAR while *Require 1 m* is on, is retried the next time. **Stop** finishes the current site and stops.
+- **Review candidates.** A card shows each candidate, with shaded terrain of the spot and the map zoomed onto it. Answer **Yes, it's real**, **Not real** or **Not sure (skip)**; the keys are Y, N and S. **Back** (B) undoes the last answer. **Pause** keeps the rest for later. Each answer goes into your training data with its terrain sample straight away, even though that site's terrain is no longer loaded.
+- **Sites leave the list once trained.** A site is finished when it has been toured, all its candidates are answered, and the model for each kind you labelled there has been trained since. A site whose candidates were all mounds needs only the Mounds model. A site with effigies also needs the Effigy & linear mounds model. Finished sites are removed from the list, and the training message says how many left. Finished and removed default sites are remembered, so they never come back.
+- **Adding sites.** Enter coordinates or an address, or use the map centre, with an optional name and the kind of mounds there. Sites within 200 m of one already listed are refused. Add only places you know have mounds, preferably public ones. **Remove** takes a site off the list, along with its unanswered candidates.
+
 Expect rough results with fewer than about 20 confirmed mounds (or effigies). Random ground can occasionally contain an unrecorded mound, which slightly confuses the network. Mounds wider than about 35 m don't fit in its window.
 
 ## Batch pipeline
