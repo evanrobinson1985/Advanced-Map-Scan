@@ -701,6 +701,12 @@
         <button id="dlScanBtn" onclick="dlScan()" style="background:#9333ea;color:#fff;">Scan with deep learning (area in view)</button>
         <button id="dlStopBtn" onclick="dlCancel = true;" style="display:none;background:#fee2e2;color:#991b1b;">Stop</button>
         <div id="dlStatus" style="font-size:0.78rem; text-align:center; margin:6px 0; color:#334155;"></div>
+        <div style="display:flex; gap:6px;">
+            <button id="dlSaveBtn" onclick="dlSaveToFile()" style="font-size:0.8rem;">&#128190; Save deep-learning model</button>
+            <button id="dlLoadBtn" onclick="document.getElementById('dlLoadInput').click()" style="font-size:0.8rem;">&#128194; Load deep-learning model</button>
+        </div>
+        <input type="file" id="dlLoadInput" accept=".gz,.json,application/gzip,application/json" style="display:none" onchange="dlLoadFromFile(this)">
+        <div style="font-size:0.72rem; color:#64748b; margin:4px 0; line-height:1.4;">Saves one file with the trained model, its terrain samples and your training data. Load it to restore everything here or on another device; loading adds to what is already here.</div>
         <button id="dlDeleteBtn" onclick="dlDeleteAll()" style="font-size:0.75rem;background:#f1f5f9;color:#64748b;">Delete model and samples</button>
     </div>
 
@@ -2933,7 +2939,7 @@
     function dlShuffle(a, rnd) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
     function dlSetBusy(on) {
         dlBusy = on; dlCancel = false;
-        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn']) { const b = document.getElementById(id); if (b) b.disabled = on; }
+        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn']) { const b = document.getElementById(id); if (b) b.disabled = on; }
         const s = document.getElementById('dlStopBtn'); if (s) s.style.display = on ? 'block' : 'none';
     }
     async function dlTrain() {
@@ -3220,6 +3226,105 @@
         }
         if (fullDemGrid) { await dlHarvest(fullDemGrid, false); updateDLSummary(); }
     }
+    // ---- Saving the deep-learning model to a file ----
+    // One file holds everything needed to use the model elsewhere or restore
+    // it: the trained network, its terrain samples, its accuracy check, and a
+    // copy of your training data (which says which samples are mounds).
+    // Loading merges: samples and training data are added to what is here;
+    // the network in the file replaces the one here.
+    function dlB64(u8) {
+        let out = '';
+        for (let i = 0; i < u8.length; i += 0x8000) out += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+        return btoa(out);
+    }
+    function dlUnB64(str) { const bin = atob(str), u8 = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i); return u8; }
+    const dlCm64 = (cm) => dlB64(new Uint8Array(cm.buffer, cm.byteOffset, cm.byteLength));
+    const dlCmFrom64 = (str) => { const u8 = dlUnB64(str); return new Int16Array(u8.buffer, 0, u8.byteLength >> 1); };
+    async function dlSaveToFile() {
+        if (dlBusy) return;
+        dlSetBusy(true);
+        try {
+            await dlLoadPatches();
+            const meta = dlPrefs().model || null;
+            let model = null;
+            if (meta && !dlModelOutdated()) {
+                dlSetStatus('Reading the trained model...');
+                const tf = await loadTF();
+                const m = await dlGetModel(tf);
+                if (m) await m.save(tf.io.withSaveHandler(async (a) => {
+                    model = { topology: a.modelTopology, weightSpecs: a.weightSpecs, weights: dlB64(new Uint8Array(a.weightData)) };
+                    return { modelArtifactsInfo: { dateSaved: new Date(), modelTopologyType: 'JSON' } };
+                }));
+            }
+            const items = {};
+            for (const [k, v] of Object.entries(dlPatches.items)) items[k] = { lat: v.lat, lon: v.lon, cm: dlCm64(v.cm) };
+            const file = {
+                kind: 'lidar-deep-learning-model', format: 1, methodVersion: DL.MODEL_VERSION, savedAt: Date.now(),
+                patch: { size: DL.PATCH, res: DL.RES }, model, modelInfo: model ? meta : null,
+                samples: { items, bg: dlPatches.bg.map(b => ({ lat: b.lat, lon: b.lon, area: b.area, cm: dlCm64(b.cm) })), areas: dlPatches.areas },
+                trainingData: JSON.parse(JSON.stringify(trainingData))
+            };
+            delete file.trainingData._undo;
+            let blob = new Blob([JSON.stringify(file)], { type: 'application/json' }), name = 'lidar-deep-learning-model-' + new Date().toISOString().slice(0, 10) + '.json';
+            if (window.CompressionStream) {   // about a third of the size
+                try { blob = await new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).blob(); blob = new Blob([blob], { type: 'application/gzip' }); name += '.gz'; }
+                catch (e) { console.warn('Compression unavailable; saving uncompressed', e); }
+            }
+            await downloadBlob(blob, name);
+            const nS = Object.keys(items).length + file.samples.bg.length;
+            dlSetStatus(`Saved ${name} (${(blob.size / 1e6).toFixed(1)} MB): ${model ? 'the trained model, ' : 'no trained model yet, '}${nS} terrain samples and your training data. Use Load deep-learning model to restore it here or on another device.`);
+        } catch (e) {
+            console.error(e);
+            dlSetStatus('Could not save the model: ' + (e.message || e));
+        } finally { dlSetBusy(false); }
+    }
+    async function dlLoadFromFile(input) {
+        const f = input.files && input.files[0];
+        input.value = '';
+        if (!f || dlBusy) return;
+        dlSetBusy(true);
+        try {
+            dlSetStatus('Reading ' + f.name + '...');
+            let blob = f;
+            const head = new Uint8Array(await f.slice(0, 2).arrayBuffer());
+            if (head[0] === 0x1f && head[1] === 0x8b) {
+                if (!window.DecompressionStream) throw new Error('this browser cannot open compressed files; update it, or save the file again from a newer browser');
+                blob = await new Response(f.stream().pipeThrough(new DecompressionStream('gzip'))).blob();
+            }
+            const file = JSON.parse(await blob.text());
+            if (!file || file.kind !== 'lidar-deep-learning-model') throw new Error('this is not a deep-learning model file from this app');
+            if (file.patch && (file.patch.size !== DL.PATCH || file.patch.res !== DL.RES)) throw new Error('the samples in this file were made by an incompatible version');
+            // training data first: it says which samples are mounds
+            let addedTD = 0;
+            if (file.trainingData) addedTD = mergeTrainingData(file.trainingData);
+            await dlLoadPatches();
+            let addedS = 0;
+            for (const [k, v] of Object.entries(file.samples.items || {})) if (!dlPatches.items[k]) { dlPatches.items[k] = { lat: v.lat, lon: v.lon, cm: dlCmFrom64(v.cm) }; addedS++; }
+            for (const b of file.samples.bg || []) if (!dlPatches.bg.some(x => Math.abs(x.lat - b.lat) < 1e-7 && Math.abs(x.lon - b.lon) < 1e-7)) { dlPatches.bg.push({ lat: b.lat, lon: b.lon, area: b.area, cm: dlCmFrom64(b.cm) }); addedS++; }
+            if (dlPatches.bg.length > DL.BG_MAX) dlPatches.bg.splice(0, dlPatches.bg.length - DL.BG_MAX);
+            for (const a of file.samples.areas || []) if (!dlPatches.areas.includes(a)) dlPatches.areas.push(a);
+            await dlSavePatches();
+            dlPrefs().enabled = true;
+            let modelMsg = 'The file has no trained model; press Train model.';
+            if (file.model && file.methodVersion === DL.MODEL_VERSION) {
+                dlSetStatus('Restoring the trained model...');
+                const tf = await loadTF();
+                const m = await tf.loadLayersModel(tf.io.fromMemory({ modelTopology: file.model.topology, weightSpecs: file.model.weightSpecs, weightData: dlUnB64(file.model.weights).buffer }));
+                await m.save(DL.MODEL_URL);
+                if (dlModel) dlModel.dispose();
+                dlModel = m;
+                dlPrefs().model = { ...(file.modelInfo || {}), version: DL.MODEL_VERSION };
+                modelMsg = `Model trained ${file.modelInfo && file.modelInfo.at ? new Date(file.modelInfo.at).toLocaleDateString() : ''} restored and ready to scan.`;
+            } else if (file.model) modelMsg = 'The model in the file was made by an older method; press Train model to rebuild it from the samples (they are loaded).';
+            saveTrainingData();
+            await updateDLSummary();
+            dlSetStatus(`Loaded ${f.name}: ${addedS} new terrain sample${addedS === 1 ? '' : 's'}, ${addedTD} new training item${addedTD === 1 ? '' : 's'}. ${modelMsg}`);
+        } catch (e) {
+            console.error(e);
+            dlSetStatus('Could not load the model: ' + (e.message || e));
+        } finally { dlSetBusy(false); }
+    }
+
     async function dlDeleteAll() {
         if (dlBusy) return;
         if (!confirm('Delete the deep-learning model and all its terrain samples? Your training data (confirmations, Not real marks, outlines) is not touched.')) return;
@@ -4727,23 +4832,7 @@
         const reader = new FileReader();
         reader.onload = () => {
             try {
-                const parsed = JSON.parse(reader.result);
-                if (!parsed.caves || !parsed.mounds) throw new Error('unexpected format');
-                // Merge, don't replace: restoring a backup never loses anything
-                // added since it was made
-                const inc = normalizeTrainingData(parsed);   // older exports predate some categories
-                let added = 0;
-                const same = (a2, b2) => approxMetersBetween(a2.lat, a2.lon, b2.lat, b2.lon) < 5 && Math.abs((a2.ts || 0) - (b2.ts || 0)) < 1000;
-                for (const m of [...GEOMETRIC_MODES, 'settlement']) {
-                    for (const ex of inc[m].examples || []) if (!trainingData[m].examples.some(e2 => same(e2, ex))) { trainingData[m].examples.push(ex); added++; }
-                    if (inc[m].rejected) for (const ex of inc[m].rejected) if (!trainingData[m].rejected.some(e2 => same(e2, ex))) { trainingData[m].rejected.push(ex); added++; }
-                }
-                for (const o of inc.outlines || []) if (!trainingData.outlines.some(o2 => o2.id === o.id)) { trainingData.outlines.push(o); added++; }
-                saveTrainingData();
-                if (typeof refreshOutlineLayer === 'function') refreshOutlineLayer();
-                refreshLearnedMoundSettings(true);
-                applyModeThresholds(activeThresholdMode);
-                updateTrainingSummary();
+                const added = mergeTrainingData(JSON.parse(reader.result));
                 document.getElementById('status').innerText = `Training data imported: ${added} new item(s) merged with what was already here.`;
             } catch (e) {
                 document.getElementById('status').innerText = 'Could not import - not a valid training data file.';
@@ -4751,6 +4840,26 @@
         };
         reader.readAsText(file);
         fileInput.value = '';
+    }
+    // Merge, don't replace: restoring a backup never loses anything added
+    // since it was made. Returns how many items were new.
+    function mergeTrainingData(parsed) {
+        if (!parsed || !parsed.caves || !parsed.mounds) throw new Error('unexpected format');
+        const inc = normalizeTrainingData(parsed);   // older exports predate some categories
+        let added = 0;
+        const same = (a2, b2) => approxMetersBetween(a2.lat, a2.lon, b2.lat, b2.lon) < 5 && Math.abs((a2.ts || 0) - (b2.ts || 0)) < 1000;
+        for (const m of [...GEOMETRIC_MODES, 'settlement']) {
+            for (const ex of inc[m].examples || []) if (!trainingData[m].examples.some(e2 => same(e2, ex))) { trainingData[m].examples.push(ex); added++; }
+            if (inc[m].rejected) for (const ex of inc[m].rejected) if (!trainingData[m].rejected.some(e2 => same(e2, ex))) { trainingData[m].rejected.push(ex); added++; }
+        }
+        for (const o of inc.outlines || []) if (!trainingData.outlines.some(o2 => o2.id === o.id)) { trainingData.outlines.push(o); added++; }
+        saveTrainingData();
+        if (typeof refreshOutlineLayer === 'function') refreshOutlineLayer();
+        refreshLearnedMoundSettings(true);
+        applyModeThresholds(activeThresholdMode);
+        updateTrainingSummary();
+        if (typeof updateDLSummary === 'function') updateDLSummary().catch(() => {});
+        return added;
     }
     function clearTrainingData() {
         if (!confirm('Clear all confirmed examples and learned thresholds/patterns for ALL modes (base camps, hunt camps, ceremonial karst, caves, mounds, shelters, settlement)? Export first if you want a backup - this cannot be undone.')) return;
