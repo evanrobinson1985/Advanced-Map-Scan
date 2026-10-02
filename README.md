@@ -141,6 +141,14 @@ How it works:
 - **Results.** Results are purple "D" markers on their own layer and legend entry, separate from the regular scan. A candidate on one of your confirmed mounds says so, which is a quick sanity check.
 - **Cross-check with the regular scan.** If the regular mound scan has results on the map, candidates it also found are marked "The regular mound scan found this too" and listed first. Next come candidates with a measurable rise. Candidates smaller across than your smallest mound size setting (often tree throws, boulders or knobs) are flagged and listed last. Run the regular scan first, then the deep-learning scan, to get the cross-check.
 - **After an upgrade.** When the method is upgraded, the panel asks you to train again. Your samples are kept.
+- **Mounds too big for the window.** Mounds recorded wider than 35 m (115 ft) are left out of deep-learning training, and the panel says how many. The network would see only their flat top or a slope and learn that slopes are mounds. The regular scan handles big platform mounds.
+- **Check doubtful labels.** The network scores your own training items and lists the ones it strongly disagrees with, each with **Go to**, **Edit** (opens the item's editor on the training-data map, with a button back to the list) and **Remove**:
+  - records whose size looks wrong: over 1 km across, or over 3 m tall with almost no rise in the terrain under the point;
+  - "Not real" marks it scores 90% or more as a mound;
+  - confirmed mounds it scores under 30%.
+
+  Training reports how many doubtful labels it found. A "Not real" mark switched to real (or back) keeps its terrain sample.
+- **Background across all areas.** Background is kept up to 4,000 samples. Over the cap, samples are trimmed from whichever area has the most, so every area keeps a share. An area whose background was dropped by an older version is sampled again the next time it is loaded.
 - **Save deep-learning model / Load deep-learning model.** Saving writes one file (`lidar-deep-learning-model-DATE.json.gz`). It holds the trained network, all its terrain samples, its accuracy check and a copy of your training data, which says which samples are mounds. Load it to restore everything after clearing the browser, or to use the model on another device. Loading adds to what is already there: samples and training data are merged without duplicates, and the network in the file replaces the one in the browser. If the file's network was made by an older method, its samples are still loaded and you press Train model.
 - **Answering.** **Yes** / **Not real** on a candidate saves to the same training data as the regular scan and takes its terrain sample at once. Train again to update the network.
 

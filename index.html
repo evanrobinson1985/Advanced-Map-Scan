@@ -703,6 +703,7 @@
         </div>
         <button id="dlCollectBtn" onclick="dlCollectNow()" style="font-size:0.8rem;">Collect samples from this DTM</button>
         <button id="dlTrainBtn" onclick="dlTrain()" style="background:#f3e8ff;color:#6b21a8;">&#129504; Train model</button>
+        <button id="dlCheckBtn" onclick="dlCheckLabels()" style="font-size:0.8rem;background:#fef3c7;color:#92400e;">&#128269; Check doubtful labels</button>
         <button id="dlScanBtn" onclick="dlScan()" style="background:#9333ea;color:#fff;">Scan with deep learning (area in view)</button>
         <button id="dlStopBtn" onclick="dlCancel = true;" style="display:none;background:#fee2e2;color:#991b1b;">Stop</button>
         <div id="dlStatus" style="font-size:0.78rem; text-align:center; margin:6px 0; color:#334155;"></div>
@@ -2670,7 +2671,7 @@
     // always starts from all current data, so edits, removals and Undo are
     // honoured. TensorFlow.js runs it in the browser (on the graphics card
     // where possible); it's only loaded when this section is used.
-    const DL = { PATCH: 48, INPUT: 40, RES: 1.0, BORDER: 3, STRIDE: 4, BG_PER_AREA: 150, BG_MAX: 1500, MAX_SCAN_CELLS: 2.5e6,
+    const DL = { PATCH: 48, INPUT: 40, RES: 1.0, BORDER: 3, STRIDE: 4, BG_PER_AREA: 150, BG_MAX: 4000, MAX_POS_D: 35, MAX_SCAN_CELLS: 2.5e6,
                  CH: 3, MODEL_VERSION: 2, MODEL_URL: 'indexeddb://lidar-dl-mounds-v2', EPOCHS: 40 };
     let dlPatches = null, dlModel = null, dlBusy = false, dlCancel = false;
     MODE_STYLE.dlmounds = { color: '#9333ea', letter: 'D', label: 'Mounds (deep learning)' };
@@ -2845,10 +2846,20 @@
     // Training items that can teach the network, with labels as they are now
     function dlTrainingItems() {
         const items = [];
-        for (const ex of trainingData.mounds.examples) items.push({ key: 'ex:' + ex.ts, lat: ex.lat, lon: ex.lon, label: 1 });
-        for (const rj of trainingData.mounds.rejected) items.push({ key: 'rj:' + rj.ts, lat: rj.lat, lon: rj.lon, label: 0 });
-        for (const o of trainingData.outlines) items.push({ key: 'ol:' + o.id, lat: o.centroid[0], lon: o.centroid[1], label: o.label === 'mound' ? 1 : 0 });
+        for (const ex of trainingData.mounds.examples) items.push({ key: 'ex:' + ex.ts, lat: ex.lat, lon: ex.lon, label: 1, d: ex.diameter, h: ex.maxMetric, name: ex.name });
+        for (const rj of trainingData.mounds.rejected) items.push({ key: 'rj:' + rj.ts, lat: rj.lat, lon: rj.lon, label: 0, name: rj.name });
+        for (const o of trainingData.outlines) items.push({ key: 'ol:' + o.id, lat: o.centroid[0], lon: o.centroid[1], label: o.label === 'mound' ? 1 : 0,
+                                                            d: o.outline && o.outline.eqDiameterM, h: o.outline && o.outline.heightM, name: o.name });
         return items;
+    }
+    // An item's terrain sample. A confirmation and a "Not real" mark that
+    // was switched with Edit share their time stamp and place, so the sample
+    // taken under the old label still counts.
+    function dlSampleFor(it) {
+        if (!dlPatches) return null;
+        let p = dlPatches.items[it.key];
+        if (!p && (it.key.startsWith('ex:') || it.key.startsWith('rj:'))) p = dlPatches.items[(it.key.startsWith('ex:') ? 'rj:' : 'ex:') + it.key.slice(3)];
+        return p || null;
     }
     function dlInGrid(g, lat, lon, marginM) {
         const b = g.bounds, mLat = marginM / 111320, mLon = marginM / (111320 * Math.cos(lat * Math.PI / 180));
@@ -2862,14 +2873,16 @@
         const sample = dlSampler(g), margin = DL.PATCH * DL.RES / 2 + 1;
         let nItems = 0, nBg = 0;
         for (const it of dlTrainingItems()) {
-            const have = dlPatches.items[it.key];
+            const have = dlSampleFor(it);
             if (have && approxMetersBetween(have.lat, have.lon, it.lat, it.lon) < 2) continue;
             if (!dlInGrid(g, it.lat, it.lon, margin)) continue;
             const cm = dlExtractPatch(sample, it.lat, it.lon);
             if (cm) { dlPatches.items[it.key] = { lat: it.lat, lon: it.lon, cm }; nItems++; }
         }
         const b = g.bounds, areaKey = [b.n, b.s, b.e, b.w].map(v => v.toFixed(4)).join(',');
-        if (withBackground && !dlPatches.areas.includes(areaKey)) {
+        // an area counts as done while its background is kept (older versions
+        // dropped the earliest areas' background to stay under the cap)
+        if (withBackground && !dlPatches.bg.some(x => x.area === areaKey)) {
             // away from every mound you know of, so background really is "not a mound"
             const avoid = [...dlTrainingItems().filter(i => i.label === 1), ...knownMounds()];
             const mLat = margin / 111320, mLon = margin / (111320 * Math.cos((b.n + b.s) / 2 * Math.PI / 180));
@@ -2882,24 +2895,43 @@
                     const cm = dlExtractPatch(sample, lat, lon);
                     if (cm) { dlPatches.bg.push({ lat, lon, cm, area: areaKey }); nBg++; }
                 }
-                dlPatches.areas.push(areaKey);
-                if (dlPatches.bg.length > DL.BG_MAX) dlPatches.bg.splice(0, dlPatches.bg.length - DL.BG_MAX);
+                if (!dlPatches.areas.includes(areaKey)) dlPatches.areas.push(areaKey);
+                dlTrimBackground();
                 if (dlPatches.areas.length > 200) dlPatches.areas.splice(0, dlPatches.areas.length - 200);
             }
         }
         if (nItems || nBg) await dlSavePatches();
         return { items: nItems, bg: nBg };
     }
-    // Samples usable now: an item's sample counts only while it's still where
-    // the sample was taken
-    function dlUsableSamples() {
-        const pos = [], neg = [], missing = { pos: 0, neg: 0 };
-        for (const it of dlTrainingItems()) {
-            const p = dlPatches && dlPatches.items[it.key];
-            if (p && approxMetersBetween(p.lat, p.lon, it.lat, it.lon) < 2) (it.label ? pos : neg).push({ cm: p.cm, key: it.key, lat: it.lat, lon: it.lon });
-            else missing[it.label ? 'pos' : 'neg']++;
+    // Over the cap, background is trimmed from whichever area has the most,
+    // so every area you've loaded keeps a share
+    function dlTrimBackground() {
+        const bg = dlPatches.bg, over = bg.length - DL.BG_MAX;
+        if (over <= 0) return;
+        const count = new Map();
+        for (const b of bg) count.set(b.area, (count.get(b.area) || 0) + 1);
+        const drop = new Map();
+        for (let k = 0; k < over; k++) {
+            let best = null, n = -1;
+            for (const [a, c] of count) if (c > n) { n = c; best = a; }
+            count.set(best, n - 1); drop.set(best, (drop.get(best) || 0) + 1);
         }
-        return { pos, neg, bg: (dlPatches ? dlPatches.bg : []).map(b => ({ cm: b.cm, lat: b.lat, lon: b.lon })), missing };
+        dlPatches.bg = bg.filter(b => { const d = drop.get(b.area); if (d) { drop.set(b.area, d - 1); return false; } return true; });
+    }
+    // Samples usable now: an item's sample counts only while it's still where
+    // the sample was taken. Mounds recorded wider than the network's window
+    // (MAX_POS_D) are left out: it would see only a flat top or a slope, and
+    // learn that slopes are mounds. The regular scan handles those.
+    function dlUsableSamples() {
+        const pos = [], neg = [], tooBig = [], missing = { pos: 0, neg: 0 };
+        for (const it of dlTrainingItems()) {
+            const p = dlSampleFor(it);
+            if (!(p && approxMetersBetween(p.lat, p.lon, it.lat, it.lon) < 2)) { missing[it.label ? 'pos' : 'neg']++; continue; }
+            const smp = { cm: p.cm, key: it.key, lat: it.lat, lon: it.lon, d: it.d, h: it.h, name: it.name };
+            if (it.label && it.d > DL.MAX_POS_D) tooBig.push(smp);
+            else (it.label ? pos : neg).push(smp);
+        }
+        return { pos, neg, tooBig, bg: (dlPatches ? dlPatches.bg : []).map(b => ({ cm: b.cm, lat: b.lat, lon: b.lon })), missing };
     }
     async function updateDLSummary() {
         const el = document.getElementById('dlSummary'); if (!el) return;
@@ -2907,6 +2939,7 @@
         const s = dlUsableSamples(), m = dlPrefs().model;
         const areas = new Set(dlPatches.bg.map(b => b.area)).size;
         el.innerHTML = `<b>Samples:</b> ${s.pos.length} mound${s.pos.length === 1 ? '' : 's'}, ${s.neg.length} not-mound${s.neg.length === 1 ? '' : 's'}, ${s.bg.length} background (${areas} area${areas === 1 ? '' : 's'})` +
+            (s.tooBig.length ? `<br><span style="color:#475569;">${s.tooBig.length} mound${s.tooBig.length > 1 ? 's' : ''} wider than ${Math.round(DL.MAX_POS_D / FT_TO_M)} ft ${s.tooBig.length > 1 ? 'are' : 'is'} left to the regular scan (too big for the network's ${Math.round(DL.INPUT / FT_TO_M)} ft window).</span>` : '') +
             (s.missing.pos + s.missing.neg ? `<br><span style="color:#92400e;">${s.missing.pos ? s.missing.pos + ' mound' + (s.missing.pos > 1 ? 's' : '') : ''}${s.missing.pos && s.missing.neg ? ' and ' : ''}${s.missing.neg ? s.missing.neg + ' not-mound' + (s.missing.neg > 1 ? 's' : '') : ''} still need a sample: load a DTM that covers ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'}.</span> <a href="#" onclick="event.preventDefault(); dlShowMissing();" style="font-weight:bold;">Show ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'} on the map</a>` : '') +
             `<br><b>Model:</b> ` + (m && dlModelOutdated() ? '<span style="color:#92400e;">the method was upgraded; press Train model again (samples are kept)</span>' : m ? `trained ${new Date(m.at).toLocaleString()} on ${m.pos} mounds and ${m.neg} not-mounds${m.val ? `; held-out check: found ${m.val.posHit} of ${m.val.pos} mounds, wrongly flagged ${m.val.negHit} of ${m.val.neg} not-mounds` : ' (too few mounds for a held-out check)'}` : 'not trained yet');
     }
@@ -2919,7 +2952,7 @@
     function dlMissingItems() {
         const out = [];
         for (const it of dlTrainingItems()) {
-            const p = dlPatches && dlPatches.items[it.key];
+            const p = dlSampleFor(it);
             if (p && approxMetersBetween(p.lat, p.lon, it.lat, it.lon) < 2) continue;
             const kind = it.key.startsWith('ex:') ? 'Confirmed mound' : it.key.startsWith('rj:') ? '"Not real" mark' : it.label ? 'Mound outline' : 'Look-alike outline';
             out.push({ ...it, kind });
@@ -3055,7 +3088,7 @@
     function dlShuffle(a, rnd) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
     function dlSetBusy(on) {
         dlBusy = on; dlCancel = false;
-        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn']) { const b = document.getElementById(id); if (b) b.disabled = on; }
+        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn', 'dlCheckBtn']) { const b = document.getElementById(id); if (b) b.disabled = on; }
         const s = document.getElementById('dlStopBtn'); if (s) s.style.display = on ? 'block' : 'none';
     }
     async function dlTrain() {
@@ -3115,7 +3148,12 @@
             dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val, version: DL.MODEL_VERSION };
             saveTrainingData();
             await updateDLSummary();
-            dlSetStatus(`Trained in ${Math.round((Date.now() - t0) / 1000)} s on ${S.pos.length} mounds and ${negAll.length} not-mound samples.` +
+            let doubt = null;
+            try { doubt = await dlScoreLabels(tf, model); } catch (e) { console.warn(e); }
+            const nDoubt = doubt ? doubt.lowPos.length + doubt.highNeg.length + doubt.badSize.length : 0;
+            dlSetStatus(`Trained in ${Math.round((Date.now() - t0) / 1000)} s on ${S.pos.length} mounds and ${negAll.length} not-mound samples` +
+                (S.tooBig.length ? ` (${S.tooBig.length} mounds too big for its window left to the regular scan)` : '') + '.' +
+                (nDoubt ? ` ${nDoubt} of your labels look doubtful: press Check doubtful labels.` : '') +
                 (val ? ` Held-out check (data it didn't train on): found ${val.posHit} of ${val.pos} mounds; wrongly flagged ${val.negHit} of ${val.neg} not-mounds.` : ' With fewer than 5 mounds there is no held-out check yet; treat results with extra caution.') +
                 ' Now press Scan with deep learning.');
         } catch (e) {
@@ -3123,6 +3161,131 @@
             dlSetStatus('Training failed: ' + (e.message || e));
         } finally { dlSetBusy(false); }
     }
+    // ---- Doubtful labels ----
+    // The network's opinion of your own training items, to catch mistakes:
+    //  - confirmed mounds (that fit its window) it scores below 30%;
+    //  - "Not real" marks and look-alike outlines it scores 90% or more;
+    //  - mounds whose recorded size doesn't match the terrain: recorded over
+    //    1 km across, or over 3 m tall with almost no rise under the point
+    //    (usually a whole hill or landscape saved by an older mound check).
+    // It has trained on these very labels, so a strong disagreement is
+    // worth a look: the label, or the position, may be wrong.
+    function dlKeyToReviewKey(key) {
+        const [t, id] = [key.slice(0, 2), key.slice(3)];
+        return t === 'ol' ? { list: 'outlines', id } : { list: t === 'ex' ? 'examples' : 'rejected', mode: 'mounds', ts: Number(id) };
+    }
+    function dlCentreRise(cm) {
+        const N = DL.INPUT, CH = DL.CH, c0 = (DL.PATCH - N) / 2, one = new Float32Array(N * N * CH);
+        dlInputFromPatch(cm, one, 0, c0, c0, 0, 1);
+        let peak = -9;
+        for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (Math.hypot(r - (N - 1) / 2, c - (N - 1) / 2) < 8) peak = Math.max(peak, one[(r * N + c) * CH]);
+        return peak;
+    }
+    async function dlScoreLabels(tf, model) {
+        const S = dlUsableSamples(), N = DL.INPUT, CH = DL.CH, sz = N * N * CH, c0 = (DL.PATCH - N) / 2;
+        const items = [...S.pos.map(x => ({ ...x, y: 1 })), ...S.neg.map(x => ({ ...x, y: 0 }))];
+        const B = 32;
+        for (let i = 0; i < items.length; i += B) {
+            const grp = items.slice(i, i + B), xs = new Float32Array(grp.length * 8 * sz);
+            grp.forEach((x, j) => { for (let t = 0; t < 8; t++) dlInputFromPatch(x.cm, xs, (j * 8 + t) * sz, c0, c0, t, 1); });
+            const p = tf.tidy(() => model.predict(tf.tensor4d(xs, [grp.length * 8, N, N, CH])).dataSync());
+            grp.forEach((x, j) => { let m = 0; for (let t = 0; t < 8; t++) m += p[j * 8 + t]; x.p = m / 8; });
+            await dlTick();
+        }
+        const lowPos = items.filter(x => x.y && x.p < 0.3).sort((a, b) => a.p - b.p);
+        const highNeg = items.filter(x => !x.y && x.p >= 0.9).sort((a, b) => b.p - a.p);
+        const badSize = [...S.pos, ...S.tooBig].map(x => ({ ...x, rise: dlCentreRise(x.cm) }))
+            .filter(x => x.d > 1000 || (x.h > 3 && x.rise < 0.3)).sort((a, b) => (b.d || 0) - (a.d || 0));
+        return { lowPos, highNeg, badSize };
+    }
+    async function dlCheckLabels() {
+        if (dlBusy) return;
+        dlSetBusy(true);
+        try {
+            dlSetStatus('Checking your labels with the network...');
+            const tf = await loadTF();
+            await dlUseBackend(tf, 'scan');
+            const model = await dlGetModel(tf);
+            if (!model) { dlSetStatus(dlModelOutdated() ? 'Press Train model first (the method was upgraded).' : 'Train the model first.'); return; }
+            window.__dlDoubt = await dlScoreLabels(tf, model);
+            dlRenderDoubts();
+            const d = window.__dlDoubt;
+            dlSetStatus(`${d.lowPos.length + d.highNeg.length + d.badSize.length} doubtful label${d.lowPos.length + d.highNeg.length + d.badSize.length === 1 ? '' : 's'} found.`);
+        } catch (e) { console.error(e); dlSetStatus('Could not check the labels: ' + (e.message || e)); }
+        finally { dlSetBusy(false); }
+    }
+    function dlRenderDoubts() {
+        const d = window.__dlDoubt; if (!d) return;
+        let el = document.getElementById('dlDoubtModal');
+        if (!el) {
+            el = document.createElement('div'); el.id = 'dlDoubtModal';
+            el.style.cssText = 'position:fixed;inset:0;z-index:4000;background:rgba(15,23,42,0.45);display:flex;align-items:flex-start;justify-content:center;padding:4vh 8px;box-sizing:border-box;';
+            el.onclick = (e) => { if (e.target === el) el.remove(); };
+            document.body.appendChild(el);
+        }
+        // drop rows whose item has since been edited or removed
+        const live = new Set(dlTrainingItems().map(i => i.key + (i.label ? '+' : '-')));
+        const keep = (x) => live.has(x.key + (x.y === 0 ? '-' : '+'));
+        d.lowPos = d.lowPos.filter(keep); d.highNeg = d.highNeg.filter(keep); d.badSize = d.badSize.filter(x => live.has(x.key + '+'));
+        const ft = metersToFeetInches, rows = [];
+        const kindOf = (k) => k.startsWith('ex:') ? 'Confirmed mound' : k.startsWith('rj:') ? '"Not real" mark' : 'Outline';
+        const sec = (title, note, list, detail) => {
+            if (!list.length) return '';
+            return `<div style="padding:8px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0;"><b>${title} (${list.length})</b><br><span style="font-size:0.74rem;color:#64748b;">${note}</span></div>` +
+                list.map(x => { const i = rows.push(x) - 1; return `<div style="padding:7px 12px;border-bottom:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;">
+                    <div style="flex:1;min-width:0;"><b>${kindOf(x.key)}</b>${x.name ? ' &ldquo;' + escapeHtml(x.name) + '&rdquo;' : ''}<br>
+                    <span style="font-size:0.78rem;color:#475569;">${detail(x)}</span><br><span style="font-size:0.72rem;color:#94a3b8;">${x.lat.toFixed(5)}, ${x.lon.toFixed(5)}</span></div>
+                    <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;" onclick="dlDoubtGo(${i}, false)">Go to</button>
+                    <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fef3c7;color:#92400e;" onclick="dlDoubtGo(${i}, true)">&#9998; Edit</button>
+                    <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fee2e2;color:#991b1b;" onclick="removeTrainingItem(dlKeyToReviewKey(window.__dlDoubtRows[${i}].key)); dlRenderDoubts();">Remove</button></div>`; }).join('');
+        };
+        const body = sec('Recorded size looks wrong', 'Probably a whole hill or landscape saved by an older version of the mound check. Remove it, or outline the real mound.', d.badSize,
+                         x => `recorded ${ft(x.d)} across, ${ft(x.h)} tall; the terrain under the point rises only ${ft(Math.max(0, x.rise))}`) +
+            sec('"Not real" marks that look like mounds', 'The network scores these 90%+ as mounds although you marked them not real. If one really is a mound, Edit it to "Real".', d.highNeg,
+                x => `network: ${Math.round(x.p * 100)}% mound`) +
+            sec('Confirmed mounds the network doubts', 'Scored under 30%. Check the position is on the mound (Edit → Move), or that it really is one.', d.lowPos,
+                x => `network: ${Math.round(x.p * 100)}% mound${x.d ? ', recorded ' + ft(x.d) + ' across' : ''}`);
+        window.__dlDoubtRows = rows;
+        el.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:580px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
+            <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:8px;z-index:1;">
+              <b style="flex:1;">Doubtful labels (${rows.length})</b>
+              <button onclick="undoLastTraining(); dlRenderDoubts();" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;">&#8630; Undo last</button>
+              <button onclick="document.getElementById('dlDoubtModal').remove()" style="width:auto;margin:0;padding:4px 10px;">Close</button></div>
+            ${body || '<div style="padding:14px;color:#166534;">&#10003; Nothing doubtful: the network agrees with all your labels.</div>'}
+            <div style="padding:8px 12px;font-size:0.72rem;color:#64748b;">After fixing labels, press Train model again.</div></div>`;
+    }
+    // Go to an item; with edit, open it on the training-data map with its editor
+    function dlDoubtGo(i, edit) {
+        const x = (window.__dlDoubtRows || [])[i]; if (!x) return;
+        const m = document.getElementById('dlDoubtModal'); if (m) m.style.display = 'none';
+        const back = () => { const m2 = document.getElementById('dlDoubtModal'); if (m2) { m2.style.display = 'flex'; dlRenderDoubts(); } };
+        if (!edit) {
+            map.setView([x.lat, x.lon], 18);
+            if (document.getElementById('panelContent').style.display !== 'none') togglePanel();
+            dlDoubtBackButton(back);
+            return;
+        }
+        showTrainingOnMap(false);
+        map.setView([x.lat, x.lon], 18, { animate: false });
+        const rk = JSON.stringify(dlKeyToReviewKey(x.key));
+        const ri = (window.__trainingMapRows || []).findIndex(r => JSON.stringify(r.key) === rk);
+        const mk = trainingMapLayer && trainingMapLayer.getLayers().find(l => l._tmIndex === ri);
+        if (mk) { mk.openPopup(); setTimeout(() => openTrainingEdit(ri), 0); }
+        dlDoubtBackButton(back);
+    }
+    // a small floating button back to the list
+    function dlDoubtBackButton(back) {
+        let b = document.getElementById('dlDoubtBack');
+        if (!b) {
+            b = document.createElement('button'); b.id = 'dlDoubtBack';
+            b.style.cssText = 'position:absolute;z-index:1000;left:10px;bottom:' + (window.innerWidth < 700 ? '130px' : '50px') + ';width:auto;margin:0;padding:6px 10px;font-size:0.8rem;background:#fff;border:2px solid #92400e;color:#92400e;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
+            b.innerHTML = '&#8592; Back to doubtful labels';
+            L.DomEvent.disableClickPropagation(b);
+            map.getContainer().appendChild(b);
+        }
+        b.onclick = () => { b.remove(); back(); };
+    }
+
     function dlThreshold() { const e = document.getElementById('dlThreshold'); return e ? parseFloat(e.value) : 0.8; }
     function dlModelOutdated() { const m = dlPrefs().model; return !!m && m.version !== DL.MODEL_VERSION; }
     async function dlGetModel(tf) {
@@ -3417,7 +3580,7 @@
             let addedS = 0;
             for (const [k, v] of Object.entries(file.samples.items || {})) if (!dlPatches.items[k]) { dlPatches.items[k] = { lat: v.lat, lon: v.lon, cm: dlCmFrom64(v.cm) }; addedS++; }
             for (const b of file.samples.bg || []) if (!dlPatches.bg.some(x => Math.abs(x.lat - b.lat) < 1e-7 && Math.abs(x.lon - b.lon) < 1e-7)) { dlPatches.bg.push({ lat: b.lat, lon: b.lon, area: b.area, cm: dlCmFrom64(b.cm) }); addedS++; }
-            if (dlPatches.bg.length > DL.BG_MAX) dlPatches.bg.splice(0, dlPatches.bg.length - DL.BG_MAX);
+            dlTrimBackground();
             for (const a of file.samples.areas || []) if (!dlPatches.areas.includes(a)) dlPatches.areas.push(a);
             await dlSavePatches();
             dlPrefs().enabled = true;
