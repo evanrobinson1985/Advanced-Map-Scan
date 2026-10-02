@@ -188,7 +188,17 @@ How it works:
 - **Save deep-learning model / Load deep-learning model.** Saving writes one file (`lidar-deep-learning-model-DATE.json.gz`). It holds the trained network, all its terrain samples, its accuracy check and a copy of your training data, which says which samples are mounds. Load it to restore everything after clearing the browser, or to use the model on another device. Loading adds to what is already there: samples and training data are merged without duplicates, and the network in the file replaces the one in the browser. If the file's network was made by an older method, its samples are still loaded and you press Train model.
 - **Answering.** **Yes** / **Not real** on a candidate saves to the same training data as the regular scan and takes its terrain sample at once. Train again to update the network.
 
-Expect rough results with fewer than about 20 confirmed mounds. Random ground can occasionally contain an unrecorded mound, which slightly confuses the network. Mounds wider than about 35 m don't fit in its window.
+**Two models.** The **Model** menu at the top of the Deep Learning section switches between *Mounds* and *Effigy & linear mounds*. Each has its own samples, network, accuracy check and save file. The effigy model:
+
+- learns from your confirmed effigies (scan results answered Yes, or *This is an Effigy*) and your "Not real" marks in the effigy mode, plus random ground;
+- looks at **128 m squares at 2 m**, so a whole bird fits;
+- sees the same narrow-relief view as the effigy scan, plus the broad relief around it and the steepness of its sides;
+- traces each candidate with the effigy scan's own analysis (shape, limbs, wingspan, size);
+- shows results as olive "F" diamonds, cross-checked with the effigy scan.
+
+Every DTM you load collects samples for both models once you have used them. Save files are named per model, and loading one selects its model.
+
+Expect rough results with fewer than about 20 confirmed mounds (or effigies). Random ground can occasionally contain an unrecorded mound, which slightly confuses the network. Mounds wider than about 35 m don't fit in its window.
 
 ## Batch pipeline
 
