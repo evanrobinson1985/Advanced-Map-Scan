@@ -2907,9 +2907,120 @@
         const s = dlUsableSamples(), m = dlPrefs().model;
         const areas = new Set(dlPatches.bg.map(b => b.area)).size;
         el.innerHTML = `<b>Samples:</b> ${s.pos.length} mound${s.pos.length === 1 ? '' : 's'}, ${s.neg.length} not-mound${s.neg.length === 1 ? '' : 's'}, ${s.bg.length} background (${areas} area${areas === 1 ? '' : 's'})` +
-            (s.missing.pos + s.missing.neg ? `<br><span style="color:#92400e;">${s.missing.pos ? s.missing.pos + ' mound' + (s.missing.pos > 1 ? 's' : '') : ''}${s.missing.pos && s.missing.neg ? ' and ' : ''}${s.missing.neg ? s.missing.neg + ' not-mound' + (s.missing.neg > 1 ? 's' : '') : ''} still need a sample: load a DTM that covers ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'}.</span>` : '') +
+            (s.missing.pos + s.missing.neg ? `<br><span style="color:#92400e;">${s.missing.pos ? s.missing.pos + ' mound' + (s.missing.pos > 1 ? 's' : '') : ''}${s.missing.pos && s.missing.neg ? ' and ' : ''}${s.missing.neg ? s.missing.neg + ' not-mound' + (s.missing.neg > 1 ? 's' : '') : ''} still need a sample: load a DTM that covers ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'}.</span> <a href="#" onclick="event.preventDefault(); dlShowMissing();" style="font-weight:bold;">Show ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'} on the map</a>` : '') +
             `<br><b>Model:</b> ` + (m && dlModelOutdated() ? '<span style="color:#92400e;">the method was upgraded; press Train model again (samples are kept)</span>' : m ? `trained ${new Date(m.at).toLocaleString()} on ${m.pos} mounds and ${m.neg} not-mounds${m.val ? `; held-out check: found ${m.val.posHit} of ${m.val.pos} mounds, wrongly flagged ${m.val.negHit} of ${m.val.neg} not-mounds` : ' (too few mounds for a held-out check)'}` : 'not trained yet');
     }
+    // ---- Where the items without a sample are ----
+    // Every training item that has no terrain sample yet is shown on the map
+    // (orange: mounds, grey: not-mounds), grouped into areas small enough for
+    // one download. The bar steps through the areas; "Download this area"
+    // fits the map to it and downloads, and the samples are taken at once.
+    let dlMissingLayer = null, dlMissingAreas = [], dlMissingIdx = 0;
+    function dlMissingItems() {
+        const out = [];
+        for (const it of dlTrainingItems()) {
+            const p = dlPatches && dlPatches.items[it.key];
+            if (p && approxMetersBetween(p.lat, p.lon, it.lat, it.lon) < 2) continue;
+            const kind = it.key.startsWith('ex:') ? 'Confirmed mound' : it.key.startsWith('rj:') ? '"Not real" mark' : it.label ? 'Mound outline' : 'Look-alike outline';
+            out.push({ ...it, kind });
+        }
+        return out;
+    }
+    // Greedy grouping: an item joins an area if the area stays within ~1.5 km
+    function dlGroupAreas(items) {
+        const areas = [], maxSpan = 1500;
+        for (const it of items) {
+            let best = null;
+            for (const a of areas) {
+                const n = Math.max(a.n, it.lat), s2 = Math.min(a.s, it.lat), e = Math.max(a.e, it.lon), w = Math.min(a.w, it.lon);
+                if (approxMetersBetween(n, w, s2, w) <= maxSpan && approxMetersBetween(n, w, n, e) <= maxSpan) { best = a; break; }
+            }
+            if (!best) { best = { n: it.lat, s: it.lat, e: it.lon, w: it.lon, items: [] }; areas.push(best); }
+            best.items.push(it);
+            best.n = Math.max(best.n, it.lat); best.s = Math.min(best.s, it.lat); best.e = Math.max(best.e, it.lon); best.w = Math.min(best.w, it.lon);
+        }
+        // most items first
+        return areas.sort((a, b) => b.items.length - a.items.length);
+    }
+    async function dlShowMissing() {
+        await dlLoadPatches();
+        const items = dlMissingItems();
+        if (!dlMissingLayer) dlMissingLayer = L.layerGroup();
+        dlMissingLayer.clearLayers();
+        dlMissingAreas = dlGroupAreas(items);
+        if (!items.length) {
+            dlSetStatus('Every training item has a terrain sample.');
+            const t = document.getElementById('dlMissingText');
+            if (!t) return;
+            // say so where you're looking, then leave just Hide
+            if (dlMissingLayer) map.removeLayer(dlMissingLayer);
+            t.innerHTML = '<b style="color:#166534;">&#10003; Every training item now has a terrain sample.</b> Open the panel and press Train model.';
+            for (const b of document.querySelectorAll('#dlMissingBar button')) if (b.innerText !== 'Hide') b.remove();
+            return;
+        }
+        dlMissingAreas.forEach((a, ai) => {
+            const pad = 60 / 111320;
+            L.rectangle([[a.s - pad, a.w - pad / Math.cos(a.s * Math.PI / 180)], [a.n + pad, a.e + pad / Math.cos(a.s * Math.PI / 180)]],
+                { color: '#ea580c', weight: 2, dashArray: '6,4', fill: false, interactive: false }).addTo(dlMissingLayer);
+            for (const it of a.items) {
+                const pos = it.label === 1, col = pos ? '#ea580c' : '#64748b';
+                L.marker([it.lat, it.lon], { zIndexOffset: 400, icon: L.divIcon({ className: 'det-icon', iconSize: [20, 20], iconAnchor: [10, 10], popupAnchor: [0, -10],
+                    html: `<div style="background:${col};color:#fff;width:16px;height:16px;border-radius:50%;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,0.5);font:bold 11px/16px sans-serif;text-align:center;">?</div>` }) })
+                    .bindPopup(`<div style="font:13px sans-serif;"><b>${escapeHtml(it.kind)}</b>: no terrain sample yet<br><span style="font-size:0.75rem;color:#64748b;">${it.lat.toFixed(5)}, ${it.lon.toFixed(5)} &middot; area ${ai + 1} of ${dlMissingAreas.length}</span>
+                        <button style="margin-top:6px;padding:5px 8px;font-size:0.8rem;background:#ea580c;color:#fff;border:none;" onclick="map.closePopup(); dlGoMissingArea(${ai}, true)">Download this area</button></div>`)
+                    .addTo(dlMissingLayer);
+            }
+        });
+        if (!map.hasLayer(dlMissingLayer)) dlMissingLayer.addTo(map);
+        if (!document.getElementById('dlMissingBar')) {
+            const bar = document.createElement('div');
+            bar.id = 'dlMissingBar';
+            const phone = window.innerWidth < 700;
+            bar.style.cssText = 'position:absolute;z-index:1000;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.3);padding:6px 10px;font:12px sans-serif;color:#1e293b;display:flex;align-items:center;gap:6px 8px;flex-wrap:wrap;box-sizing:border-box;border-left:4px solid #ea580c;'
+                + (phone ? 'top:56px;left:8px;right:56px;' : 'top:10px;left:50%;transform:translateX(-50%);max-width:calc(100% - 520px);min-width:380px;');
+            bar.innerHTML = `<span id="dlMissingText" style="flex:1 1 ${phone ? '100%' : '220px'};min-width:0;"></span>
+                <button onclick="dlGoMissingArea(dlMissingIdx - 1)" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;">&lsaquo; Prev</button>
+                <button onclick="dlGoMissingArea(dlMissingIdx + 1)" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;">Next &rsaquo;</button>
+                <button id="dlMissingDl" onclick="dlGoMissingArea(dlMissingIdx, true)" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#ea580c;color:#fff;border:none;">Download this area</button>
+                <button onclick="dlHideMissing()" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;">Hide</button>`;
+            L.DomEvent.disableClickPropagation(bar);
+            map.getContainer().appendChild(bar);
+        }
+        if (document.getElementById('panelContent').style.display !== 'none') togglePanel();
+        dlGoMissingArea(Math.min(dlMissingIdx, dlMissingAreas.length - 1));
+    }
+    function dlMissingBarText(extra) {
+        const items = dlMissingAreas.flatMap(a => a.items), pos = items.filter(i => i.label === 1).length, a = dlMissingAreas[dlMissingIdx];
+        const t = document.getElementById('dlMissingText'); if (!t) return;
+        t.innerHTML = `<b>Need terrain samples:</b> <span style="color:#ea580c;">&#9679;</span> ${pos} mound${pos === 1 ? '' : 's'}, <span style="color:#64748b;">&#9679;</span> ${items.length - pos} not-mound${items.length - pos === 1 ? '' : 's'} in ${dlMissingAreas.length} area${dlMissingAreas.length === 1 ? '' : 's'}.` +
+            (a ? ` Showing area <b>${dlMissingIdx + 1}</b> (${a.items.length} item${a.items.length === 1 ? '' : 's'}).` : '') + (extra ? ' ' + extra : '');
+    }
+    async function dlGoMissingArea(i, download) {
+        if (!dlMissingAreas.length) return;
+        dlMissingIdx = ((i % dlMissingAreas.length) + dlMissingAreas.length) % dlMissingAreas.length;
+        const a = dlMissingAreas[dlMissingIdx], pad = 80 / 111320, padLon = pad / Math.cos(a.s * Math.PI / 180);
+        map.fitBounds([[a.s - pad, a.w - padLon], [a.n + pad, a.e + padLon]], { padding: [30, 30], maxZoom: 17, animate: false });
+        dlMissingBarText();
+        if (!download) return;
+        if (downloadAbort || scanInProgress) { dlMissingBarText('Wait for the current download or scan to finish.'); return; }
+        const before = dlMissingItems().length;
+        dlMissingBarText('Downloading this area...');
+        const btn = document.getElementById('dlMissingDl'); if (btn) btn.disabled = true;
+        try {
+            await fetchDEM();
+            if (fullDemGrid) { dlPrefs().enabled = true; await dlHarvest(fullDemGrid, true); }
+        } finally { if (btn) btn.disabled = false; }
+        await updateDLSummary();
+        const got = before - dlMissingItems().length;
+        await dlShowMissing();
+        if (!dlMissingAreas.length) return;   // all done: dlShowMissing said so
+        dlMissingBarText(got > 0 ? `<b style="color:#166534;">&#10003; ${got} sample${got === 1 ? '' : 's'} taken.</b>` : `<b style="color:#b91c1c;">No new samples: check the download finished (status in the panel).</b>`);
+    }
+    function dlHideMissing() {
+        if (dlMissingLayer) map.removeLayer(dlMissingLayer);
+        const bar = document.getElementById('dlMissingBar'); if (bar) bar.remove();
+    }
+
     async function dlCollectNow() {
         if (dlBusy) return;
         if (!fullDemGrid) { dlSetStatus('Load or download a DTM first.'); return; }
