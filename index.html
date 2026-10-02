@@ -664,6 +664,8 @@
             <button id="undoTrainingBtn" onclick="undoLastTraining()" style="font-size:0.8rem;" disabled>&#8630; Undo last training change</button>
             <button onclick="openTrainingReview()" style="font-size:0.8rem;">Review Training Data</button>
         </div>
+        <div id="trainingIssuesNote" style="display:none;font-size:0.78rem;color:#92400e;background:#fef3c7;border-radius:6px;padding:6px 8px;margin-bottom:6px;"></div>
+        <button onclick="openTrainingCheck()" style="font-size:0.8rem;background:#fef3c7;color:#92400e;">&#129658; Check training data for issues</button>
         <button id="trainingMapBtn" onclick="toggleTrainingOnMap()" style="font-size:0.8rem;background:#dbeafe;color:#1e3a8a;">Show Training Data on Map</button>
         <button onclick="exportTrainingData()">Export Training Data</button>
         <input type="file" id="importFileInput" accept=".json" style="display:none" onchange="importTrainingData(this)">
@@ -703,7 +705,7 @@
         </div>
         <button id="dlCollectBtn" onclick="dlCollectNow()" style="font-size:0.8rem;">Collect samples from this DTM</button>
         <button id="dlTrainBtn" onclick="dlTrain()" style="background:#f3e8ff;color:#6b21a8;">&#129504; Train model</button>
-        <button id="dlCheckBtn" onclick="dlCheckLabels()" style="font-size:0.8rem;background:#fef3c7;color:#92400e;">&#128269; Check doubtful labels</button>
+        <button id="dlCheckBtn" onclick="openTrainingCheck()" style="font-size:0.8rem;background:#fef3c7;color:#92400e;">&#129658; Check training data</button>
         <button id="dlScanBtn" onclick="dlScan()" style="background:#9333ea;color:#fff;">Scan with deep learning (area in view)</button>
         <button id="dlStopBtn" onclick="dlCancel = true;" style="display:none;background:#fee2e2;color:#991b1b;">Stop</button>
         <div id="dlStatus" style="font-size:0.78rem; text-align:center; margin:6px 0; color:#334155;"></div>
@@ -2942,6 +2944,7 @@
             (s.tooBig.length ? `<br><span style="color:#475569;">${s.tooBig.length} mound${s.tooBig.length > 1 ? 's' : ''} wider than ${Math.round(DL.MAX_POS_D / FT_TO_M)} ft ${s.tooBig.length > 1 ? 'are' : 'is'} left to the regular scan (too big for the network's ${Math.round(DL.INPUT / FT_TO_M)} ft window).</span>` : '') +
             (s.missing.pos + s.missing.neg ? `<br><span style="color:#92400e;">${s.missing.pos ? s.missing.pos + ' mound' + (s.missing.pos > 1 ? 's' : '') : ''}${s.missing.pos && s.missing.neg ? ' and ' : ''}${s.missing.neg ? s.missing.neg + ' not-mound' + (s.missing.neg > 1 ? 's' : '') : ''} still need a sample: load a DTM that covers ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'}.</span> <a href="#" onclick="event.preventDefault(); dlShowMissing();" style="font-weight:bold;">Show ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'} on the map</a>` : '') +
             `<br><b>Model:</b> ` + (m && dlModelOutdated() ? '<span style="color:#92400e;">the method was upgraded; press Train model again (samples are kept)</span>' : m ? `trained ${new Date(m.at).toLocaleString()} on ${m.pos} mounds and ${m.neg} not-mounds${m.val ? `; held-out check: found ${m.val.posHit} of ${m.val.pos} mounds, wrongly flagged ${m.val.negHit} of ${m.val.neg} not-mounds` : ' (too few mounds for a held-out check)'}` : 'not trained yet');
+        tcUpdateBadge().catch(() => {});   // new samples can change the terrain check
     }
     // ---- Where the items without a sample are ----
     // Every training item that has no terrain sample yet is shown on the map
@@ -3148,12 +3151,12 @@
             dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val, version: DL.MODEL_VERSION };
             saveTrainingData();
             await updateDLSummary();
-            let doubt = null;
-            try { doubt = await dlScoreLabels(tf, model); } catch (e) { console.warn(e); }
-            const nDoubt = doubt ? doubt.lowPos.length + doubt.highNeg.length + doubt.badSize.length : 0;
+            // check the training data with the new network's opinion
+            let nDoubt = 0;
+            try { await tcScoreWithNetwork(tf, model); const iss = await tcFindIssues(); nDoubt = iss.length; tcUpdateBadge(iss); } catch (e) { console.warn(e); }
             dlSetStatus(`Trained in ${Math.round((Date.now() - t0) / 1000)} s on ${S.pos.length} mounds and ${negAll.length} not-mound samples` +
                 (S.tooBig.length ? ` (${S.tooBig.length} mounds too big for its window left to the regular scan)` : '') + '.' +
-                (nDoubt ? ` ${nDoubt} of your labels look doubtful: press Check doubtful labels.` : '') +
+                (nDoubt ? ` ${nDoubt} possible issue${nDoubt === 1 ? '' : 's'} in your training data: press Check training data.` : '') +
                 (val ? ` Held-out check (data it didn't train on): found ${val.posHit} of ${val.pos} mounds; wrongly flagged ${val.negHit} of ${val.neg} not-mounds.` : ' With fewer than 5 mounds there is no held-out check yet; treat results with extra caution.') +
                 ' Now press Scan with deep learning.');
         } catch (e) {
@@ -3161,15 +3164,25 @@
             dlSetStatus('Training failed: ' + (e.message || e));
         } finally { dlSetBusy(false); }
     }
-    // ---- Doubtful labels ----
-    // The network's opinion of your own training items, to catch mistakes:
-    //  - confirmed mounds (that fit its window) it scores below 30%;
-    //  - "Not real" marks and look-alike outlines it scores 90% or more;
-    //  - mounds whose recorded size doesn't match the terrain: recorded over
-    //    1 km across, or over 3 m tall with almost no rise under the point
-    //    (usually a whole hill or landscape saved by an older mound check).
-    // It has trained on these very labels, so a strong disagreement is
-    // worth a look: the label, or the position, may be wrong.
+    // ==== TRAINING DATA CHECK ====
+    // Looks for mound training items that may be wrong, so one bad record
+    // doesn't quietly mislead the scans and the network:
+    //  - rule checks (always): a size no mound has, no size recorded, steeper
+    //    than any mound could be, too low or too small to be a mound, the
+    //    terrain under the point not rising as much as recorded, a mound
+    //    confirmed twice, a "Not real" mark that contradicts a confirmed
+    //    mound (scans skip anything within 20 m of such a mark);
+    //  - the network's opinion (when a trained model is available): confirmed
+    //    mounds it scores under 30%, "Not real" marks it scores 90%+.
+    // Each issue has "Go to & edit" (the item's editor on the map, with a bar
+    // back to the list) and "It's accurate", which records that you checked
+    // it: that issue isn't raised again for the item unless you later change
+    // its position, size or label. Both can be undone.
+    const TC_SEVERE = new Set(['size-huge', 'no-size', 'steep', 'duplicate', 'conflict']);
+    const TC_TITLE = { 'size-huge': 'Size no mound has', 'no-size': 'No size recorded', steep: 'Impossibly steep', 'too-low': 'Very low', 'too-small': 'Very small',
+                       terrain: "Terrain doesn't match", duplicate: 'Confirmed twice', conflict: 'Contradicts a "Not real" mark',
+                       'dl-pos': 'The network doubts this mound', 'dl-neg': 'Looks like a mound to the network' };
+    let tcDLScores = null;   // dk -> { p, pos } from the last check with the network
     function dlKeyToReviewKey(key) {
         const [t, id] = [key.slice(0, 2), key.slice(3)];
         return t === 'ol' ? { list: 'outlines', id } : { list: t === 'ex' ? 'examples' : 'rejected', mode: 'mounds', ts: Number(id) };
@@ -3181,109 +3194,187 @@
         for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) if (Math.hypot(r - (N - 1) / 2, c - (N - 1) / 2) < 8) peak = Math.max(peak, one[(r * N + c) * CH]);
         return peak;
     }
-    async function dlScoreLabels(tf, model) {
-        const S = dlUsableSamples(), N = DL.INPUT, CH = DL.CH, sz = N * N * CH, c0 = (DL.PATCH - N) / 2;
-        const items = [...S.pos.map(x => ({ ...x, y: 1 })), ...S.neg.map(x => ({ ...x, y: 0 }))];
-        const B = 32;
-        for (let i = 0; i < items.length; i += B) {
-            const grp = items.slice(i, i + B), xs = new Float32Array(grp.length * 8 * sz);
-            grp.forEach((x, j) => { for (let t = 0; t < 8; t++) dlInputFromPatch(x.cm, xs, (j * 8 + t) * sz, c0, c0, t, 1); });
+    // Every mound training item, with what the checks need
+    function tcItems() {
+        const out = [];
+        for (const ex of trainingData.mounds.examples) out.push({ dk: 'ex:' + ex.ts, rk: { list: 'examples', mode: 'mounds', ts: ex.ts }, item: ex, kind: 'Confirmed mound', pos: true,
+            lat: ex.lat, lon: ex.lon, d: ex.diameter, h: ex.maxMetric, name: ex.name, ts: ex.ts });
+        for (const rj of trainingData.mounds.rejected) out.push({ dk: 'rj:' + rj.ts, rk: { list: 'rejected', mode: 'mounds', ts: rj.ts }, item: rj, kind: '"Not real" mark', pos: false,
+            lat: rj.lat, lon: rj.lon, d: rj.features ? rj.features.diameterM : null, h: rj.features ? rj.features.heightM : null, name: rj.name, ts: rj.ts });
+        for (const o of trainingData.outlines) out.push({ dk: 'ol:' + o.id, rk: { list: 'outlines', id: o.id }, item: o, kind: o.label === 'mound' ? 'Mound outline' : 'Look-alike outline',
+            pos: o.label === 'mound', lat: o.centroid[0], lon: o.centroid[1], d: o.outline && o.outline.eqDiameterM, h: o.outline && o.outline.heightM, name: o.name, ts: o.ts });
+        return out;
+    }
+    // What a verification was made against: changing any of it re-checks
+    function tcSig(it) { return [it.lat.toFixed(6), it.lon.toFixed(6), it.pos ? 1 : 0, (+it.d || 0).toFixed(2), (+it.h || 0).toFixed(2)].join('|'); }
+    function tcVerified(it, code) { const v = it.item.verified; return !!v && v.sig === tcSig(it) && (v.codes || []).includes(code); }
+    async function tcFindIssues() {
+        try { await dlLoadPatches(); } catch (e) { /* no samples: skip the terrain check */ }
+        tcRestoreScores();
+        // a newer model makes the old opinions stale
+        if (tcDLScores && dlPrefs().checkScores && dlPrefs().model && dlPrefs().checkScores.modelAt !== dlPrefs().model.at) tcDLScores = null;
+        const items = tcItems(), issues = [], ft = metersToFeetInches;
+        const add = (it, code, text) => { if (!tcVerified(it, code)) issues.push({ it, code, text, severe: TC_SEVERE.has(code) }); };
+        for (const it of items) {
+            if (!it.pos) continue;
+            if (!(it.h > 0) || !(it.d > 0)) { add(it, 'no-size', `No ${!(it.h > 0) ? 'height' : 'width'} recorded, so it can't help the size settings. Outline the mound, or Edit to enter its size.`); continue; }
+            if (it.d > 350 || it.h > 32) add(it, 'size-huge', `Recorded ${ft(it.d)} across and ${ft(it.h)} tall: bigger than any known mound (Monks Mound, the largest in North America, is about 100 ft tall and 950 ft long). Probably a hill or landscape measured by mistake.`);
+            else if (it.h / it.d > 0.5) add(it, 'steep', `Recorded ${ft(it.h)} tall but only ${ft(it.d)} across: steeper than a 45&deg; cone, which no earthen mound is. Probably mis-measured.`);
+            if (it.h < 0.15) add(it, 'too-low', `Only ${ft(it.h)} tall: lower than LiDAR can reliably show, so the scans can't learn much from it.`);
+            if (it.d < 3) add(it, 'too-small', `Only ${ft(it.d)} across: the size of a stump or tree throw.`);
+            const p = dlSampleFor({ key: it.dk });
+            if (p && approxMetersBetween(p.lat, p.lon, it.lat, it.lon) < 2 && it.d <= DL.MAX_POS_D && it.h >= 0.6) {
+                const rise = dlCentreRise(p.cm);
+                if (rise < 0.3 * it.h) add(it, 'terrain', `Recorded ${ft(it.h)} tall, but the terrain under the point rises only ${ft(Math.max(0, rise))}. The point may be off the mound (Edit &rarr; Move), or the height wrong.`);
+            }
+        }
+        // the same mound confirmed twice: the newer one is flagged
+        const exs = items.filter(i => i.dk.startsWith('ex:')).sort((a, b) => a.ts - b.ts);
+        for (let i = 0; i < exs.length; i++) for (let j = 0; j < i; j++) {
+            const dist = approxMetersBetween(exs[i].lat, exs[i].lon, exs[j].lat, exs[j].lon);
+            if (dist < 5) { add(exs[i], 'duplicate', `Another confirmation ${ft(dist)} away (${new Date(exs[j].ts).toLocaleDateString()}) is probably the same mound, counted twice. Remove one.`); break; }
+        }
+        // a confirmed mound next to a "Not real" mark: one of them is wrong
+        const rjs = items.filter(i => i.dk.startsWith('rj:'));
+        for (const it of items.filter(i => i.pos)) {
+            const near = rjs.map(r => ({ r, dist: approxMetersBetween(r.lat, r.lon, it.lat, it.lon) })).filter(x => x.dist < 20).sort((a, b) => a.dist - b.dist)[0];
+            if (near) add(it, 'conflict', `A "Not real" mark ${ft(near.dist)} away (${new Date(near.r.ts).toLocaleDateString()}). Scans skip anything within 65 ft of a "Not real" mark, so this mound would be hidden. If the mark is wrong, Go to it from Show Training Data on Map and remove it.`);
+        }
+        // the network's opinion, from the last check that used it
+        if (tcDLScores) for (const it of items) {
+            const s = tcDLScores.get(it.dk);
+            if (!s || s.pos !== it.pos) continue;
+            if (it.pos && s.p < 0.3 && !(it.d > DL.MAX_POS_D)) add(it, 'dl-pos', `The network scores it only ${Math.round(s.p * 100)}% a mound. Check the point is on the mound and that it really is one.`);
+            if (!it.pos && s.p >= 0.9) add(it, 'dl-neg', `The network scores it ${Math.round(s.p * 100)}% a mound although you marked it not real. If it really is a mound, Edit it to "Real".`);
+        }
+        return issues.sort((a, b) => (b.severe - a.severe) || (b.it.ts - a.it.ts));
+    }
+    // The network's score for every training item that has a sample
+    async function tcScoreWithNetwork(tf, model) {
+        const N = DL.INPUT, CH = DL.CH, sz = N * N * CH, c0 = (DL.PATCH - N) / 2;
+        const list = tcItems().map(it => ({ it, p: dlSampleFor({ key: it.dk }) })).filter(x => x.p && approxMetersBetween(x.p.lat, x.p.lon, x.it.lat, x.it.lon) < 2);
+        const scores = new Map(), B = 32;
+        for (let i = 0; i < list.length; i += B) {
+            const grp = list.slice(i, i + B), xs = new Float32Array(grp.length * 8 * sz);
+            grp.forEach((x, j) => { for (let t = 0; t < 8; t++) dlInputFromPatch(x.p.cm, xs, (j * 8 + t) * sz, c0, c0, t, 1); });
             const p = tf.tidy(() => model.predict(tf.tensor4d(xs, [grp.length * 8, N, N, CH])).dataSync());
-            grp.forEach((x, j) => { let m = 0; for (let t = 0; t < 8; t++) m += p[j * 8 + t]; x.p = m / 8; });
+            grp.forEach((x, j) => { let m = 0; for (let t = 0; t < 8; t++) m += p[j * 8 + t]; scores.set(x.it.dk, { p: m / 8, pos: x.it.pos }); });
             await dlTick();
         }
-        const lowPos = items.filter(x => x.y && x.p < 0.3).sort((a, b) => a.p - b.p);
-        const highNeg = items.filter(x => !x.y && x.p >= 0.9).sort((a, b) => b.p - a.p);
-        const badSize = [...S.pos, ...S.tooBig].map(x => ({ ...x, rise: dlCentreRise(x.cm) }))
-            .filter(x => x.d > 1000 || (x.h > 3 && x.rise < 0.3)).sort((a, b) => (b.d || 0) - (a.d || 0));
-        return { lowPos, highNeg, badSize };
+        tcDLScores = scores;
+        // kept with the model, so the Training panel's count includes them
+        const m = dlPrefs().model;
+        dlPrefs().checkScores = { modelAt: m && m.at, s: Object.fromEntries([...scores].map(([k, v]) => [k, [Math.round(v.p * 1000) / 1000, v.pos ? 1 : 0]])) };
+        saveTrainingData();
     }
-    async function dlCheckLabels() {
-        if (dlBusy) return;
-        dlSetBusy(true);
-        try {
-            dlSetStatus('Checking your labels with the network...');
-            const tf = await loadTF();
-            await dlUseBackend(tf, 'scan');
-            const model = await dlGetModel(tf);
-            if (!model) { dlSetStatus(dlModelOutdated() ? 'Press Train model first (the method was upgraded).' : 'Train the model first.'); return; }
-            window.__dlDoubt = await dlScoreLabels(tf, model);
-            dlRenderDoubts();
-            const d = window.__dlDoubt;
-            dlSetStatus(`${d.lowPos.length + d.highNeg.length + d.badSize.length} doubtful label${d.lowPos.length + d.highNeg.length + d.badSize.length === 1 ? '' : 's'} found.`);
-        } catch (e) { console.error(e); dlSetStatus('Could not check the labels: ' + (e.message || e)); }
-        finally { dlSetBusy(false); }
+    function tcRestoreScores() {
+        if (tcDLScores) return;
+        const cs = dlPrefs().checkScores, m = dlPrefs().model;
+        if (!cs || !m || cs.modelAt !== m.at || dlModelOutdated()) return;
+        tcDLScores = new Map(Object.entries(cs.s).map(([k, [p, pos]]) => [k, { p, pos: !!pos }]));
     }
-    function dlRenderDoubts() {
-        const d = window.__dlDoubt; if (!d) return;
-        let el = document.getElementById('dlDoubtModal');
+    // Opens the check. With a trained model it also asks the network (needs
+    // TensorFlow.js; skipped quietly when it can't load).
+    async function openTrainingCheck() {
+        const status = document.getElementById('status');
+        let note = '';
+        if (dlPrefs().model && !dlModelOutdated() && !dlBusy) {
+            if (status) status.innerText = 'Checking your training data (asking the network too)...';
+            dlSetBusy(true);
+            try { const tf = await loadTF(); await dlUseBackend(tf, 'scan'); const m = await dlGetModel(tf); if (m) await tcScoreWithNetwork(tf, m); }
+            catch (e) { console.warn(e); note = 'The network could not be loaded (offline?), so only the rule checks ran.'; }
+            finally { dlSetBusy(false); }
+        } else if (!dlPrefs().model) note = 'Train the deep-learning model to add its opinion to these checks.';
+        window.__tcNote = note;
+        await renderTrainingCheck();
+        if (status) status.innerText = `Training data check: ${window.__tcIssues.length} possible issue${window.__tcIssues.length === 1 ? '' : 's'}.`;
+    }
+    async function renderTrainingCheck() {
+        const issues = await tcFindIssues();
+        window.__tcIssues = issues;
+        let el = document.getElementById('tcModal');
         if (!el) {
-            el = document.createElement('div'); el.id = 'dlDoubtModal';
+            el = document.createElement('div'); el.id = 'tcModal';
             el.style.cssText = 'position:fixed;inset:0;z-index:4000;background:rgba(15,23,42,0.45);display:flex;align-items:flex-start;justify-content:center;padding:4vh 8px;box-sizing:border-box;';
             el.onclick = (e) => { if (e.target === el) el.remove(); };
             document.body.appendChild(el);
         }
-        // drop rows whose item has since been edited or removed
-        const live = new Set(dlTrainingItems().map(i => i.key + (i.label ? '+' : '-')));
-        const keep = (x) => live.has(x.key + (x.y === 0 ? '-' : '+'));
-        d.lowPos = d.lowPos.filter(keep); d.highNeg = d.highNeg.filter(keep); d.badSize = d.badSize.filter(x => live.has(x.key + '+'));
-        const ft = metersToFeetInches, rows = [];
-        const kindOf = (k) => k.startsWith('ex:') ? 'Confirmed mound' : k.startsWith('rj:') ? '"Not real" mark' : 'Outline';
-        const sec = (title, note, list, detail) => {
-            if (!list.length) return '';
-            return `<div style="padding:8px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0;"><b>${title} (${list.length})</b><br><span style="font-size:0.74rem;color:#64748b;">${note}</span></div>` +
-                list.map(x => { const i = rows.push(x) - 1; return `<div style="padding:7px 12px;border-bottom:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;">
-                    <div style="flex:1;min-width:0;"><b>${kindOf(x.key)}</b>${x.name ? ' &ldquo;' + escapeHtml(x.name) + '&rdquo;' : ''}<br>
-                    <span style="font-size:0.78rem;color:#475569;">${detail(x)}</span><br><span style="font-size:0.72rem;color:#94a3b8;">${x.lat.toFixed(5)}, ${x.lon.toFixed(5)}</span></div>
-                    <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;" onclick="dlDoubtGo(${i}, false)">Go to</button>
-                    <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fef3c7;color:#92400e;" onclick="dlDoubtGo(${i}, true)">&#9998; Edit</button>
-                    <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fee2e2;color:#991b1b;" onclick="removeTrainingItem(dlKeyToReviewKey(window.__dlDoubtRows[${i}].key)); dlRenderDoubts();">Remove</button></div>`; }).join('');
-        };
-        const body = sec('Recorded size looks wrong', 'Probably a whole hill or landscape saved by an older version of the mound check. Remove it, or outline the real mound.', d.badSize,
-                         x => `recorded ${ft(x.d)} across, ${ft(x.h)} tall; the terrain under the point rises only ${ft(Math.max(0, x.rise))}`) +
-            sec('"Not real" marks that look like mounds', 'The network scores these 90%+ as mounds although you marked them not real. If one really is a mound, Edit it to "Real".', d.highNeg,
-                x => `network: ${Math.round(x.p * 100)}% mound`) +
-            sec('Confirmed mounds the network doubts', 'Scored under 30%. Check the position is on the mound (Edit → Move), or that it really is one.', d.lowPos,
-                x => `network: ${Math.round(x.p * 100)}% mound${x.d ? ', recorded ' + ft(x.d) + ' across' : ''}`);
-        window.__dlDoubtRows = rows;
-        el.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:580px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
+        el.style.display = 'flex';
+        const row = (x, i) => `<div style="padding:8px 12px;border-bottom:1px solid #f1f5f9;">
+            <div style="display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;"><span style="background:${x.severe ? '#fee2e2;color:#991b1b' : '#fef3c7;color:#92400e'};border-radius:4px;padding:0 5px;font-size:0.72rem;font-weight:bold;">${TC_TITLE[x.code]}</span>
+              <b>${escapeHtml(x.it.kind)}</b>${x.it.name ? ' &ldquo;' + escapeHtml(x.it.name) + '&rdquo;' : ''} <span style="font-size:0.72rem;color:#94a3b8;">${x.it.lat.toFixed(5)}, ${x.it.lon.toFixed(5)}</span></div>
+            <div style="font-size:0.78rem;color:#475569;margin:3px 0 6px;">${x.text}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dbeafe;color:#1e3a8a;" onclick="tcGo(${i})">&#9998; Go to &amp; edit</button>
+              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dcfce7;color:#166534;" onclick="tcAccurate(${i})">&#10003; It's accurate</button>
+              <button style="width:auto;margin:0 0 0 auto;padding:4px 10px;font-size:0.78rem;background:#fee2e2;color:#991b1b;" onclick="tcRemove(${i})">Remove</button></div></div>`;
+        const severe = issues.filter(x => x.severe).length;
+        el.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:600px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
             <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:8px;z-index:1;">
-              <b style="flex:1;">Doubtful labels (${rows.length})</b>
-              <button onclick="undoLastTraining(); dlRenderDoubts();" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;">&#8630; Undo last</button>
-              <button onclick="document.getElementById('dlDoubtModal').remove()" style="width:auto;margin:0;padding:4px 10px;">Close</button></div>
-            ${body || '<div style="padding:14px;color:#166534;">&#10003; Nothing doubtful: the network agrees with all your labels.</div>'}
-            <div style="padding:8px 12px;font-size:0.72rem;color:#64748b;">After fixing labels, press Train model again.</div></div>`;
+              <b style="flex:1;">Training data check: ${issues.length} possible issue${issues.length === 1 ? '' : 's'}</b>
+              <button onclick="undoLastTraining(); renderTrainingCheck();" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;" ${(trainingData._undo || []).length ? '' : 'disabled'}>&#8630; Undo last</button>
+              <button onclick="document.getElementById('tcModal').remove()" style="width:auto;margin:0;padding:4px 10px;">Close</button></div>
+            <div style="padding:8px 12px;font-size:0.74rem;color:#64748b;background:#f8fafc;border-bottom:1px solid #e2e8f0;">
+              ${severe ? `<b style="color:#991b1b;">${severe} probably wrong</b>, ` : ''}${issues.length - severe} worth a look. <b>Go to &amp; edit</b> takes you to the item with its editor open; <b>It's accurate</b> means you've checked it and it stays as it is (it won't be raised again unless you change it).
+              ${window.__tcNote ? '<br>' + escapeHtml(window.__tcNote) : ''}</div>
+            ${issues.length ? issues.map(row).join('') : '<div style="padding:16px;color:#166534;">&#10003; No issues found in your mound training data.</div>'}</div>`;
+        tcUpdateBadge(issues);
     }
-    // Go to an item; with edit, open it on the training-data map with its editor
-    function dlDoubtGo(i, edit) {
-        const x = (window.__dlDoubtRows || [])[i]; if (!x) return;
-        const m = document.getElementById('dlDoubtModal'); if (m) m.style.display = 'none';
-        const back = () => { const m2 = document.getElementById('dlDoubtModal'); if (m2) { m2.style.display = 'flex'; dlRenderDoubts(); } };
-        if (!edit) {
-            map.setView([x.lat, x.lon], 18);
-            if (document.getElementById('panelContent').style.display !== 'none') togglePanel();
-            dlDoubtBackButton(back);
-            return;
-        }
+    function tcFresh(x) { return tcItems().find(i => i.dk === x.it.dk) || null; }
+    function tcAccurate(i) {
+        const x = (window.__tcIssues || [])[i]; if (!x) return;
+        const it = tcFresh(x); if (!it) return renderTrainingCheck();
+        applyTrainingEdit(it.rk, ({ item }) => {
+            const sig = tcSig(it), v = item.verified && item.verified.sig === sig ? item.verified : { sig, codes: [] };
+            if (!v.codes.includes(x.code)) v.codes.push(x.code);
+            v.at = Date.now();
+            item.verified = v;
+            return it.rk;
+        }, `Marked as checked and accurate (${TC_TITLE[x.code].toLowerCase()}).`);
+        const bar = document.getElementById('tcBar'); if (bar) bar.remove();
+        renderTrainingCheck();
+    }
+    function tcRemove(i) {
+        const x = (window.__tcIssues || [])[i]; if (!x) return;
+        removeTrainingItem(x.it.rk);
+        const bar = document.getElementById('tcBar'); if (bar) bar.remove();
+        renderTrainingCheck();
+    }
+    // To the item on the training-data map with its editor open, and a bar
+    // with the issue, "It's accurate" and the way back to the list
+    function tcGo(i) {
+        const x = (window.__tcIssues || [])[i]; if (!x) return;
+        const m = document.getElementById('tcModal'); if (m) m.style.display = 'none';
         showTrainingOnMap(false);
-        map.setView([x.lat, x.lon], 18, { animate: false });
-        const rk = JSON.stringify(dlKeyToReviewKey(x.key));
+        map.setView([x.it.lat, x.it.lon], 19, { animate: false });
+        const rk = JSON.stringify(x.it.rk);
         const ri = (window.__trainingMapRows || []).findIndex(r => JSON.stringify(r.key) === rk);
         const mk = trainingMapLayer && trainingMapLayer.getLayers().find(l => l._tmIndex === ri);
         if (mk) { mk.openPopup(); setTimeout(() => openTrainingEdit(ri), 0); }
-        dlDoubtBackButton(back);
-    }
-    // a small floating button back to the list
-    function dlDoubtBackButton(back) {
-        let b = document.getElementById('dlDoubtBack');
-        if (!b) {
-            b = document.createElement('button'); b.id = 'dlDoubtBack';
-            b.style.cssText = 'position:absolute;z-index:1000;left:10px;bottom:' + (window.innerWidth < 700 ? '130px' : '50px') + ';width:auto;margin:0;padding:6px 10px;font-size:0.8rem;background:#fff;border:2px solid #92400e;color:#92400e;box-shadow:0 2px 8px rgba(0,0,0,0.3);';
-            b.innerHTML = '&#8592; Back to doubtful labels';
-            L.DomEvent.disableClickPropagation(b);
-            map.getContainer().appendChild(b);
+        let bar = document.getElementById('tcBar');
+        if (!bar) {
+            bar = document.createElement('div'); bar.id = 'tcBar';
+            const phone = window.innerWidth < 700;
+            bar.style.cssText = 'position:absolute;z-index:1001;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,0.35);padding:8px 10px;font:12px sans-serif;color:#1e293b;box-sizing:border-box;border-left:4px solid #f59e0b;'
+                + (phone ? 'left:8px;right:8px;bottom:130px;' : 'left:50%;transform:translateX(-50%);bottom:90px;width:560px;max-width:calc(100% - 20px);');
+            L.DomEvent.disableClickPropagation(bar);
+            map.getContainer().appendChild(bar);
         }
-        b.onclick = () => { b.remove(); back(); };
+        bar.innerHTML = `<div style="margin-bottom:6px;"><b>${TC_TITLE[x.code]}:</b> ${x.text}</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dcfce7;color:#166534;" onclick="tcAccurate(${i})">&#10003; It's accurate</button>
+              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;" onclick="document.getElementById('tcBar').remove(); renderTrainingCheck();">&#8592; Back to the list</button>
+              <span style="font-size:0.72rem;color:#64748b;align-self:center;">Or change it in the editor (Save), then go back.</span></div>`;
+    }
+    // "N possible issues" in the Training panel (rule checks, plus the
+    // network's opinion from the last check that used it)
+    async function tcUpdateBadge(known) {
+        const el = document.getElementById('trainingIssuesNote'); if (!el) return;
+        let issues = known;
+        if (!issues) { try { issues = await tcFindIssues(); } catch (e) { console.warn(e); return; } }
+        const severe = issues.filter(x => x.severe).length;
+        el.style.display = issues.length ? 'block' : 'none';
+        el.innerHTML = `&#9888; <b>${issues.length} possible issue${issues.length === 1 ? '' : 's'}</b> in your training data${severe ? ` (${severe} probably wrong)` : ''}. <a href="#" onclick="event.preventDefault(); openTrainingCheck();" style="font-weight:bold;">Review</a>`;
     }
 
     function dlThreshold() { const e = document.getElementById('dlThreshold'); return e ? parseFloat(e.value) : 0.8; }

@@ -110,6 +110,28 @@ Tap an item for its details and **Edit**, **Zoom in** or **Remove**. **Edit** ch
 
 Every edit is one Undo step. Confirmed mounds on the map, the look-alike avoidance and the learned settings follow each edit straight away.
 
+**Checking training data for issues.** A wrong record, such as a hill saved as a mound, a mound counted twice or a "Not real" mark tapped by mistake, quietly misleads the scans and the network. The Training Data panel shows **⚠ N possible issues… Review** whenever any are found. **Check training data for issues** (also in the Deep Learning section) lists them.
+
+Rule checks always run:
+
+- **Size no mound has:** more than 350 m across or 32 m tall. Monks Mound, the largest, is about 30 m tall and 290 m long.
+- **No size recorded.**
+- **Impossibly steep:** taller than half its width.
+- **Very low** (under 15 cm) or **very small** (under 3 m across).
+- **Terrain doesn't match:** the terrain sample under the point rises less than a third of the recorded height, so the point may be off the mound.
+- **Confirmed twice:** two confirmations within 5 m.
+- **Contradicts a "Not real" mark:** a confirmed mound within 20 m of a "Not real" mark. Scans skip anything that close to such a mark, so the mound would be hidden.
+
+When a deep-learning model is trained, its opinion is added: confirmed mounds it scores under 30%, and "Not real" marks it scores 90% or more. Its scores are saved with the model, so the panel's count includes them.
+
+Each issue has three buttons:
+
+- **Go to & edit** opens the item's editor on the training-data map. A bar shows the issue, with **It's accurate** and **Back to the list**.
+- **It's accurate** records that you checked it. That issue isn't raised again for that item unless you later change its position, size or label. It can be undone like any edit.
+- **Remove** deletes the item.
+
+Training a deep-learning model also reports how many issues it found.
+
 **Scale bar.** A scale bar at the bottom left of the map shows distance in feet, switching to miles when zoomed out. On phones it sits just above the folded settings panel.
 
 **Keeping training data.** Training data is saved in two places in the browser (localStorage and IndexedDB, the newer copy wins on load), and the app asks the browser to keep the site's storage persistent. Both copies belong to the exact address the app is opened from, including the port, and are lost if the site's data is cleared. So the Training Data panel counts confirmations not yet in a backup file, with **Back up now**. Where the browser supports it, **Keep a backup file updated automatically** rewrites a backup file after every confirmation. **Import Training Data** merges with what is already there, so restoring an older backup never loses newer work.
@@ -142,12 +164,6 @@ How it works:
 - **Cross-check with the regular scan.** If the regular mound scan has results on the map, candidates it also found are marked "The regular mound scan found this too" and listed first. Next come candidates with a measurable rise. Candidates smaller across than your smallest mound size setting (often tree throws, boulders or knobs) are flagged and listed last. Run the regular scan first, then the deep-learning scan, to get the cross-check.
 - **After an upgrade.** When the method is upgraded, the panel asks you to train again. Your samples are kept.
 - **Mounds too big for the window.** Mounds recorded wider than 35 m (115 ft) are left out of deep-learning training, and the panel says how many. The network would see only their flat top or a slope and learn that slopes are mounds. The regular scan handles big platform mounds.
-- **Check doubtful labels.** The network scores your own training items and lists the ones it strongly disagrees with, each with **Go to**, **Edit** (opens the item's editor on the training-data map, with a button back to the list) and **Remove**:
-  - records whose size looks wrong: over 1 km across, or over 3 m tall with almost no rise in the terrain under the point;
-  - "Not real" marks it scores 90% or more as a mound;
-  - confirmed mounds it scores under 30%.
-
-  Training reports how many doubtful labels it found. A "Not real" mark switched to real (or back) keeps its terrain sample.
 - **Background across all areas.** Background is kept up to 4,000 samples. Over the cap, samples are trimmed from whichever area has the most, so every area keeps a share. An area whose background was dropped by an older version is sampled again the next time it is loaded.
 - **Save deep-learning model / Load deep-learning model.** Saving writes one file (`lidar-deep-learning-model-DATE.json.gz`). It holds the trained network, all its terrain samples, its accuracy check and a copy of your training data, which says which samples are mounds. Load it to restore everything after clearing the browser, or to use the model on another device. Loading adds to what is already there: samples and training data are merged without duplicates, and the network in the file replaces the one in the browser. If the file's network was made by an older method, its samples are still loaded and you press Train model.
 - **Answering.** **Yes** / **Not real** on a candidate saves to the same training data as the regular scan and takes its terrain sample at once. Train again to update the network.
