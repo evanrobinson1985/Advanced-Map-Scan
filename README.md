@@ -142,6 +142,7 @@ Similarity to anything you confirmed real wins a tie. That matters because a sma
 - **Filters:** All, Real, Not real, Outlines, and *No image yet* (items whose area hasn't been loaded).
 - **Sorting:** newest, oldest, lowest first, or *Network disagrees most first*. That last option needs the training data check to have run with a trained mound model; it lists the real mounds the network doubts and the "not real" marks it thinks are mounds.
 - **Each card:** **Not real** / **Real** switches the label, 🗑 removes the item, and **Go to** shows it on the map. A "not real" item stays in your training data as a "not a mound" example, which also teaches the network.
+- **All of them:** the first 60 pictures show at once and more load as you scroll. *Showing X of Y* at the top counts them, and **Show all** at the bottom loads the rest at once.
 - **Several at once:** click pictures to select them (or **Select all shown**), then **Mark selected not real**, **Mark selected real** or **Remove selected**.
 - **Undo:** every change is an ordinary training edit, so **Undo** reverses it. Train the model again to use the cleaned data.
 

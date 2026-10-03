@@ -5164,19 +5164,19 @@
         const el = document.getElementById('trainingGallery'); if (!el) return;
         const keepScroll = el.firstElementChild ? el.firstElementChild.scrollTop : 0;
         gal.items = galCollect();
-        const P = DL_PROFILES[gal.model], all = gal.items, vis = galVisible(), page = vis.slice(0, gal.shown);
+        const P = DL_PROFILES[gal.model], all = gal.items, vis = galVisible();
+        gal.vis = vis;
         for (const k of [...gal.sel]) if (!all.some(x => x.dlKey === k)) gal.sel.delete(k);
-        const cnt = (f) => all.filter(f).length, sq = Math.round(P.PATCH * P.RES), px = 132;
+        const cnt = (f) => all.filter(f).length, sq = Math.round(P.PATCH * P.RES);
         const btn = 'width:auto;margin:0;padding:4px 9px;font-size:0.76rem;';
         const pill = (v, label, n) => `<button onclick="gal.filter='${v}'; gal.shown=60; renderTrainingGallery();" style="${btn}${gal.filter === v ? 'background:#1e293b;color:#fff;' : ''}">${label} (${n})</button>`;
-        const real = P.NOUN.charAt(0).toUpperCase() + P.NOUN.slice(1);
-        const hasNet = all.some(x => x.net != null);
-        el.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:1100px;width:100%;max-height:92vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
-          <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;z-index:2;">
+        const hasNet = all.some(x => x.net != null), phone = window.innerWidth < 700;
+        el.innerHTML = `<div id="galScroll" style="background:#fff;border-radius:10px;max-width:1100px;width:100%;max-height:92vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
+          <div style="${phone ? '' : 'position:sticky;top:0;'}background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;z-index:2;">
             <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
               <b style="flex:1;min-width:160px;">Training images</b>
               <select onchange="openTrainingGallery(this.value)" style="width:auto;margin:0;padding:4px;">${Object.values(DL_PROFILES).map(p => `<option value="${p.key}" ${p.key === gal.model ? 'selected' : ''}>${p.label}</option>`).join('')}</select>
-              <select onchange="gal.sort=this.value; renderTrainingGallery();" style="width:auto;margin:0;padding:4px;">
+              <select onchange="gal.sort=this.value; gal.shown=60; renderTrainingGallery();" style="width:auto;margin:0;padding:4px;">
                 <option value="new" ${gal.sort === 'new' ? 'selected' : ''}>Newest first</option><option value="old" ${gal.sort === 'old' ? 'selected' : ''}>Oldest first</option>
                 <option value="height" ${gal.sort === 'height' ? 'selected' : ''}>Lowest first</option>
                 ${hasNet ? `<option value="net" ${gal.sort === 'net' ? 'selected' : ''}>Network disagrees most first</option>` : ''}</select>
@@ -5187,62 +5187,85 @@
               ${pill('all', 'All', all.length)}${pill('real', 'Real', cnt(x => x.label === 1))}${pill('not', 'Not real', cnt(x => x.label === 0))}${gal.model === 'mounds' ? pill('outlines', 'Outlines', cnt(x => x.outline)) : ''}${pill('noimg', 'No image yet', cnt(x => !x.cm))}
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
-              <span style="font-size:0.78rem;color:#475569;">${gal.sel.size} selected</span>
+              <span id="galSelCount" style="font-size:0.78rem;color:#475569;"></span>
               <button onclick="galSelectAll(true)" style="${btn}">Select all shown</button>
-              <button onclick="galSelectAll(false)" style="${btn}" ${gal.sel.size ? '' : 'disabled'}>Clear</button>
-              <button onclick="galBulk('not')" style="${btn}background:#fef3c7;color:#92400e;" ${gal.sel.size ? '' : 'disabled'}>&#10007; Mark selected not real</button>
-              <button onclick="galBulk('real')" style="${btn}background:#dcfce7;color:#166534;" ${gal.sel.size ? '' : 'disabled'}>&#10003; Mark selected real</button>
-              <button onclick="galBulk('remove')" style="${btn}background:#fee2e2;color:#991b1b;" ${gal.sel.size ? '' : 'disabled'}>&#128465; Remove selected</button>
+              <button class="galNeedSel" onclick="galSelectAll(false)" style="${btn}">Clear</button>
+              <button class="galNeedSel" onclick="galBulk('not')" style="${btn}background:#fef3c7;color:#92400e;">&#10007; Mark selected not real</button>
+              <button class="galNeedSel" onclick="galBulk('real')" style="${btn}background:#dcfce7;color:#166534;">&#10003; Mark selected real</button>
+              <button class="galNeedSel" onclick="galBulk('remove')" style="${btn}background:#fee2e2;color:#991b1b;">&#128465; Remove selected</button>
             </div>
-            <div style="font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4;">Shaded terrain ${sq} m (${Math.round(sq / FT_TO_M)} ft) square around each item, light from the north-west; the red ring is the spot that was labelled${gal.model === 'mounds' ? ', drawn at the recorded size' : ''}. A real ${P.NOUN} should be a clear rise right in the middle. <b>Remove</b> deletes the item; <b>Not real</b> keeps it as a "not a ${P.NOUN}" example, which also teaches the network. Click a picture to select it.</div>
+            <div style="font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4;">Shaded terrain ${sq} m (${Math.round(sq / FT_TO_M)} ft) square around each item, light from the north-west; the red ring is the spot that was labelled${gal.model === 'mounds' ? ', drawn at the recorded size' : ''}. A real ${P.NOUN} should be a clear rise right in the middle. <b>Remove</b> deletes the item; <b>Not real</b> keeps it as a "not a ${P.NOUN}" example, which also teaches the network. Tap a picture to select it. More pictures load as you scroll.</div>
+            <div id="galShowing" style="font-size:0.78rem;font-weight:600;color:#1e293b;margin-top:6px;"></div>
           </div>
-          <div id="galGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(${px + 16}px,1fr));gap:8px;padding:10px 12px;"></div>
-          ${vis.length > page.length ? `<div style="padding:4px 12px 14px;text-align:center;"><button onclick="gal.shown += 60; renderTrainingGallery();" style="${btn}">Show more (${vis.length - page.length} left)</button></div>` : ''}
+          <div id="galGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:8px;padding:10px 12px;"></div>
+          <div id="galMore" style="padding:4px 12px 16px;text-align:center;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;"></div>
           ${vis.length ? '' : `<div style="padding:18px;color:#64748b;">Nothing here. ${all.length ? 'Try another filter.' : `No ${P.NOUNS} or not-${P.NOUNS} in your training data for this model yet.`}</div>`}
         </div>`;
-        const grid = el.querySelector('#galGrid'), ft = metersToFeetInches;
-        page.forEach(x => {
-            const card = document.createElement('div'), sel = gal.sel.has(x.dlKey);
-            const col = x.label ? '#16a34a' : '#dc2626';
-            card.style.cssText = `border:2px solid ${sel ? '#2563eb' : '#e2e8f0'};border-radius:8px;padding:6px;background:${sel ? '#eff6ff' : '#fff'};display:flex;flex-direction:column;gap:4px;`;
-            const pic = document.createElement('div');
-            pic.style.cssText = `position:relative;width:${px}px;height:${px}px;margin:0 auto;cursor:pointer;`;
-            pic.onclick = () => { if (gal.sel.has(x.dlKey)) gal.sel.delete(x.dlKey); else gal.sel.add(x.dlKey); renderTrainingGallery(); };
-            if (x.cm) {
-                const cv = tourHillshade(x.cm, P.RES, px); cv.style.display = 'block'; pic.appendChild(cv);
-                const dPx = gal.model === 'mounds' && x.d ? Math.max(10, Math.min(px - 4, x.d / sq * px)) : 16;
-                const ring = document.createElement('div');
-                ring.style.cssText = `position:absolute;left:${(px - dPx) / 2}px;top:${(px - dPx) / 2}px;width:${dPx}px;height:${dPx}px;border:1.5px solid rgba(239,68,68,0.85);border-radius:50%;box-sizing:border-box;pointer-events:none;`;
-                pic.appendChild(ring);
-            } else {
-                pic.style.cssText += 'background:#f1f5f9;border:1px dashed #94a3b8;border-radius:6px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:0.72rem;color:#64748b;padding:6px;box-sizing:border-box;';
-                pic.innerText = 'No terrain sample yet: load a DTM that covers it';
-            }
-            const tick = document.createElement('div');
-            tick.style.cssText = `position:absolute;left:4px;top:4px;width:16px;height:16px;border-radius:4px;border:2px solid #fff;background:${sel ? '#2563eb' : 'rgba(15,23,42,0.35)'};color:#fff;font:bold 11px/14px sans-serif;text-align:center;`;
-            tick.innerHTML = sel ? '&#10003;' : '';
-            pic.appendChild(tick);
-            card.appendChild(pic);
-            const info = document.createElement('div');
-            info.style.cssText = 'font-size:0.72rem;line-height:1.35;';
-            info.innerHTML = `<b style="color:${col};">${x.label ? '&#10003; ' + (x.outline ? 'Mound outline' : real) : '&#10007; ' + (x.outline ? 'Look-alike outline' : 'Not real')}</b>${x.verified ? ' <span title="You checked this item">&#128270;</span>' : ''}<br>
-                <span style="color:#475569;">${x.name ? escapeHtml(x.name) + '<br>' : ''}${x.h != null ? ft(x.h) + ' tall' : ''}${x.h != null && x.d ? ', ' : ''}${x.d ? ft(x.d) + ' across' : ''}${x.ts > 1e9 ? `${x.h != null || x.d ? '<br>' : ''}${new Date(x.ts).toLocaleDateString()}` : ''}</span>
-                ${x.net != null ? `<br><span style="color:${(x.label ? x.net < 0.3 : x.net > 0.7) ? '#b45309' : '#64748b'};">Network: ${Math.round(x.net * 100)}% ${P.NOUN}</span>` : ''}
-                ${x.tooBig ? '<br><span style="color:#64748b;">Too big for the network\'s window (not used)</span>' : ''}`;
-            card.appendChild(info);
-            const row = document.createElement('div');
-            row.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;';
-            const mk = (txt, style, fn, title) => { const b = document.createElement('button'); b.innerHTML = txt; b.title = title || ''; b.style.cssText = 'width:auto;flex:1;margin:0;padding:3px 4px;font-size:0.7rem;' + style; b.onclick = (e) => { e.stopPropagation(); fn(); }; row.appendChild(b); };
-            mk(x.label ? '&#10007; Not real' : '&#10003; Real', x.label ? 'background:#fef3c7;color:#92400e;' : 'background:#dcfce7;color:#166534;', () => { galFlip(x); renderTrainingGallery(); }, x.label ? `Keep it as a "not a ${P.NOUN}" example` : `Count it as a real ${P.NOUN}`);
-            mk('&#128465;', 'background:#fee2e2;color:#991b1b;flex:0 0 30px;', () => { removeTrainingItem(x.key); renderTrainingGallery(); }, 'Remove from the training data');
-            mk('Go to', 'flex:0 0 46px;', () => { closeTrainingGallery(); map.setView([x.lat, x.lon], gal.model === 'mounds' ? 19 : 18); }, 'Show it on the map');
-            card.appendChild(row);
-            grid.appendChild(card);
-        });
-        if (el.firstElementChild) el.firstElementChild.scrollTop = keepScroll;
+        gal.drawn = 0;
+        galAppend(Math.max(60, gal.shown));
+        galUpdateSel();
+        const sc = el.firstElementChild;
+        sc.scrollTop = keepScroll;
+        // more pictures as you near the bottom
+        sc.onscroll = () => { if (gal.drawn < gal.vis.length && sc.scrollTop + sc.clientHeight > sc.scrollHeight - 600) galAppend(60); };
+    }
+    // Adds the next n cards (of the current filter and order) to the grid
+    function galAppend(n) {
+        const grid = document.getElementById('galGrid'); if (!grid) return;
+        const P = DL_PROFILES[gal.model], to = Math.min(gal.vis.length, gal.drawn + n);
+        for (let i = gal.drawn; i < to; i++) grid.appendChild(galCard(gal.vis[i], P));
+        gal.drawn = to; gal.shown = Math.max(60, to);
+        const left = gal.vis.length - gal.drawn, btn = 'width:auto;margin:0;padding:6px 12px;font-size:0.8rem;';
+        const sh = document.getElementById('galShowing');
+        if (sh) sh.innerText = gal.vis.length ? `Showing ${gal.drawn} of ${gal.vis.length}${left ? ' (scroll down for more)' : ''}` : '';
+        const more = document.getElementById('galMore');
+        if (more) more.innerHTML = left ? `<button onclick="galAppend(60)" style="${btn}">Show ${Math.min(60, left)} more</button><button onclick="galAppend(${left})" style="${btn}">Show all ${left} left</button>` : (gal.vis.length > 60 ? `<span style="font-size:0.75rem;color:#64748b;">All ${gal.vis.length} shown.</span>` : '');
+    }
+    function galUpdateSel() {
+        const c = document.getElementById('galSelCount'); if (c) c.innerText = `${gal.sel.size} selected`;
+        for (const b of document.querySelectorAll('#trainingGallery .galNeedSel')) b.disabled = !gal.sel.size;
+    }
+    function galCard(x, P) {
+        const px = 132, sq = Math.round(P.PATCH * P.RES), ft = metersToFeetInches, real = P.NOUN.charAt(0).toUpperCase() + P.NOUN.slice(1);
+        const card = document.createElement('div');
+        const col = x.label ? '#16a34a' : '#dc2626';
+        const paint = () => { const sel = gal.sel.has(x.dlKey); card.style.cssText = `border:2px solid ${sel ? '#2563eb' : '#e2e8f0'};border-radius:8px;padding:6px;background:${sel ? '#eff6ff' : '#fff'};display:flex;flex-direction:column;gap:4px;`; tick.style.background = sel ? '#2563eb' : 'rgba(15,23,42,0.35)'; tick.innerHTML = sel ? '&#10003;' : ''; };
+        const pic = document.createElement('div');
+        pic.style.cssText = `position:relative;width:${px}px;height:${px}px;margin:0 auto;cursor:pointer;`;
+        pic.onclick = () => { if (gal.sel.has(x.dlKey)) gal.sel.delete(x.dlKey); else gal.sel.add(x.dlKey); paint(); galUpdateSel(); };
+        if (x.cm) {
+            const cv = tourHillshade(x.cm, P.RES, px); cv.style.display = 'block'; pic.appendChild(cv);
+            const dPx = gal.model === 'mounds' && x.d ? Math.max(10, Math.min(px - 4, x.d / sq * px)) : 16;
+            const ring = document.createElement('div');
+            ring.style.cssText = `position:absolute;left:${(px - dPx) / 2}px;top:${(px - dPx) / 2}px;width:${dPx}px;height:${dPx}px;border:1.5px solid rgba(239,68,68,0.85);border-radius:50%;box-sizing:border-box;pointer-events:none;`;
+            pic.appendChild(ring);
+        } else {
+            pic.style.cssText += 'background:#f1f5f9;border:1px dashed #94a3b8;border-radius:6px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:0.72rem;color:#64748b;padding:6px;box-sizing:border-box;';
+            pic.innerText = 'No terrain sample yet: load a DTM that covers it';
+        }
+        const tick = document.createElement('div');
+        tick.style.cssText = 'position:absolute;left:4px;top:4px;width:16px;height:16px;border-radius:4px;border:2px solid #fff;color:#fff;font:bold 11px/14px sans-serif;text-align:center;';
+        pic.appendChild(tick);
+        card.appendChild(pic);
+        const info = document.createElement('div');
+        info.style.cssText = 'font-size:0.72rem;line-height:1.35;';
+        info.innerHTML = `<b style="color:${col};">${x.label ? '&#10003; ' + (x.outline ? 'Mound outline' : real) : '&#10007; ' + (x.outline ? 'Look-alike outline' : 'Not real')}</b>${x.verified ? ' <span title="You checked this item">&#128270;</span>' : ''}<br>
+            <span style="color:#475569;">${x.name ? escapeHtml(x.name) + '<br>' : ''}${x.h != null ? ft(x.h) + ' tall' : ''}${x.h != null && x.d ? ', ' : ''}${x.d ? ft(x.d) + ' across' : ''}${x.ts > 1e9 ? `${x.h != null || x.d ? '<br>' : ''}${new Date(x.ts).toLocaleDateString()}` : ''}</span>
+            ${x.net != null ? `<br><span style="color:${(x.label ? x.net < 0.3 : x.net > 0.7) ? '#b45309' : '#64748b'};">Network: ${Math.round(x.net * 100)}% ${P.NOUN}</span>` : ''}
+            ${x.tooBig ? '<br><span style="color:#64748b;">Too big for the network\'s window (not used)</span>' : ''}`;
+        card.appendChild(info);
+        const row = document.createElement('div');
+        row.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;';
+        const mk = (txt, style, fn, title) => { const b = document.createElement('button'); b.innerHTML = txt; b.title = title || ''; b.style.cssText = 'width:auto;flex:1;margin:0;padding:3px 4px;font-size:0.7rem;' + style; b.onclick = (e) => { e.stopPropagation(); fn(); }; row.appendChild(b); };
+        mk(x.label ? '&#10007; Not real' : '&#10003; Real', x.label ? 'background:#fef3c7;color:#92400e;' : 'background:#dcfce7;color:#166534;', () => { galFlip(x); renderTrainingGallery(); }, x.label ? `Keep it as a "not a ${P.NOUN}" example` : `Count it as a real ${P.NOUN}`);
+        mk('&#128465;', 'background:#fee2e2;color:#991b1b;flex:0 0 30px;', () => { removeTrainingItem(x.key); renderTrainingGallery(); }, 'Remove from the training data');
+        mk('Go to', 'flex:0 0 46px;', () => { closeTrainingGallery(); map.setView([x.lat, x.lon], gal.model === 'mounds' ? 19 : 18); }, 'Show it on the map');
+        card.appendChild(row);
+        paint();
+        return card;
     }
     function galSelectAll(on) {
-        if (on) for (const x of galVisible().slice(0, gal.shown)) gal.sel.add(x.dlKey); else gal.sel.clear();
+        if (on) for (const x of (gal.vis || []).slice(0, gal.drawn)) gal.sel.add(x.dlKey); else gal.sel.clear();
         renderTrainingGallery();
     }
     // Real <-> not real, as one ordinary training edit
