@@ -198,7 +198,7 @@ How it works:
 
 Every DTM you load collects samples for both models once you have used them. Save files are named per model, and loading one selects its model.
 
-**Training-site tour.** **🗺 Training-site tour (public mound sites)** in the Deep Learning section collects training candidates from known mound sites without you driving the map. The list starts with the 34 public parks and monuments in `docs/mound-training-sites.csv`. Each site is marked *Mounds*, *Effigies* or *Mounds + effigies*.
+**Training-site tour.** **🗺 Training-site tour (public mound sites)** in the Deep Learning section collects training candidates from known mound sites without you driving the map. The list starts with the 34 public parks and monuments in `docs/mound-training-sites.csv`. A second batch of 104 public sites (`docs/mound-training-sites-2.csv`) is added automatically the next time you open the list; sites you already finished or removed are skipped. Their locations are approximate. When a site is toured, or you press **Go to**, the app looks up its name on the map and uses that spot if it is within 8 km of the estimate. The list marks each site as *approximate* or *from map lookup*; check an approximate one with Go to before relying on it. Each site is marked *Mounds*, *Effigies* or *Mounds + effigies*.
 
 - **Run tour.** For each waiting site, the app:
   1. zooms in on the site and downloads only a square around it at 1 m: 500 m (1,650 ft) by default, or 300 m or 1 km, chosen with *Area scanned at each site* (addresses are looked up first);

@@ -4390,6 +4390,114 @@
         ['Oakville Indian Mounds Park (AL)', 'mounds', null, null, '1219 County Road 187, Danville, AL'],
         ['Florence Indian Mound (AL)', 'mounds', null, null, '110 W College St, Florence, AL']
     ];
+    // Second batch: approximate locations, refined at tour time by looking
+    // up the site's name on the map (kept only if it lands nearby)
+    const TOUR_DEFAULT_SITES_2 = [
+        ['Panther Intaglio, Fort Atkinson (WI)', 'effigy', 42.9177, -88.8545, 'Panther Intaglio, Fort Atkinson, Wisconsin'],
+        ['Observatory Hill Mounds, UW-Madison (WI)', 'effigy', 43.0760, -89.4085, 'Observatory Hill, Madison, Wisconsin'],
+        ['Picnic Point Mounds, UW-Madison (WI)', 'mounds', 43.0890, -89.4170, 'Picnic Point, Madison, Wisconsin'],
+        ['Eagle Heights Mounds, UW-Madison (WI)', 'both', 43.0880, -89.4300, 'Eagle Heights Woods, Madison, Wisconsin'],
+        ['UW Arboretum Mounds, Madison (WI)', 'both', 43.0450, -89.4300, 'University of Wisconsin Arboretum, Madison'],
+        ['Vilas Park Effigy Mounds, Madison (WI)', 'effigy', 43.0590, -89.4130, 'Vilas Park, Madison, Wisconsin'],
+        ['Forest Hill Cemetery Mounds, Madison (WI)', 'effigy', 43.0630, -89.4290, 'Forest Hill Cemetery, Madison, Wisconsin'],
+        ['Edgewood College Mound Group, Madison (WI)', 'both', 43.0580, -89.4200, 'Edgewood College, Madison, Wisconsin'],
+        ['Elmside Circle Park Mounds, Madison (WI)', 'effigy', 43.0900, -89.3460, 'Elmside Circle Park, Madison, Wisconsin'],
+        ['Hudson Park Lynx Effigy, Madison (WI)', 'effigy', 43.0893, -89.3500, 'Hudson Park, Madison, Wisconsin'],
+        ['Pheasant Branch Conservancy Mounds, Middleton (WI)', 'both', 43.1180, -89.4950, 'Pheasant Branch Conservancy, Middleton, Wisconsin'],
+        ['Lake Kegonsa State Park Mounds (WI)', 'both', 42.9750, -89.2350, 'Lake Kegonsa State Park, Wisconsin'],
+        ['Cutler Park Mounds, Waukesha (WI)', 'mounds', 43.0130, -88.2330, 'Cutler Park, Waukesha, Wisconsin'],
+        ['Nelson Dewey State Park Mounds (WI)', 'both', 42.7370, -91.0230, 'Nelson Dewey State Park, Wisconsin'],
+        ['Perrot State Park Mounds (WI)', 'both', 44.0150, -91.4750, 'Perrot State Park, Wisconsin'],
+        ['Trempealeau Platform Mounds, Little Bluff (WI)', 'mounds', 44.0050, -91.4400, 'Little Bluff, Trempealeau, Wisconsin'],
+        ['Muscoda Mounds (WI)', 'effigy', 43.1950, -90.4400, 'Muscoda Mounds, Wisconsin'],
+        ['Calumet County Park Effigy Mounds (WI)', 'effigy', 44.1000, -88.3000, 'Calumet County Park, Wisconsin'],
+        ['Marching Bear Group, Effigy Mounds NM (IA)', 'effigy', 43.0540, -91.1820, 'Marching Bear Group, Iowa'],
+        ['Great Bear Mound Group, Effigy Mounds NM (IA)', 'effigy', 43.1010, -91.1790, 'Great Bear Mound Group, Iowa'],
+        ['Sny Magill Unit, Effigy Mounds NM (IA)', 'both', 42.9380, -91.1640, 'Sny Magill Mound Group, Iowa'],
+        ['Pikes Peak State Park Mounds (IA)', 'effigy', 42.9970, -91.1640, 'Pikes Peak State Park, Iowa'],
+        ['Toolesboro Indian Mounds (IA)', 'mounds', 41.1490, -91.0460, 'Toolesboro Mounds, Iowa'],
+        ['Fish Farm Mounds State Preserve (IA)', 'mounds', 43.4780, -91.2900, 'Fish Farm Mounds, Iowa'],
+        ['Turkey River Mounds State Preserve (IA)', 'both', 42.7120, -91.0400, 'Turkey River Mounds, Iowa'],
+        ['Malchow Mounds State Preserve (IA)', 'mounds', 41.0350, -91.0700, 'Malchow Mounds, Iowa'],
+        ['Slinde Mounds State Preserve (IA)', 'mounds', 43.4400, -91.3500, 'Slinde Mounds, Iowa'],
+        ['Mines of Spain Mounds, Dubuque (IA)', 'mounds', 42.4600, -90.6400, 'Mines of Spain State Recreation Area, Iowa'],
+        ['Grand Mound, Laurel (MN)', 'mounds', 48.5150, -93.7150, 'Grand Mound, Minnesota'],
+        ['Cahokia Twin Mounds (IL)', 'mounds', 38.6575, -90.0618, 'Twin Mounds, Cahokia Mounds, Illinois'],
+        ['Cahokia Woodhenge area (IL)', 'mounds', 38.6590, -90.0750, 'Woodhenge, Cahokia Mounds, Illinois'],
+        ['Cahokia Rattlesnake Mound (IL)', 'mounds', 38.6470, -90.0640, 'Rattlesnake Mound, Cahokia, Illinois'],
+        ['Dickson Mounds (IL)', 'mounds', 40.3520, -90.0920, 'Dickson Mounds Museum, Illinois'],
+        ['Albany Mounds State Historic Site (IL)', 'mounds', 41.7820, -90.2190, 'Albany Mounds, Illinois'],
+        ['Beattie Park Mounds, Rockford (IL)', 'both', 42.2740, -89.0930, 'Beattie Park, Rockford, Illinois'],
+        ['Briscoe Mounds, Channahon (IL)', 'mounds', 41.4230, -88.2370, 'Briscoe Mounds, Channahon, Illinois'],
+        ['Indian Mounds Park, Quincy (IL)', 'mounds', 39.9160, -91.3880, 'Indian Mounds Park, Quincy, Illinois'],
+        ['Sinnissippi Mounds, Sterling (IL)', 'both', 41.7830, -89.6750, 'Sinnissippi Mounds, Sterling, Illinois'],
+        ['Hopewell Mound Group (OH)', 'mounds', 39.3600, -83.0870, 'Hopewell Mound Group, Ohio'],
+        ['Seip Earthworks (OH)', 'mounds', 39.2390, -83.2200, 'Seip Earthworks, Ohio'],
+        ['Hopeton Earthworks (OH)', 'both', 39.3830, -82.9950, 'Hopeton Earthworks, Ohio'],
+        ['High Bank Works (OH)', 'both', 39.3090, -82.9360, 'High Bank Works, Ohio'],
+        ['Newark Great Circle Earthworks (OH)', 'both', 40.0410, -82.4450, 'Great Circle Earthworks, Newark, Ohio'],
+        ['Newark Octagon Earthworks (OH)', 'both', 40.0550, -82.4440, 'Octagon Earthworks, Newark, Ohio'],
+        ['Fort Ancient Earthworks (OH)', 'both', 39.4020, -84.0900, 'Fort Ancient, Ohio'],
+        ['Fort Hill Earthworks (OH)', 'both', 39.1200, -83.3980, 'Fort Hill Earthworks, Ohio'],
+        ['Alligator Mound, Granville (OH)', 'effigy', 40.0690, -82.5030, 'Alligator Mound, Granville, Ohio'],
+        ['Tarlton Cross Mound (OH)', 'effigy', 39.5560, -82.7730, 'Tarlton Cross Mound, Ohio'],
+        ['Junction Group Earthworks, Chillicothe (OH)', 'both', 39.3060, -83.0200, 'Junction Group, Chillicothe, Ohio'],
+        ['Story Mound, Chillicothe (OH)', 'mounds', 39.3290, -82.9870, 'Story Mound, Chillicothe, Ohio'],
+        ['Mound Cemetery (Conus), Marietta (OH)', 'mounds', 39.4170, -81.4530, 'Mound Cemetery, Marietta, Ohio'],
+        ['Marietta Earthworks, Quadranaou (OH)', 'mounds', 39.4220, -81.4580, 'Quadranaou, Marietta, Ohio'],
+        ['Enon Mound (OH)', 'mounds', 39.8790, -83.9370, 'Enon Mound, Ohio'],
+        ['Shrum Mound, Columbus (OH)', 'mounds', 39.9985, -83.0700, 'Shrum Mound, Columbus, Ohio'],
+        ['Campbell Mound, Columbus (OH)', 'mounds', 40.0170, -83.0950, 'Campbell Mound, Columbus, Ohio'],
+        ['Highbanks Metro Park Mounds (OH)', 'mounds', 40.1500, -83.0300, 'Highbanks Metro Park, Ohio'],
+        ['Indian Mound Reserve (Williamson Mound), Cedarville (OH)', 'mounds', 39.7320, -83.8360, 'Indian Mound Reserve, Cedarville, Ohio'],
+        ['Orators Mound, Glen Helen (OH)', 'mounds', 39.8070, -83.8850, 'Orators Mound, Yellow Springs, Ohio'],
+        ['Miami Fort, Shawnee Lookout (OH)', 'both', 39.1050, -84.8180, 'Shawnee Lookout Park, Ohio'],
+        ['Piketon Mounds (OH)', 'mounds', 39.0590, -83.0100, 'Piketon Mounds, Ohio'],
+        ['Mounds State Park, Great Mound (IN)', 'both', 40.0970, -85.6190, 'Mounds State Park, Anderson, Indiana'],
+        ['New Castle Earthworks (IN)', 'mounds', 39.9400, -85.3900, 'New Castle Earthworks, Indiana'],
+        ['Sonotabac Mound, Vincennes (IN)', 'mounds', 38.6640, -87.5090, 'Sonotabac Mound, Vincennes, Indiana'],
+        ['Wickliffe Mounds (KY)', 'mounds', 36.9700, -89.0890, 'Wickliffe Mounds, Kentucky'],
+        ['Central Park Mounds, Ashland (KY)', 'mounds', 38.4730, -82.6380, 'Central Park, Ashland, Kentucky'],
+        ['Chucalissa (C.H. Nash Museum), Memphis (TN)', 'mounds', 35.0630, -90.1310, 'Chucalissa, Memphis, Tennessee'],
+        ['Old Stone Fort (TN)', 'both', 35.4860, -86.1020, 'Old Stone Fort State Archaeological Park, Tennessee'],
+        ['Mound Bottom (TN)', 'mounds', 36.1240, -87.1540, 'Mound Bottom, Tennessee'],
+        ['Castalian Springs Mound (TN)', 'mounds', 36.3970, -86.3200, 'Castalian Springs Mound, Tennessee'],
+        ['Chickasaw Heritage Park, Memphis (TN)', 'mounds', 35.1040, -90.0790, 'Chickasaw Heritage Park, Memphis, Tennessee'],
+        ['Pinson Mounds - Ozier & Twin Mounds (TN)', 'mounds', 35.4900, -88.6730, 'Pinson Mounds, Tennessee'],
+        ['Rock Eagle Effigy Mound (GA)', 'effigy', 33.4270, -83.3870, 'Rock Eagle Effigy Mound, Georgia'],
+        ['Rock Hawk Effigy (GA)', 'effigy', 33.4280, -83.2370, 'Rock Hawk Effigy, Georgia'],
+        ['Nacoochee Mound (GA)', 'mounds', 34.6830, -83.7120, 'Nacoochee Mound, Georgia'],
+        ['Lamar Mounds, Ocmulgee (GA)', 'mounds', 32.7930, -83.6000, 'Lamar Mounds, Macon, Georgia'],
+        ['Grand Village of the Natchez (MS)', 'mounds', 31.5360, -91.3870, 'Grand Village of the Natchez, Mississippi'],
+        ['Pocahontas Mound (MS)', 'mounds', 32.4870, -90.3220, 'Pocahontas Mound, Mississippi'],
+        ['Bynum Mounds, Natchez Trace (MS)', 'mounds', 33.9840, -88.9950, 'Bynum Mounds, Mississippi'],
+        ['Pharr Mounds, Natchez Trace (MS)', 'mounds', 34.4760, -88.5350, 'Pharr Mounds, Mississippi'],
+        ['Owl Creek Mounds (MS)', 'mounds', 34.0260, -88.9300, 'Owl Creek Mounds, Mississippi'],
+        ['Boyd Mounds, Natchez Trace (MS)', 'mounds', 32.6680, -89.9280, 'Boyd Mounds, Mississippi'],
+        ['Mangum Mound, Natchez Trace (MS)', 'mounds', 31.9740, -90.9270, 'Mangum Mound, Mississippi'],
+        ['Batesville Mounds (MS)', 'mounds', 34.3000, -89.9650, 'Batesville Mounds, Mississippi'],
+        ['Marksville Prehistoric Indian Site (LA)', 'mounds', 31.1170, -92.0600, 'Marksville State Historic Site, Louisiana'],
+        ['LSU Campus Mounds (LA)', 'mounds', 30.4140, -91.1800, 'LSU Campus Mounds, Baton Rouge, Louisiana'],
+        ['Parkin Archeological State Park (AR)', 'mounds', 35.2770, -90.5550, 'Parkin Archeological State Park, Arkansas'],
+        ['Spiro Mounds (OK)', 'mounds', 35.3110, -94.5700, 'Spiro Mounds, Oklahoma'],
+        ['Caddo Mounds State Historic Site (TX)', 'mounds', 31.5940, -95.1490, 'Caddo Mounds State Historic Site, Texas'],
+        ['Towosahgy State Historic Site (MO)', 'mounds', 36.6930, -89.2600, 'Towosahgy State Historic Site, Missouri'],
+        ['Sugarloaf Mound, St. Louis (MO)', 'mounds', 38.5630, -90.2330, 'Sugarloaf Mound, St. Louis, Missouri'],
+        ['Crystal River Archaeological State Park (FL)', 'mounds', 28.9080, -82.6380, 'Crystal River Archaeological State Park, Florida'],
+        ['Lake Jackson Mounds (FL)', 'mounds', 30.5000, -84.3100, 'Lake Jackson Mounds Archaeological State Park, Florida'],
+        ['Letchworth-Love Mounds (FL)', 'mounds', 30.5180, -83.9940, 'Letchworth-Love Mounds, Florida'],
+        ['Fort Walton Mound (FL)', 'mounds', 30.4060, -86.6100, 'Fort Walton Mound, Fort Walton Beach, Florida'],
+        ['Safety Harbor Mound, Philippe Park (FL)', 'mounds', 28.0030, -82.6730, 'Philippe Park, Safety Harbor, Florida'],
+        ['Madira Bickel Mound (FL)', 'mounds', 27.5880, -82.6220, 'Madira Bickel Mound, Florida'],
+        ['Portavant Mound, Emerson Point (FL)', 'mounds', 27.5310, -82.6260, 'Emerson Point Preserve, Palmetto, Florida'],
+        ['Turtle Mound, Canaveral NS (FL)', 'mounds', 28.9300, -80.8270, 'Turtle Mound, Florida'],
+        ['Mound Key (FL)', 'mounds', 26.4220, -81.8640, 'Mound Key, Florida'],
+        ['Ortona Indian Mound Park (FL)', 'mounds', 26.7870, -81.3090, 'Ortona Indian Mound Park, Florida'],
+        ['Shell Mound, Cedar Keys (FL)', 'mounds', 29.2040, -83.0640, 'Shell Mound, Cedar Key, Florida'],
+        ['Santee Indian Mound, Fort Watson (SC)', 'mounds', 33.5370, -80.4380, 'Santee Indian Mound, South Carolina'],
+        ['Nikwasi Mound, Franklin (NC)', 'mounds', 35.1850, -83.3780, 'Nikwasi Mound, Franklin, North Carolina'],
+        ['Criel Mound, South Charleston (WV)', 'mounds', 38.3670, -81.7040, 'Criel Mound, South Charleston, West Virginia']
+    ];
     // each site's download: a square this size centred on the site
     const TOUR_SIZES = [[300, 'Small: 300 m (1,000 ft) square'], [500, 'Medium: 500 m (1,650 ft) square'], [1000, 'Large: 1 km (0.6 mile) square']];
     function tourHalf() { return (tourData().sizeM || 500) / 2; }
@@ -4405,7 +4513,26 @@
             }
             saveTrainingData();
         }
+        if ((t.seedVersion || 1) < 2) {
+            t.seedVersion = 2;
+            const known = new Set([...t.sites, ...t.done].map(s => s.name));
+            for (const [name, kind, lat, lon, query] of TOUR_DEFAULT_SITES_2) {
+                if (known.has(name)) continue;
+                t.sites.push({ id: 'ts' + Math.random().toString(36).slice(2, 10), name, kind, lat, lon, address: '', query, approx: true, status: 'waiting', added: Date.now() });
+            }
+            saveTrainingData();
+        }
         return t;
+    }
+    // A site with an approximate location: look its name up on the map and
+    // use that spot when it is within 8 km of the estimate
+    async function tourRefineLocation(s) {
+        if (!s.approx || !s.query) return;
+        let r = [];
+        try { r = await geocodeAddress(s.query); } catch (e) { console.warn(e); }
+        const near = r.map(x => ({ x, d: approxMetersBetween(s.lat, s.lon, x.lat, x.lon) })).filter(o => o.d < 8000).sort((a, b) => a.d - b.d)[0];
+        if (near) { s.lat = near.x.lat; s.lon = near.x.lon; s.approx = false; s.locatedBy = 'map lookup'; }
+        else s.approxChecked = true;   // not found: the estimate is used
     }
     async function tourLoadQueue() {
         if (tourQueue) return tourQueue;
@@ -4498,7 +4625,7 @@
             ${t.sites.map(s => { const st = tourSiteStatus(s); return `<div style="padding:7px 12px;border-bottom:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;">
                 <div style="flex:1;min-width:0;"><b>${escapeHtml(s.name)}</b> <span style="font-size:0.72rem;color:#64748b;">${kindTxt[s.kind] || ''}</span><br>
                 <span style="font-size:0.76rem;color:${st.col};">${escapeHtml(st.text)}</span><br>
-                <span style="font-size:0.72rem;color:#94a3b8;">${s.lat != null ? s.lat.toFixed(4) + ', ' + s.lon.toFixed(4) : escapeHtml(s.address)}</span></div>
+                <span style="font-size:0.72rem;color:#94a3b8;">${s.lat != null ? s.lat.toFixed(4) + ', ' + s.lon.toFixed(4) : escapeHtml(s.address)}${s.approx ? (s.approxChecked ? ' (approximate: the name lookup found nothing nearby; check with Go to)' : ' (approximate; refined when toured)') : s.locatedBy ? ' (from map lookup)' : ''}</span></div>
                 <button style="${btn}" onclick="tourGoTo('${s.id}')" ${s.lat != null ? '' : 'disabled'}>Go to</button>
                 <button style="${btn}background:#fee2e2;color:#991b1b;" onclick="tourRemoveSite('${s.id}')">Remove</button></div>`; }).join('') || '<div style="padding:14px;color:#64748b;">No sites left. Add more above.</div>'}
           </div>`;
@@ -4531,8 +4658,9 @@
         saveTrainingData();
         renderTourManager();
     }
-    function tourGoTo(id) {
+    async function tourGoTo(id) {
         const s = tourData().sites.find(x => x.id === id); if (!s || s.lat == null) return;
+        if (s.approx && !s.approxChecked) { await tourRefineLocation(s); saveTrainingData(); }
         const m = document.getElementById('tourModal'); if (m) m.remove();
         const half = tourHalf(), dLat = half / 111320, dLon = half / (111320 * Math.cos(s.lat * Math.PI / 180));
         map.fitBounds([[s.lat - dLat, s.lon - dLon], [s.lat + dLat, s.lon + dLon]]);
@@ -4576,6 +4704,7 @@
                         if (!r.length) throw new Error('address not found');
                         s.lat = r[0].lat; s.lon = r[0].lon;
                     }
+                    if (s.approx && !s.approxChecked) { tourBar(head + ': finding the exact spot...', true); await tourRefineLocation(s); }
                     const half = tourHalf(), dLat = half / 111320, dLon = half / (111320 * Math.cos(s.lat * Math.PI / 180));
                     map.fitBounds([[s.lat - dLat, s.lon - dLon], [s.lat + dLat, s.lon + dLon]], { animate: false, padding: [0, 0] });
                     tourBar(head + ': downloading the terrain...', true);
