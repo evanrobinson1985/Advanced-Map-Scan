@@ -3470,7 +3470,9 @@
         const zd = new Float32Array(W * H);
         for (let i = 0; i < W * H; i++) zd[i] = z[i] < nd ? z[i] : z[i] - trend[i];
         const resid = topHat(zd, W, H, r, nd);
-        const slopeDeg = computeSlopeDegrees(z, W, H, res, nd);
+        // side steepness of the feature itself, with the ground's own slope
+        // removed: on a hillside the raw slope would make any swell look steep
+        const slopeDeg = computeSlopeDegrees(resid, W, H, res, nd);
         const hi = S.minH, lo = 0.4 * S.minH, n = W * H;
         const lab = new Int32Array(n), feats = [];
         const N8 = [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
