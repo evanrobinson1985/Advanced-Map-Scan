@@ -203,6 +203,7 @@
                 <option value="caves">Caves / Sinkholes</option>
                 <option value="mounds">Native Mounds</option>
                 <option value="effigy">Effigy &amp; Linear Mounds (birds, animals)</option>
+                <option value="shell">Shell Middens, Mounds &amp; Rings (coasts, rivers)</option>
                 <option value="shelter">Rockshelters / Overhangs</option>
                 <option value="settlement">Settlement Likelihood</option>
             </optgroup>
@@ -571,9 +572,39 @@
                 <input type="range" id="effMinFlank" min="0" max="25" step="0.5" value="4" oninput="updateThresholdVal('effMinFlank','°',1)">
                 <span class="val-display" id="effMinFlankVal">4.0°</span>
             </div>
+            <div class="slider-row">
+                <label>Join gaps up to</label>
+                <input type="range" id="effJoinGap" min="0" max="50" step="1" value="20" oninput="updateLengthVal('effJoinGap')">
+                <span class="val-display" id="effJoinGapVal">20ft 0in</span>
+            </div>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem;"><input type="checkbox" id="effLinear" checked> Include linear (straight) mounds</label>
             <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem;"><input type="checkbox" id="effSkipFields" checked> Skip sets of parallel strips (plough ridges, terraces)</label>
             <div style="font-size:0.7rem; color:#94a3b8; margin:4px 0 6px; line-height:1.4;">Effigies are often only 1&ndash;2 ft high after a century of ploughing: lower <i>Min height</i> to 0.5 ft for plough-worn groups. <i>Max width</i> should cover the widest body you expect; wider rises are treated as natural. Effigy mounds are burial sites protected by state law: never dig or disturb them.</div>
+        </div>
+        <div id="shellParamsGroup" style="display:none;">
+            <div style="font-size:0.75rem; font-weight:600; color:#334155; margin-bottom:4px;">Shell midden settings</div>
+            <div class="slider-row">
+                <label>Min height</label>
+                <input type="range" id="shellMinHeight" min="0.5" max="10" step="0.5" value="2" oninput="updateLengthVal('shellMinHeight')">
+                <span class="val-display" id="shellMinHeightVal">2ft 0in</span>
+            </div>
+            <div class="slider-row">
+                <label>Max width</label>
+                <input type="range" id="shellMaxWidth" min="100" max="1000" step="10" value="500" oninput="updateLengthVal('shellMaxWidth')">
+                <span class="val-display" id="shellMaxWidthVal">500ft 0in</span>
+            </div>
+            <div class="slider-row">
+                <label>Min size</label>
+                <input type="range" id="shellMinSize" min="15" max="300" step="5" value="50" oninput="updateLengthVal('shellMinSize')">
+                <span class="val-display" id="shellMinSizeVal">50ft 0in</span>
+            </div>
+            <div class="slider-row">
+                <label>Min side steepness</label>
+                <input type="range" id="shellMinFlank" min="0" max="30" step="0.5" value="6" oninput="updateThresholdVal('shellMinFlank','°',1)">
+                <span class="val-display" id="shellMinFlankVal">6.0°</span>
+            </div>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem;"><input type="checkbox" id="shellSkipRidges" checked> Skip sets of parallel ridges (beach ridges, dunes)</label>
+            <div style="font-size:0.7rem; color:#94a3b8; margin:4px 0 6px; line-height:1.4;">Shell middens can be anything from a 2 ft scatter to a 50 ft heap, a long ridge along an old shoreline, or a ring 150&ndash;300 ft across around an open plaza. <i>Max width</i> should cover the widest one you expect; wider rises are treated as natural. Dunes and dredge-spoil banks look much the same in LiDAR: mark them <i>Not real</i>. Shell middens are protected archaeological sites and often hold burials: never dig or collect from them.</div>
         </div>
         <div id="settlementWeightsGroup" style="display:none;">
             <div class="slider-row">
@@ -724,6 +755,7 @@
             <select id="dlProfile" onchange="dlSwitchProfile(this.value)" style="width:auto; flex-grow:1; margin:0 0 0 10px; padding:6px;">
                 <option value="mounds">Mounds</option>
                 <option value="effigy">Effigy &amp; linear mounds</option>
+                <option value="shell">Shell middens &amp; rings</option>
             </select>
         </div>
         <div id="dlProfileHelp" style="font-size:0.72rem; color:#475569; margin-bottom:6px; line-height:1.4;"></div>
@@ -973,7 +1005,7 @@
         shelter:    { color: '#db2777', letter: 'R', label: 'Rockshelters' },
         settlement: { color: '#dc2626', letter: 'S', label: 'Settlement hotspots' },
     };
-    const SCAN_ALL_ORDER = ['basecamp', 'huntcamp', 'ceremonial', 'entrance', 'caves', 'mounds', 'effigy', 'shelter', 'settlement'];
+    const SCAN_ALL_ORDER = ['basecamp', 'huntcamp', 'ceremonial', 'entrance', 'caves', 'mounds', 'effigy', 'shell', 'shelter', 'settlement'];
     const modeLayers = {};
     let scanAllActive = false, scanAllCancel = false;
     let last3DOverlays = []; // [{ mode, candidateMask, highlightMask?, grid }] tinted onto the 3D terrain
@@ -1034,7 +1066,7 @@
         if (!div) return;
         const counts = {};
         for (const f of detectedFeatures) counts[f.mode] = (counts[f.mode] || 0) + 1;
-        const modes = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy'].filter(m => counts[m]);
+        const modes = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy', 'dlshell'].filter(m => counts[m]);
         if (!modes.length) { div.style.display = 'none'; return; }
         div.innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px;"><b>Detected features (${detectedFeatures.length})</b>` +
             `<a href="#" onclick="event.preventDefault(); clearAllDetectionsByUser();" style="color:#b91c1c;font-size:11px;">Clear all</a></div>` + modes.map(m => {
@@ -2720,7 +2752,7 @@
         const ft = (id, d) => { const e = document.getElementById(id); return feetToMeters(e ? parseFloat(e.value) : d); };
         const chk = (id, d) => { const e = document.getElementById(id); return e ? e.checked : d; };
         const fl = document.getElementById('effMinFlank');
-        return { minH: ft('effMinHeight', 0.8), maxW: ft('effMaxWidth', 50), minL: ft('effMinLength', 60), minFlank: fl ? parseFloat(fl.value) : 4,
+        return { minH: ft('effMinHeight', 0.8), maxW: ft('effMaxWidth', 50), minL: ft('effMinLength', 60), minFlank: fl ? parseFloat(fl.value) : 4, joinGap: ft('effJoinGap', 20),
                  linear: chk('effLinear', true), skipFields: chk('effSkipFields', true) };
     }
     // Running min (or max) over a 2r+1 window along rows or columns, in
@@ -2928,6 +2960,19 @@
         const resid = topHat(zd, W, H, r, nd);
         const slopeDeg = computeSlopeDegrees(resid, W, H, res, nd);
         const hi = S.minH, lo = 0.4 * S.minH, n = W * H;
+        // One effigy is one object: plough-worn or eroded stretches can drop
+        // a wing, neck or tail below the threshold for a few metres, which
+        // would split it into separate "mounds". A morphological closing of
+        // the raised area (grow, then shrink, by half the gap) bridges gaps
+        // up to "Join gaps up to" wide, so the pieces are traced as one shape.
+        let keep = new Float32Array(n);
+        for (let i = 0; i < n; i++) keep[i] = resid[i] >= lo ? 1 : 0;
+        const gr = Math.round((S.joinGap || 0) / 2 / res);
+        if (gr >= 1) {
+            const dil = vhFilter(vhFilter(keep, W, H, gr, true, true), W, H, gr, true, false);
+            keep = vhFilter(vhFilter(dil, W, H, gr, false, true), W, H, gr, false, false);
+            for (let i = 0; i < n; i++) if (resid[i] >= lo) keep[i] = 1;
+        }
         const lab = new Int32Array(n), feats = [];
         const N8 = [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
         let id = 0;
@@ -2942,7 +2987,7 @@
                 for (const o of N8) {
                     const j = i + o; if (j < 0 || j >= n || lab[j]) continue;
                     const cj = j % W; if (Math.abs(cj - c) > 1) continue;
-                    if (resid[j] >= lo) { lab[j] = id; pix.push(j); }
+                    if (keep[j] > 0.5) { lab[j] = id; pix.push(j); }
                 }
                 if (pix.length > 400000) break;
             }
@@ -3143,6 +3188,286 @@
         } finally { scanInProgress = false; }
     }
 
+    // ==== SHELL MIDDENS, MOUNDS AND RINGS ====
+    // Shell middens are heaps of discarded shell (oyster, clam, whelk,
+    // freshwater mussel) along coasts, estuaries and rivers. They differ from
+    // earthen mounds: often far bigger (tens to hundreds of metres long, up to
+    // 15 m high), irregular or ridge-shaped, steep-sided (shell holds a steep
+    // slope), and sometimes built as rings or crescents around an open plaza
+    // (shell rings, 50-100 m across). Teaching the mound scan or network with
+    // them would teach it the wrong shape, so they have their own mode,
+    // training data and deep-learning model. This scan:
+    //  1. keeps every raised feature narrower than "Max width", at its true
+    //     height (morphological top-hat after removing the ground's trend);
+    //  2. outlines the ones at least "Min height" high;
+    //  3. measures each: length and width (from its spread), height, volume,
+    //     side steepness, closed holes (a ring around a plaza) and how much
+    //     of its outline curls inward (an open ring or crescent);
+    //  4. classifies it: closed ring, open ring / crescent, ridge, or heap;
+    //  5. drops look-alikes: natural hills taller than any midden, long
+    //     straight levees, roads and spoil banks, features with gentle sides,
+    //     and sets of parallel ridges (beach ridges and dunes).
+    // Results rank higher when they look like middens you've confirmed, and
+    // lower or not at all when they look like ones you marked not real.
+    MODE_STYLE.shell = { color: '#0891b2', letter: 'O', label: 'Shell middens & rings' };
+    function shellSettings() {
+        const ft = (id, d) => { const e = document.getElementById(id); return feetToMeters(e ? parseFloat(e.value) : d); };
+        const fl = document.getElementById('shellMinFlank'), sk = document.getElementById('shellSkipRidges');
+        return { minH: ft('shellMinHeight', 2), maxW: ft('shellMaxWidth', 500), minSize: ft('shellMinSize', 50), minFlank: fl ? parseFloat(fl.value) : 6,
+                 skipRidges: sk ? sk.checked : true };
+    }
+    function shellDescribe(pix, resid, slopeDeg, W, H, res) {
+        let r0 = H, r1 = 0, c0 = W, c1 = 0, maxH = 0, sumH = 0, sr = 0, sc = 0, top = pix[0];
+        for (const i of pix) {
+            const r = (i / W) | 0, c = i % W, v = resid[i];
+            if (r < r0) r0 = r; if (r > r1) r1 = r; if (c < c0) c0 = c; if (c > c1) c1 = c;
+            if (v > maxH) { maxH = v; top = i; } sumH += v; sr += r; sc += c;
+        }
+        const n = pix.length; sr /= n; sc /= n;
+        let mrr = 0, mcc = 0, mrc = 0;
+        for (const i of pix) { const dr = ((i / W) | 0) - sr, dc = (i % W) - sc; mrr += dr * dr; mcc += dc * dc; mrc += dr * dc; }
+        mrr /= n; mcc /= n; mrc /= n;
+        const tr = mrr + mcc, det = Math.sqrt(Math.max(0, (mrr - mcc) ** 2 / 4 + mrc * mrc));
+        const l1 = tr / 2 + det, l2 = Math.max(1e-6, tr / 2 - det);
+        const L = 4 * Math.sqrt(l1) * res, Wd = 4 * Math.sqrt(l2) * res;
+        // closed holes: background cells in the bounding box not reachable from its edge
+        const w = c1 - c0 + 3, h = r1 - r0 + 3, img = new Uint8Array(w * h);
+        for (const i of pix) img[(((i / W) | 0) - r0 + 1) * w + (i % W) - c0 + 1] = 1;
+        const outside = new Uint8Array(w * h), q = [0]; outside[0] = 1;
+        for (let k = 0; k < q.length; k++) {
+            const j = q[k], x = j % w, y = (j / w) | 0;
+            for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= w || yy >= h) continue;
+                const jj = yy * w + xx; if (img[jj] || outside[jj]) continue; outside[jj] = 1; q.push(jj);
+            }
+        }
+        let hole = 0, perim = 0;
+        for (let j = 0; j < w * h; j++) if (!img[j] && !outside[j]) hole++;
+        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) { const j = y * w + x; if (img[j] && (!img[j - 1] || !img[j + 1] || !img[j - w] || !img[j + w])) perim++; }
+        // convex hull area (solidity: a crescent or open ring fills little of its hull)
+        const pts = [];
+        for (let y = 0; y < h; y++) { let a = -1, b = -1; for (let x = 0; x < w; x++) if (img[y * w + x]) { if (a < 0) a = x; b = x; } if (a >= 0) { pts.push([a, y]); if (b !== a) pts.push([b, y]); } }
+        pts.sort((p1, p2) => p1[0] - p2[0] || p1[1] - p2[1]);
+        const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+        const lo = [], up = [];
+        for (const p of pts) { while (lo.length >= 2 && cross(lo[lo.length - 2], lo[lo.length - 1], p) <= 0) lo.pop(); lo.push(p); }
+        for (let k = pts.length - 1; k >= 0; k--) { const p = pts[k]; while (up.length >= 2 && cross(up[up.length - 2], up[up.length - 1], p) <= 0) up.pop(); up.push(p); }
+        const hull = lo.slice(0, -1).concat(up.slice(0, -1));
+        let ha = 0; for (let k = 0; k < hull.length; k++) { const a = hull[k], b = hull[(k + 1) % hull.length]; ha += a[0] * b[1] - b[0] * a[1]; }
+        ha = Math.max(n, Math.abs(ha) / 2 + perim / 2);
+        const solidity = Math.min(1, n / ha), holeFrac = hole / (n + hole);
+        const flanks = []; for (const i of pix) flanks.push(slopeDeg[i]);
+        flanks.sort((a, b) => a - b);
+        const flank = flanks[Math.floor(flanks.length * 0.85)] || 0;
+        const elong = Math.max(1, L / Math.max(0.5, Wd));
+        let kind = 'heap';
+        if (holeFrac >= 0.12 && hole * res * res >= 100) kind = 'ring';
+        else if (solidity < 0.6 && elong < 4 && L >= 30) kind = 'crescent';
+        else if (elong >= 3) kind = 'ridge';
+        const areaM2 = n * res * res;
+        return { kind, L, W: Wd, elong, maxH, volume: sumH * res * res, flank, solidity, holeFrac, cr: sr, cc: sc,
+                 orientation: 0.5 * Math.atan2(2 * mrc, mcc - mrr), areaM2, circ: Math.min(1, 4 * Math.PI * areaM2 / Math.max(1, (perim * res) ** 2)),
+                 edgeTouch: r0 <= 1 || c0 <= 1 || r1 >= H - 2 || c1 >= W - 2, anchor: kind === 'ring' || kind === 'crescent' ? Math.round(sr) * W + Math.round(sc) : top, pix };
+    }
+    // Finds and describes every raised feature narrower than Max width.
+    // Returns { resid, feats } (feats unfiltered, with .why for rejections).
+    function shellFind(S) {
+        const nd = -100, W = demWidth, H = demHeight, res = effRes;
+        const z = boxSmooth(currentDEM, W, H, Math.max(1, Math.round(1 / res)), nd);
+        const r = Math.max(3, Math.round((S.maxW / 2 + 5) / res));
+        const trend = boxSmooth(z, W, H, 2 * r, nd);
+        const zd = new Float32Array(W * H);
+        for (let i = 0; i < W * H; i++) zd[i] = z[i] < nd ? z[i] : z[i] - trend[i];
+        const resid = topHat(zd, W, H, r, nd);
+        const slopeDeg = computeSlopeDegrees(z, W, H, res, nd);
+        const hi = S.minH, lo = 0.4 * S.minH, n = W * H;
+        const lab = new Int32Array(n), feats = [];
+        const N8 = [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
+        const minPx = Math.max(12, 0.5 * Math.PI * (S.minSize / 2) ** 2 / (res * res));
+        let id = 0;
+        for (let s = 0; s < n; s++) {
+            if (lab[s] || resid[s] < hi) continue;
+            id++;
+            const pix = [s]; lab[s] = id;
+            for (let k = 0; k < pix.length; k++) {
+                const i = pix[k], c = i % W;
+                for (const o of N8) {
+                    const j = i + o; if (j < 0 || j >= n || lab[j]) continue;
+                    if (Math.abs((j % W) - c) > 1) continue;
+                    if (resid[j] >= lo) { lab[j] = id; pix.push(j); }
+                }
+                if (pix.length > 1500000) break;
+            }
+            if (pix.length < minPx) continue;
+            feats.push(shellDescribe(pix, resid, slopeDeg, W, H, res));
+        }
+        for (const d of feats) {
+            const why = [];
+            if (d.L < S.minSize) why.push(`smaller than the ${Math.round(S.minSize / FT_TO_M)} ft minimum`);
+            if (d.W > S.maxW * 1.15) why.push(`wider than the ${Math.round(S.maxW / FT_TO_M)} ft maximum`);
+            if (d.maxH > 25) why.push('taller than any shell midden (over 80 ft): a natural hill');
+            if (d.flank < S.minFlank) why.push(`sides too gentle (${d.flank.toFixed(1)}&deg;, needs ${S.minFlank}&deg;): a natural swell`);
+            if (d.kind === 'ridge' && d.elong > 8 && d.L > 300) why.push('a long, even ridge (over 1,000 ft): a levee, road, causeway or spoil bank');
+            if (d.edgeTouch && d.L > 300) why.push('long and running off the edge of the area: probably a levee, ridge or dune line');
+            d.why = why;
+        }
+        // sets of parallel ridges: beach ridges, dune lines, dredge spoil rows
+        if (S.skipRidges) {
+            const rid = feats.filter(d => d.kind === 'ridge' && !d.why.length);
+            for (const a of rid) {
+                let par = 0;
+                for (const b of rid) {
+                    if (a === b) continue;
+                    let dth = Math.abs(a.orientation - b.orientation) % Math.PI; dth = Math.min(dth, Math.PI - dth);
+                    if (dth > 12 * Math.PI / 180) continue;
+                    const dr = (b.cr - a.cr) * res, dc = (b.cc - a.cc) * res;
+                    const along = Math.abs(dc * Math.cos(a.orientation) + dr * Math.sin(a.orientation)), across = Math.abs(-dc * Math.sin(a.orientation) + dr * Math.cos(a.orientation));
+                    if (across < 80 && along < Math.max(a.L, b.L) * 0.6) par++;
+                }
+                if (par >= 2) a.why.push('one of a set of parallel ridges: beach ridges or dunes');
+            }
+        }
+        return { resid, feats };
+    }
+    // shape class in the similarity "template" slot: ring 1, crescent 0.67, heap 0.33, ridge 0
+    function shellShapeCode(d) { return { ring: 1, crescent: 0.67, heap: 0.33, ridge: 0 }[d.kind]; }
+    function shellVector(d) { return { diameterM: d.L, heightM: d.maxH, circularity: d.circ, elongation: d.elong, template: shellShapeCode(d), groundSlopeDeg: null, flankSlopeDeg: d.flank }; }
+    function shellKind(d) { return { ring: 'Shell ring (closed)', crescent: 'Shell ring or crescent (open)', ridge: 'Shell ridge / linear midden', heap: 'Shell mound / midden heap' }[d.kind]; }
+    function shellFeatureRecord(d, score, grid) {
+        const [lat, lon] = effigyLatLon(d.anchor);
+        const k = { centroidR: d.cr, centroidC: d.cc, area: d.pix.length, count: d.pix.length, maxMetric: d.maxH, sumMetric: d.volume / (effRes * effRes),
+                    circularity: d.circ, elongation: d.elong, orientation: d.orientation, fillRatio: d.solidity, maxFlankSlope: d.flank, _sizeD: d.L, _template: shellShapeCode(d) };
+        return { mode: 'shell', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon: effigyHull(d.pix), shell: d };
+    }
+    function shellPopup(f, extraHtml, confirmHtml) {
+        const d = f.shell, ft = metersToFeetInches;
+        return `<b>Possible ${shellKind(d)}</b><br>
+            <i style="color:#64748b">Algorithmic candidate &mdash; confirm in the field; shell middens are protected archaeological sites and often contain burials</i><br>
+            <b>Length:</b> ${ft(d.L)}, <b>width:</b> ${ft(d.W)}<br>
+            <b>Height:</b> ${ft(d.maxH)}<br>
+            <b>Side steepness:</b> ${d.flank.toFixed(1)}&deg;<br>
+            ${d.kind === 'ring' ? `<b>Enclosed plaza:</b> ${Math.round(d.holeFrac * 100)}% of its footprint<br>` : d.kind === 'crescent' ? `<b>Fills</b> ${Math.round(d.solidity * 100)}% of its outline (open ring or crescent)<br>` : ''}
+            <b>Est. volume:</b> ${Math.round(d.volume / (FT_TO_M ** 3)).toLocaleString()} ft&sup3;<br>
+            ${extraHtml || ''}<b>Match Score:</b> ${f.matchScore}%<br>
+            <b>Coords:</b> ${f.lat.toFixed(5)}, ${f.lon.toFixed(5)}${confirmHtml || ''}`;
+    }
+    function shellDraw(f, popupHtml) {
+        const layer = modeLayer('shell'), col = MODE_STYLE.shell.color;
+        const layers = [L.marker([f.lat, f.lon], { icon: featureIcon('shell', f.confirmed) }).bindPopup(popupHtml, { maxWidth: 320 }).addTo(layer)];
+        if (f.polygon && f.polygon.length >= 3) layers.push(L.polygon(f.polygon, { color: col, weight: 2, dashArray: '5,4', fillColor: col, fillOpacity: 0.08, interactive: false }).addTo(layer));
+        f._layers = layers;
+    }
+    function shellScore(d) {
+        return Math.min(99, Math.round(40 + 15 * Math.min(1, d.maxH / 2) + 15 * Math.min(1, d.flank / 20) + { ring: 20, crescent: 15, heap: 10, ridge: 4 }[d.kind]));
+    }
+    async function runShellScan() {
+        const status = document.getElementById('status');
+        const scanBtn = document.getElementById('scanBtn'); if (scanBtn) scanBtn.disabled = true;
+        try {
+            const S = shellSettings();
+            status.innerText = 'Shell middens & rings: finding raised features...';
+            await new Promise(r => setTimeout(r, 0));
+            const { resid, feats } = shellFind(S);
+            const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
+            let skipped = 0, resembled = 0;
+            const ranked = [];
+            for (const d of feats) {
+                if (d.why.length) continue;
+                const [lat, lon] = effigyLatLon(d.anchor);
+                if (trainingData.shell.rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, lat, lon) < Math.max(25, 0.3 * d.L))) { skipped++; continue; }
+                let score = shellScore(d), simHtml = '';
+                const sv = similarityVerdict('shell', shellVector(d));
+                if (rejectsDrop(sv)) { resembled++; continue; }
+                if (sv.pos && sv.pos.sim > 0.2) { score = Math.round(score + (100 - score) * 0.5 * sv.pos.sim); if (sv.pos.sim > 0.5) simHtml += `<b>Like your confirmed shell midden</b> (${Math.round(sv.pos.sim * 100)}% similar)<br>`; }
+                if (sv.neg && sv.neg.sim > REJECT_PENALTY_SIM && (!sv.pos || sv.neg.sim > sv.pos.sim)) {
+                    score = Math.round(score * (1 - 0.5 * sv.neg.sim));
+                    simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles something you marked not real (${Math.round(sv.neg.sim * 100)}% similar), so it is ranked lower</div>`;
+                }
+                ranked.push({ d, score, simHtml });
+            }
+            ranked.sort((a, b) => b.score - a.score);
+            clearModeDetections('shell');
+            const shown = ranked.slice(0, maxResults), mask = new Uint8Array(demWidth * demHeight);
+            for (const { d, score, simHtml } of shown) {
+                const f = shellFeatureRecord(d, score);
+                const already = trainingData.shell.examples.find(ex => approxMetersBetween(ex.lat, ex.lon, f.lat, f.lon) < Math.max(25, 0.3 * d.L));
+                f.confirmed = !!already;
+                const confirmHtml = already
+                    ? `<label style="display:block;margin-top:8px;"><input type="checkbox" checked disabled> Confirmed real (${new Date(already.ts).toLocaleDateString()})</label>`
+                    : `<div style="display:flex;gap:28px;margin-top:12px;">
+                         <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;" onclick="confirmFeature('shell', ${d.L.toFixed(2)}, ${d.circ.toFixed(3)}, ${d.elong.toFixed(3)}, ${d.maxH.toFixed(3)}, ${f.lat.toFixed(6)}, ${f.lon.toFixed(6)}, event, this, null, null)">&#10003; Yes, it's real</button>
+                         <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#fee2e2;color:#991b1b;border:2px solid #ef4444;border-radius:8px;" onclick="markNotReal('shell', ${f.lat.toFixed(6)}, ${f.lon.toFixed(6)}, event)">&#10007; Not real</button>
+                       </div>
+                       <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;line-height:1.3;">"Not real" = dune, beach ridge, spoil bank, levee or natural rise; scans then avoid features like it.</div>`;
+                shellDraw(f, shellPopup(f, simHtml, confirmHtml));
+                detectedFeatures.push(f);
+                for (const i of d.pix) mask[i] = 1;
+            }
+            lastMetricRaster = resid; lastScanMode = 'shell'; lastMetricGrid = gridInfo();
+            lastExportRaster = { data: resid, name: 'shell_relief_m', mode: 'shell', grid: gridInfo(true) };
+            last3DOverlays.push({ mode: 'shell', candidateMask: mask, grid: gridInfo() });
+            updateDetectionLegend();
+            if (typeof updateExportButtons === 'function') updateExportButtons();
+            const cnt = (k) => shown.filter(x => x.d.kind === k).length;
+            const dropped = feats.filter(d => d.why.length).length;
+            status.innerText = `Shell middens & rings: ${shown.length} found` + (shown.length ? ` (${cnt('ring')} closed ring${cnt('ring') === 1 ? '' : 's'}, ${cnt('crescent')} open ring/crescent, ${cnt('heap')} heap${cnt('heap') === 1 ? '' : 's'}, ${cnt('ridge')} ridge${cnt('ridge') === 1 ? '' : 's'})` : '') +
+                `. ${dropped} raised feature${dropped === 1 ? ' was' : 's were'} ruled out (hills, levees, dunes and beach ridges, too small or too gentle)` +
+                (skipped ? `; ${skipped} skipped at spots you marked not real` : '') + (resembled ? `; ${resembled} skipped as look-alikes` : '') +
+                (ranked.length > shown.length ? `; ${ranked.length - shown.length} more held back by Max results` : '') + '. Tap the map on one it missed and choose "This is a Shell Midden" to see why.';
+        } finally { if (scanBtn) scanBtn.disabled = false; }
+    }
+    // The shell feature under (or within maxM of) a point on the current
+    // grid, using settings S; null if none
+    function shellNearest(S, rr, cc, maxM) {
+        const { feats } = shellFind(S);
+        let best = null, bd = Infinity;
+        for (const d of feats) for (let k = 0; k < d.pix.length; k += Math.max(1, d.pix.length >> 10)) {
+            const i = d.pix[k], dist = Math.hypot(((i / demWidth) | 0) - rr, (i % demWidth) - cc) * effRes;
+            if (dist < bd) { bd = dist; best = d; }
+        }
+        return best && bd <= maxM ? best : null;
+    }
+    // "This is a Shell Midden": the same analysis around the tap, reporting
+    // every check, with a button to save it as a confirmed example
+    async function shellCheckAt(lat, lon) {
+        if (!fullDemGrid || scanInProgress) return;
+        map.closePopup();
+        const g = fullDemGrid, idx = gridIndexAt(g, lat, lon);
+        if (idx < 0) return;
+        const S = shellSettings(), r = Math.floor(idx / g.w), c = idx % g.w;
+        const half = Math.round(Math.max(300, 3 * S.maxW) / g.res);
+        const r0 = Math.max(0, r - half), c0 = Math.max(0, c - half), r1 = Math.min(g.h, r + half), c1 = Math.min(g.w, c + half);
+        scanInProgress = true;
+        try {
+            await withGrid(cropGrid(g, r0, c0, r1, c1), async () => {
+                const best = shellNearest({ ...S, minSize: Math.min(S.minSize, 10) }, r - r0, c - c0, 15);
+                if (!best) {
+                    L.popup({ maxWidth: 360 }).setLatLng([lat, lon]).setContent(`<b>No raised feature here</b><br>Nothing at least ${metersToFeetInches(S.minH)} high and under ${metersToFeetInches(S.maxW)} wide within 50 ft of where you tapped. Try a lower <b>Min height</b> or a wider <b>Max width</b> in the Shell midden settings, or tap right on the midden.`).openOn(map);
+                    return;
+                }
+                const why = best.L < S.minSize ? [`smaller than the ${Math.round(S.minSize / FT_TO_M)} ft minimum`] : [];
+                for (const w2 of best.why) if (!/minimum$/.test(w2)) why.push(w2);
+                const f = shellFeatureRecord(best, 0), ft = metersToFeetInches;
+                const chk = (ok, text) => `<tr style="background:${ok ? '#dcfce7' : '#fee2e2'}"><td>${ok ? '&#10003;' : '&#10007;'}</td><td>${text}</td></tr>`;
+                const rows = chk(best.maxH >= S.minH, `Height ${ft(best.maxH)} (min ${ft(S.minH)})`) +
+                    chk(best.W <= S.maxW * 1.15, `Width ${ft(best.W)} (max ${ft(S.maxW)})`) +
+                    chk(best.L >= S.minSize, `Length ${ft(best.L)} (min ${ft(S.minSize)})`) +
+                    chk(best.flank >= S.minFlank, `Side steepness ${best.flank.toFixed(1)}&deg; (min ${S.minFlank}&deg;)`) +
+                    chk(best.maxH <= 25, 'Not a natural hill (under 80 ft high)') +
+                    chk(!(best.kind === 'ridge' && best.elong > 8 && best.L > 300), 'Not a long, even levee or spoil bank') +
+                    chk(!best.why.some(w2 => /parallel/.test(w2)), 'Not one of a set of parallel beach ridges or dunes');
+                const hl = L.layerGroup().addTo(map);
+                L.polygon(f.polygon, { color: '#b45309', weight: 2, dashArray: '4,4', fillOpacity: 0.06 }).addTo(hl);
+                const pop = L.popup({ maxWidth: 380 }).setLatLng([f.lat, f.lon]).setContent(`<b>${shellKind(best)}</b><br>
+                    <table style="font-size:0.8rem;border-collapse:collapse;margin:4px 0;">${rows}</table>
+                    ${why.length ? `<div style="font-size:0.78rem;color:#991b1b;">Why the scan skips it: ${why.join('; ')}.</div>` : '<div style="font-size:0.78rem;color:#166534;">It passes every check; the scan should list it (unless Max results is full or it resembles something you marked not real).</div>'}
+                    <button style="margin-top:8px;padding:6px 10px;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;font-weight:bold;" onclick="confirmFeature('shell', ${best.L.toFixed(2)}, ${best.circ.toFixed(3)}, ${best.elong.toFixed(3)}, ${best.maxH.toFixed(3)}, ${f.lat.toFixed(6)}, ${f.lon.toFixed(6)}, event, this, null, null)">&#10003; Save as a confirmed shell midden</button>
+                    <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">The brown outline is the footprint the app traced.</div>`).openOn(map);
+                pop.on('remove', () => map.removeLayer(hl));
+            });
+        } finally { scanInProgress = false; }
+    }
+
     // ==== EXPERIMENTAL: DEEP-LEARNING MOUND DETECTION ====
     // A small convolutional neural network (CNN) learns what your mounds look
     // like in the terrain itself, instead of following hand-written rules. It
@@ -3169,7 +3494,10 @@
                   RESULT_MODE: 'dlmounds', FEATURES: 'mound', PEAK_SEP: 15, AVOID_M: 35, NOUN: 'mound', NEG_NOUN: 'not-mound', NOUNS: 'mounds', NEG_NOUNS: 'not-mounds' },
         effigy: { key: 'effigy', label: 'Effigy & linear mounds', PATCH: 72, INPUT: 64, RES: 2.0, BORDER: 4, STRIDE: 8, BG_PER_AREA: 120, BG_MAX: 1500, MAX_POS_D: 1e9, MAX_SCAN_CELLS: 1.2e6,
                   CH: 3, MODEL_VERSION: 1, MODEL_URL: 'indexeddb://lidar-dl-effigy-v1', EPOCHS: 40, IDB_KEY: 'dlPatchesEffigy', PREFS_KEY: 'dlEffigy', TRAIN_MODE: 'effigy',
-                  RESULT_MODE: 'dleffigy', FEATURES: 'effigy', PEAK_SEP: 40, AVOID_M: 80, NOUN: 'effigy', NEG_NOUN: 'not-effigy', NOUNS: 'effigies', NEG_NOUNS: 'not-effigies' }
+                  RESULT_MODE: 'dleffigy', FEATURES: 'effigy', PEAK_SEP: 40, AVOID_M: 80, NOUN: 'effigy', NEG_NOUN: 'not-effigy', NOUNS: 'effigies', NEG_NOUNS: 'not-effigies' },
+        shell: { key: 'shell', label: 'Shell middens & rings', PATCH: 72, INPUT: 64, RES: 3.0, BORDER: 4, STRIDE: 6, BG_PER_AREA: 100, BG_MAX: 1500, MAX_POS_D: 1e9, MAX_SCAN_CELLS: 1.5e6,
+                 CH: 3, MODEL_VERSION: 1, MODEL_URL: 'indexeddb://lidar-dl-shell-v1', EPOCHS: 40, IDB_KEY: 'dlPatchesShell', PREFS_KEY: 'dlShell', TRAIN_MODE: 'shell', CLIP: 15,
+                 RESULT_MODE: 'dlshell', FEATURES: 'shell', PEAK_SEP: 60, AVOID_M: 100, NOUN: 'shell midden', NEG_NOUN: 'not-midden', NOUNS: 'shell middens', NEG_NOUNS: 'not-middens' }
     };
     let DL = DL_PROFILES.mounds;
     const dlPatchCache = {}, dlModelCache = {};
@@ -3181,6 +3509,7 @@
     function dlWithProfile(key, fn) { const keep = DL; DL = DL_PROFILES[key]; try { return fn(); } finally { DL = keep; } }
     MODE_STYLE.dlmounds = { color: '#9333ea', letter: 'D', label: 'Mounds (deep learning)' };
     MODE_STYLE.dleffigy = { color: '#4d7c0f', letter: 'F', label: 'Effigies (deep learning)' };
+    MODE_STYLE.dlshell = { color: '#0e7490', letter: 'O', label: 'Shell middens (deep learning)' };
 
     function dlPrefsFor(key) { const p = trainingData.prefs || (trainingData.prefs = {}), k = DL_PROFILES[key].PREFS_KEY; return p[k] || (p[k] = {}); }
     function dlPrefs() { return dlPrefsFor(DL.key); }
@@ -3298,13 +3627,13 @@
     // In place: remove the tilt of the ground (plane through the window's
     // border) and clip, so the network sees relief in metres above it
     function dlDetrend(w, off) {
-        const N = DL.INPUT, { idx, inv } = dlPlaneFor(DL);
+        const N = DL.INPUT, { idx, inv } = dlPlaneFor(DL), CL = DL.CLIP || 5;
         let s = 0, sxz = 0, syz = 0;
         for (const i of idx) { const z = w[off + i], x = (i % N) - (N - 1) / 2, y = Math.floor(i / N) - (N - 1) / 2; s += z; sxz += x * z; syz += y * z; }
         const a = inv[0][0] * s + inv[0][1] * sxz + inv[0][2] * syz, bx = inv[1][0] * s + inv[1][1] * sxz + inv[1][2] * syz, by = inv[2][0] * s + inv[2][1] * sxz + inv[2][2] * syz;
         for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
             const i = off + r * N + c, v = w[i] - (a + bx * (c - (N - 1) / 2) + by * (r - (N - 1) / 2));
-            w[i] = v > 5 ? 5 : v < -5 ? -5 : v;
+            w[i] = v > CL ? CL : v < -CL ? -CL : v;
         }
     }
     // The three views the network gets of a window of raw elevations
@@ -3318,6 +3647,7 @@
     function dlScratch() { const N = DL.INPUT; return DL._s || (DL._s = { rel: new Float32Array(N * N), int: new Float64Array((N + 1) ** 2), raw: new Float32Array(N * N) }); }
     function dlFeatures(w, woff, out, ooff) {
         if (DL.FEATURES === 'effigy') return dlFeaturesEffigy(w, woff, out, ooff);
+        if (DL.FEATURES === 'shell') return dlFeaturesShell(w, woff, out, ooff);
         const N = DL.INPUT, M = N + 1, C = DL.CH, R = dlScratch().rel, dlInt = dlScratch().int;
         for (let i = 0; i < N * N; i++) R[i] = w[woff + i];
         dlDetrend(R, 0);
@@ -3358,6 +3688,27 @@
             out[o + 2] = Math.min(2, 4 * Math.hypot(gx, gy));
         }
     }
+    // The shell model's three views of a window (192 m at 3 m): the raised
+    // bodies under ~75 m wide at their own height (heaps, ridges, ring
+    // walls); the broad relief around them (old shoreline, river bank,
+    // marsh); and the steepness of the ground (shell holds a steep slope)
+    function dlFeaturesShell(w, woff, out, ooff) {
+        const N = DL.INPUT, C = DL.CH, R = dlScratch().rel, res = DL.RES;
+        for (let i = 0; i < N * N; i++) R[i] = w[woff + i];
+        dlDetrend(R, 0);
+        const trend = boxSmooth(R, N, N, 20, -1e9), zd = new Float32Array(N * N);
+        for (let i = 0; i < N * N; i++) zd[i] = R[i] - trend[i];
+        const th = topHat(zd, N, N, 12, -1e9);
+        for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
+            const i = r * N + c, o = ooff + i * C;
+            const gx = (R[r * N + Math.min(N - 1, c + 1)] - R[r * N + Math.max(0, c - 1)]) / ((c > 0 && c < N - 1 ? 2 : 1) * res);
+            const gy = (R[Math.min(N - 1, r + 1) * N + c] - R[Math.max(0, r - 1) * N + c]) / ((r > 0 && r < N - 1 ? 2 : 1) * res);
+            const b = 0.5 * th[i];
+            out[o] = b > 5 ? 5 : b;
+            out[o + 1] = Math.max(-3, Math.min(3, 0.3 * R[i]));
+            out[o + 2] = Math.min(2, 2 * Math.hypot(gx, gy));
+        }
+    }
     // Copies an N x N window turned/mirrored by t (0-7: the 8 ways a square
     // can be rotated or flipped); src is read at row stride sStride
     function dlOrient(src, soff, sStride, dst, t, scale) {
@@ -3381,9 +3732,9 @@
     // Training items that can teach the network, with labels as they are now
     function dlTrainingItems() {
         const items = [];
-        if (DL.TRAIN_MODE === 'effigy') {
-            for (const ex of trainingData.effigy.examples) items.push({ key: 'ex:' + ex.ts, lat: ex.lat, lon: ex.lon, label: 1, d: ex.diameter, h: ex.maxMetric, name: ex.name });
-            for (const rj of trainingData.effigy.rejected) items.push({ key: 'rj:' + rj.ts, lat: rj.lat, lon: rj.lon, label: 0, name: rj.name });
+        if (DL.TRAIN_MODE !== 'mounds') {
+            for (const ex of trainingData[DL.TRAIN_MODE].examples) items.push({ key: 'ex:' + ex.ts, lat: ex.lat, lon: ex.lon, label: 1, d: ex.diameter, h: ex.maxMetric, name: ex.name });
+            for (const rj of trainingData[DL.TRAIN_MODE].rejected) items.push({ key: 'rj:' + rj.ts, lat: rj.lat, lon: rj.lon, label: 0, name: rj.name });
             return items;
         }
         for (const ex of trainingData.mounds.examples) items.push({ key: 'ex:' + ex.ts, lat: ex.lat, lon: ex.lon, label: 1, d: ex.diameter, h: ex.maxMetric, name: ex.name });
@@ -3501,7 +3852,7 @@
         for (const it of dlTrainingItems()) {
             const p = dlSampleFor(it);
             if (p && approxMetersBetween(p.lat, p.lon, it.lat, it.lon) < 2) continue;
-            const kind = it.key.startsWith('ex:') ? (DL.TRAIN_MODE === 'effigy' ? 'Confirmed effigy / linear mound' : 'Confirmed mound') : it.key.startsWith('rj:') ? '"Not real" mark' : it.label ? 'Mound outline' : 'Look-alike outline';
+            const kind = it.key.startsWith('ex:') ? (DL.TRAIN_MODE === 'effigy' ? 'Confirmed effigy / linear mound' : DL.TRAIN_MODE === 'shell' ? 'Confirmed shell midden' : 'Confirmed mound') : it.key.startsWith('rj:') ? '"Not real" mark' : it.label ? 'Mound outline' : 'Look-alike outline';
             out.push({ ...it, kind });
         }
         return out;
@@ -3608,7 +3959,9 @@
         if (save) { (trainingData.prefs || (trainingData.prefs = {})).dlProfile = key; saveTrainingData(); }
         const sel = document.getElementById('dlProfile'); if (sel) sel.value = key;
         const help = document.getElementById('dlProfileHelp');
-        if (help) help.innerHTML = key === 'effigy'
+        if (help) help.innerHTML = key === 'shell'
+            ? 'Learns shell middens, mounds and rings from your confirmed shell middens (scan results answered Yes, or <i>This is a Shell Midden</i>) and your "Not real" marks in that mode, kept apart from the mound model because their size and shape differ. It looks at 192 m squares at 3 m, so a whole shell ring fits. Results are teal "O" diamonds, cross-checked with the shell midden scan.'
+            : key === 'effigy'
             ? 'Learns effigy and linear mounds from your confirmed effigies (scan results answered Yes, or <i>This is an Effigy</i>) and your "Not real" marks in that mode. It looks at 128 m squares at 2 m through the same narrow-relief view the effigy scan uses, so a whole bird fits. Results are olive "F" diamonds, cross-checked with the effigy scan.'
             : 'Learns mounds from your confirmed mounds, mound outlines, "Not real" marks and look-alike outlines, looking at 40 m squares at 1 m.';
     }
@@ -3675,7 +4028,7 @@
             if (fullDemGrid) await dlHarvest(fullDemGrid, true);
             const S = dlUsableSamples();
             const negAll = [...S.neg, ...S.bg];
-            if (S.pos.length < 3) { dlSetStatus(`The network needs terrain samples of at least 3 ${DL.NOUNS}; it has ${S.pos.length}. ${DL.TRAIN_MODE === 'effigy' ? 'Confirm more effigy or linear mounds (scan results, or tap one and choose This is an Effigy)' : 'Confirm or outline more mounds'}, and load the DTM around ones that have no sample yet.`); return; }
+            if (S.pos.length < 3) { dlSetStatus(`The network needs terrain samples of at least 3 ${DL.NOUNS}; it has ${S.pos.length}. ${DL.TRAIN_MODE === 'effigy' ? 'Confirm more effigy or linear mounds (scan results, or tap one and choose This is an Effigy)' : DL.TRAIN_MODE === 'shell' ? 'Confirm more shell middens (scan results, or tap one and choose This is a Shell Midden)' : 'Confirm or outline more mounds'}, and load the DTM around ones that have no sample yet.`); return; }
             if (negAll.length < 20) { dlSetStatus('Load a DTM (and press Collect samples) so the network has ordinary ground to compare with.'); return; }
             dlSetStatus('Loading TensorFlow.js...');
             const tf = await loadTF();
@@ -4062,7 +4415,7 @@
             const sure = peaks.filter(pk => pk.p >= thr).sort((a, b2) => b2.p - a.p);
             const kept = [];
             for (const pk of sure) if (!kept.some(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < DL.PEAK_SEP)) kept.push(pk);
-            const effigyModel = DL.TRAIN_MODE === 'effigy';
+            const effigyModel = DL.TRAIN_MODE !== 'mounds', shellModel = DL.TRAIN_MODE === 'shell';   // effigyModel: either traced (non-mound) model
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
             let skippedRejected = 0;
             const results = [];
@@ -4071,8 +4424,24 @@
                 // your "Not real" marks and look-alike outlines always win
                 if (trainingData[DL.TRAIN_MODE].rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, pk.lat, pk.lon) < (effigyModel ? 30 : 20)) ||
                     (!effigyModel && trainingData.outlines.some(o => o.label === 'not' && pointInPoly(pk.lon, pk.lat, o.polygon.map(([a2, b2]) => [b2, a2]))))) { skippedRejected++; continue; }
-                results.push({ ...pk, meas: effigyModel ? dlMeasureEffigy(g, pk.lat, pk.lon) : dlMeasure(g, pk.lat, pk.lon) });
+                results.push({ ...pk, meas: shellModel ? dlMeasureShell(g, pk.lat, pk.lon) : effigyModel ? dlMeasureEffigy(g, pk.lat, pk.lon) : dlMeasure(g, pk.lat, pk.lon) });
                 if (results.length % 5 === 0) { dlSetStatus(`Measuring candidates: ${results.length}...`); await dlTick(); }
+            }
+            // A long effigy (or a big shell ring) can light up several windows
+            // along its body: keep one candidate per traced feature, the most
+            // confident, so each effigy is reported once, as a whole
+            let mergedDup = 0;
+            if (effigyModel) {
+                results.sort((a, b2) => b2.p - a.p);
+                const one = [];
+                for (const r2 of results) {
+                    const la = r2.meas ? r2.meas.lat : r2.lat, lo = r2.meas ? r2.meas.lon : r2.lon;
+                    const same = one.some(k2 => k2.meas && (approxMetersBetween(k2.meas.lat, k2.meas.lon, la, lo) < 10 ||
+                        (k2.meas.hull && k2.meas.hull.length >= 3 && (pointInPoly(lo, la, k2.meas.hull.map(([a2, b2]) => [b2, a2])) || pointInPoly(r2.lon, r2.lat, k2.meas.hull.map(([a2, b2]) => [b2, a2]))))));
+                    if (same) { mergedDup++; continue; }
+                    one.push(r2);
+                }
+                results.length = 0; results.push(...one);
             }
             // Order: spots the regular mound scan also found (or your
             // confirmed mounds), then ones with a measurable rise (a confident
@@ -4083,13 +4452,13 @@
             // boulders and knobs usually are; effigies: under Min length):
             // listed last
             const pd = moundShapePresetDefs();
-            const minD = effigyModel ? effigySettings().minL : feetToMeters(Math.min(pd.conical.minDiameter, pd.platform.minDiameter, parseFloat(document.getElementById('minDiameter').value) || Infinity));
+            const minD = shellModel ? shellSettings().minSize : effigyModel ? effigySettings().minL : feetToMeters(Math.min(pd.conical.minDiameter, pd.platform.minDiameter, parseFloat(document.getElementById('minDiameter').value) || Infinity));
             for (const res of results) {
                 res.small = !!res.meas && (effigyModel ? res.meas.L : res.meas.d) < minD; res.minD = minD;
                 const la = res.meas ? res.meas.lat : res.lat, lo = res.meas ? res.meas.lon : res.lon;
                 if (effigyModel) {
                     res.agree = regular.some(f => approxMetersBetween(f.lat, f.lon, la, lo) < Math.max(30, 0.3 * (f.diameter || 50)));
-                    res.known = trainingData.effigy.examples.some(ex => approxMetersBetween(ex.lat, ex.lon, la, lo) < Math.max(30, 0.3 * (ex.diameter || 50)));
+                    res.known = trainingData[DL.TRAIN_MODE].examples.some(ex => approxMetersBetween(ex.lat, ex.lon, la, lo) < Math.max(30, 0.3 * (ex.diameter || 50)));
                 } else {
                     res.agree = regular.some(f => approxMetersBetween(f.lat, f.lon, la, lo) < Math.max(10, 0.6 * (f.diameter || 10)));
                     res.known = knownMounds().some(k2 => approxMetersBetween(k2.lat, k2.lon, la, lo) < Math.max(10, 0.6 * k2.d));
@@ -4100,18 +4469,19 @@
             results.length = Math.min(results.length, maxResults);
             clearModeDetections(DL.RESULT_MODE);
             window.__dlFeats = [];
-            for (const res of results) (effigyModel ? dlRenderEffigyResult : dlRenderResult)(res);
+            for (const res of results) (shellModel ? dlRenderShellResult : effigyModel ? dlRenderEffigyResult : dlRenderResult)(res);
             if (results.length && document.getElementById('panelContent').style.display !== 'none') togglePanel();
             updateDetectionLegend();
             if (typeof updateExportButtons === 'function') updateExportButtons();
             const known = window.__dlFeats.filter(f => f.dlKnown).length, agreed = results.filter(r2 => r2.agree).length;
-            const scanName = effigyModel ? 'effigy & linear mound scan' : 'mound scan';
+            const scanName = shellModel ? 'shell midden scan' : effigyModel ? 'effigy & linear mound scan' : 'mound scan';
             const msg = `Deep-learning scan: ${results.length} candidate${results.length === 1 ? '' : 's'} at ${Math.round(thr * 100)}%+ confidence` +
                 (known ? ` (${known} of them your confirmed ${DL.NOUNS})` : '') +
                 (regular.length ? `; the regular ${scanName} agrees on ${agreed}` : `; run the regular ${scanName} too, then this one again, to see where both agree`) +
                 (skippedRejected ? `; ${skippedRejected} skipped at spots you marked not real` : '') +
+                (mergedDup ? `; ${mergedDup} more hit${mergedDup === 1 ? '' : 's'} on the same ${DL.NOUNS} merged, so each is listed once` : '') +
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
-                ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${effigyModel ? 'olive "F" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
+                ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
             dlSetStatus(msg); status.innerText = msg;
         } catch (e) {
             console.error(e);
@@ -4192,6 +4562,51 @@
         if (m) for (const p of m.paths) if (p.length >= 2) f._layers.push(L.polyline(p, { color: st.color, weight: 4, opacity: 0.85, dashArray: '8,5', interactive: false }).addTo(layer));
         detectedFeatures.push(f);
     }
+    // The shell model's candidates are measured with the shell scan's own
+    // analysis, or null when no raised feature is there
+    function dlMeasureShell(g, lat, lon) {
+        try {
+            const idx = gridIndexAt(g, lat, lon); if (idx < 0) return null;
+            const S = shellSettings(), r = Math.floor(idx / g.w), c = idx % g.w, half = Math.round(Math.max(250, 1.5 * S.maxW) / g.res);
+            const r0 = Math.max(0, r - half), c0 = Math.max(0, c - half), r1 = Math.min(g.h, r + half), c1 = Math.min(g.w, c + half);
+            return withGridSync(cropGrid(g, r0, c0, r1, c1), () => {
+                const best = shellNearest({ ...S, minSize: Math.min(S.minSize, 10) }, r - r0, c - c0, 40);
+                if (!best) return null;
+                const [la, lo] = effigyLatLon(best.anchor);
+                return { d: best, L: best.L, h: best.maxH, lat: la, lon: lo, circ: best.circ, elong: best.elong, hull: effigyHull(best.pix), why: best.why };
+            });
+        } catch (e) { console.warn('Measuring a deep-learning shell candidate failed', e); return null; }
+    }
+    function dlRenderShellResult(res) {
+        const m = res.meas, lat = m ? m.lat : res.lat, lon = m ? m.lon : res.lon, d = m ? m.d : null;
+        const ex = trainingData.shell.examples.find(e => approxMetersBetween(e.lat, e.lon, lat, lon) < Math.max(30, 0.3 * (e.diameter || 50)));
+        const f = knownMoundFeature({ id: 'dls' + Math.random().toString(36).slice(2), lat, lon, d: m ? m.L : 50, h: m ? m.h : 0, circ: m ? m.circ : 0.5, elong: m ? m.elong : 1.5 }, Math.round(res.p * 100));
+        delete f.known;
+        f.mode = 'dlshell'; f.dlProb = res.p; f.dlKnown = !!ex; f.matchScore = Math.round(res.p * 100);
+        if (m) { f.polygon = m.hull; f.shell = d; }
+        const i = window.__dlFeats.push(f) - 1;
+        const ft = metersToFeetInches;
+        const answer = ex ? `<div style="margin-top:8px;color:#166534;"><b>&#10003; This is your confirmed shell midden</b>: the network recognised it.</div>`
+            : `<div style="display:flex;gap:28px;margin-top:12px;">
+                 <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;" onclick="dlAnswer(${i}, true, event, this)">&#10003; Yes, it's real</button>
+                 <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#fee2e2;color:#991b1b;border:2px solid #ef4444;border-radius:8px;" onclick="dlAnswer(${i}, false, event, this)">&#10007; Not real</button>
+               </div>
+               <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;line-height:1.3;">Your answer goes into the shell midden training data (the shell scan uses it too). Train again to update the network.</div>`;
+        const html = `<b>Possible ${d ? shellKind(d) : 'shell midden'}</b> <span style="background:${MODE_STYLE.dlshell.color};color:#fff;border-radius:4px;padding:0 4px;font-size:0.7rem;">deep learning, experimental</span><br>
+            <i style="color:#64748b">Found by the neural network trained on your data &mdash; confirm in the field; shell middens are protected archaeological sites</i><br>
+            <b>Network confidence:</b> ${Math.round(res.p * 100)}% (averaged over 8 rotations)<br>
+            ${res.agree ? '<div style="margin:3px 0;color:#166534;background:#dcfce7;padding:3px 6px;border-radius:4px;font-size:0.8rem;"><b>&#10003; The shell midden scan found this too</b>: both methods agree.</div>' : ''}
+            ${res.small ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; Smaller than your Min size (${Math.round(res.minD / FT_TO_M)} ft).</div>` : ''}
+            ${d ? `<b>Length:</b> ${ft(d.L)}, <b>width:</b> ${ft(d.W)}<br><b>Height:</b> ${ft(d.maxH)}<br><b>Side steepness:</b> ${d.flank.toFixed(1)}&deg;<br>`
+                : '<span style="color:#92400e;">&#9888; No raised feature could be measured here: the network sees a midden-like pattern, but the ground has no clear raised body. Often a false alarm.</span><br>'}
+            <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}${answer}`;
+        const st = MODE_STYLE.dlshell, layer = modeLayer('dlshell');
+        const icon = L.divIcon({ className: 'det-icon', iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12],
+            html: `<div style="background:${st.color};color:#fff;width:20px;height:20px;border-radius:4px;transform:rotate(45deg);border:2px solid ${ex ? '#16a34a' : '#fff'};box-shadow:0 1px 4px rgba(0,0,0,0.5);"><div style="transform:rotate(-45deg);font:bold 11px/20px sans-serif;text-align:center;">O</div></div>` });
+        f._layers = [L.marker([lat, lon], { icon }).bindPopup(html, { maxWidth: 320 }).addTo(layer)];
+        if (m && m.hull && m.hull.length >= 3) f._layers.push(L.polygon(m.hull, { color: st.color, weight: 2, dashArray: '8,5', fillOpacity: 0.05, interactive: false }).addTo(layer));
+        detectedFeatures.push(f);
+    }
     function dlRenderResult(res) {
         const m = res.meas, lat = m ? m.lat : res.lat, lon = m ? m.lon : res.lon;
         const d = m ? m.d : 10, h = m ? m.h : 0;
@@ -4227,7 +4642,7 @@
     async function dlAnswer(i, real, ev, btn) {
         if (ev) { ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); }
         const f = (window.__dlFeats || [])[i]; if (!f) return;
-        const tm = f.mode === 'dleffigy' ? 'effigy' : 'mounds';
+        const tm = f.mode === 'dleffigy' ? 'effigy' : f.mode === 'dlshell' ? 'shell' : 'mounds';
         if (real) {
             confirmFeature(tm, f.diameter, f.k.circularity, f.k.elongation, f.k.maxMetric, f.lat, f.lon, null, btn, null, null);
         } else {
@@ -4483,21 +4898,46 @@
         ['Caddo Mounds State Historic Site (TX)', 'mounds', 31.5940, -95.1490, 'Caddo Mounds State Historic Site, Texas'],
         ['Towosahgy State Historic Site (MO)', 'mounds', 36.6930, -89.2600, 'Towosahgy State Historic Site, Missouri'],
         ['Sugarloaf Mound, St. Louis (MO)', 'mounds', 38.5630, -90.2330, 'Sugarloaf Mound, St. Louis, Missouri'],
-        ['Crystal River Archaeological State Park (FL)', 'mounds', 28.9080, -82.6380, 'Crystal River Archaeological State Park, Florida'],
+        ['Crystal River Archaeological State Park (FL)', 'mounds+shell', 28.9080, -82.6380, 'Crystal River Archaeological State Park, Florida'],
         ['Lake Jackson Mounds (FL)', 'mounds', 30.5000, -84.3100, 'Lake Jackson Mounds Archaeological State Park, Florida'],
         ['Letchworth-Love Mounds (FL)', 'mounds', 30.5180, -83.9940, 'Letchworth-Love Mounds, Florida'],
         ['Fort Walton Mound (FL)', 'mounds', 30.4060, -86.6100, 'Fort Walton Mound, Fort Walton Beach, Florida'],
-        ['Safety Harbor Mound, Philippe Park (FL)', 'mounds', 28.0030, -82.6730, 'Philippe Park, Safety Harbor, Florida'],
-        ['Madira Bickel Mound (FL)', 'mounds', 27.5880, -82.6220, 'Madira Bickel Mound, Florida'],
-        ['Portavant Mound, Emerson Point (FL)', 'mounds', 27.5310, -82.6260, 'Emerson Point Preserve, Palmetto, Florida'],
-        ['Turtle Mound, Canaveral NS (FL)', 'mounds', 28.9300, -80.8270, 'Turtle Mound, Florida'],
-        ['Mound Key (FL)', 'mounds', 26.4220, -81.8640, 'Mound Key, Florida'],
+        ['Safety Harbor Mound, Philippe Park (FL)', 'mounds+shell', 28.0030, -82.6730, 'Philippe Park, Safety Harbor, Florida'],
+        ['Madira Bickel Mound (FL)', 'mounds+shell', 27.5880, -82.6220, 'Madira Bickel Mound, Florida'],
+        ['Portavant Mound, Emerson Point (FL)', 'mounds+shell', 27.5310, -82.6260, 'Emerson Point Preserve, Palmetto, Florida'],
+        ['Turtle Mound, Canaveral NS (FL)', 'shell', 28.9300, -80.8270, 'Turtle Mound, Florida'],
+        ['Mound Key (FL)', 'shell', 26.4220, -81.8640, 'Mound Key, Florida'],
         ['Ortona Indian Mound Park (FL)', 'mounds', 26.7870, -81.3090, 'Ortona Indian Mound Park, Florida'],
-        ['Shell Mound, Cedar Keys (FL)', 'mounds', 29.2040, -83.0640, 'Shell Mound, Cedar Key, Florida'],
+        ['Shell Mound, Cedar Keys (FL)', 'shell', 29.2040, -83.0640, 'Shell Mound, Cedar Key, Florida'],
         ['Santee Indian Mound, Fort Watson (SC)', 'mounds', 33.5370, -80.4380, 'Santee Indian Mound, South Carolina'],
         ['Nikwasi Mound, Franklin (NC)', 'mounds', 35.1850, -83.3780, 'Nikwasi Mound, Franklin, North Carolina'],
         ['Criel Mound, South Charleston (WV)', 'mounds', 38.3670, -81.7040, 'Criel Mound, South Charleston, West Virginia']
     ];
+    // Third batch: shell middens and shell rings, for the shell model
+    const TOUR_DEFAULT_SITES_3 = [
+        ['Sapelo Shell Ring Complex (GA)', 'shell', 31.5240, -81.2650, 'Sapelo Shell Ring, Georgia'],
+        ['Fig Island Shell Rings (SC)', 'shell', 32.5650, -80.3330, 'Fig Island Shell Rings, South Carolina'],
+        ['Sewee Shell Ring (SC)', 'shell', 32.9790, -79.6430, 'Sewee Shell Ring, South Carolina'],
+        ['Sea Pines Shell Ring, Hilton Head (SC)', 'shell', 32.1510, -80.7760, 'Sea Pines Shell Ring, Hilton Head Island'],
+        ["Green's Shell Enclosure, Hilton Head (SC)", 'shell', 32.2150, -80.6830, "Green's Shell Enclosure, Hilton Head Island"],
+        ['Spanish Mount, Edisto Beach State Park (SC)', 'shell', 32.5280, -80.3120, 'Spanish Mount, Edisto Beach State Park'],
+        ['Rollins Shell Ring, Fort George Island (FL)', 'shell', 30.4400, -81.4350, 'Rollins Shell Ring, Fort George Island, Florida'],
+        ['Pineland Site, Randell Research Center (FL)', 'shell', 26.6610, -82.1530, 'Randell Research Center, Pineland, Florida'],
+        ['Josslyn Island (FL)', 'shell', 26.6380, -82.1080, 'Josslyn Island, Florida'],
+        ['Hontoon Island State Park shell mounds (FL)', 'shell', 28.9730, -81.3570, 'Hontoon Island State Park, Florida'],
+        ['Blue Spring State Park shell midden (FL)', 'shell', 28.9460, -81.3400, 'Blue Spring State Park, Florida'],
+        ['Tomoka State Park, Nocoroco (FL)', 'shell', 29.3420, -81.0880, 'Tomoka State Park, Florida'],
+        ['Castle Windy Midden, Canaveral NS (FL)', 'shell', 28.8940, -80.8090, 'Castle Windy, Canaveral National Seashore'],
+        ['Ross Hammock, Canaveral NS (FL)', 'shell', 28.8330, -80.8020, 'Ross Hammock, Canaveral National Seashore'],
+        ['De Soto National Memorial shell midden (FL)', 'shell', 27.5230, -82.6430, 'De Soto National Memorial, Florida'],
+        ['Indian Shell Mound Park, Dauphin Island (AL)', 'shell', 30.2540, -88.1040, 'Indian Shell Mound Park, Dauphin Island, Alabama'],
+        ['Whaleback Shell Midden, Damariscotta (ME)', 'shell', 44.0440, -69.5340, 'Whaleback Shell Midden, Damariscotta, Maine'],
+        ['Coyote Hills Regional Park shell mound (CA)', 'shell', 37.5520, -122.0920, 'Coyote Hills Regional Park, Fremont, California']
+    ];
+    // which scans a site's kind runs (each is also its deep-learning model)
+    function tourModes(kind) { return { both: ['mounds', 'effigy'], 'mounds+shell': ['mounds', 'shell'] }[kind] || [kind]; }
+    const TOUR_KIND_TEXT = { both: 'Mounds + effigies', mounds: 'Mounds', effigy: 'Effigies', shell: 'Shell middens', 'mounds+shell': 'Mounds + shell middens' };
+    const TOUR_SCAN_NAME = { mounds: 'mound', effigy: 'effigy', shell: 'shell midden' };
     // each site's download: a square this size centred on the site
     const TOUR_SIZES = [[300, 'Small: 300 m (1,000 ft) square'], [500, 'Medium: 500 m (1,650 ft) square'], [1000, 'Large: 1 km (0.6 mile) square']];
     function tourHalf() { return (tourData().sizeM || 500) / 2; }
@@ -4517,6 +4957,18 @@
             t.seedVersion = 2;
             const known = new Set([...t.sites, ...t.done].map(s => s.name));
             for (const [name, kind, lat, lon, query] of TOUR_DEFAULT_SITES_2) {
+                if (known.has(name)) continue;
+                t.sites.push({ id: 'ts' + Math.random().toString(36).slice(2, 10), name, kind, lat, lon, address: '', query, approx: true, status: 'waiting', added: Date.now() });
+            }
+            saveTrainingData();
+        }
+        if ((t.seedVersion || 1) < 3) {
+            t.seedVersion = 3;
+            // shell sites from the second batch get their own kind (unless already toured)
+            const shellKinds = Object.fromEntries(TOUR_DEFAULT_SITES_2.filter(d => /shell/.test(d[1])).map(d => [d[0], d[1]]));
+            for (const s of t.sites) if (shellKinds[s.name] && s.status !== 'toured') s.kind = shellKinds[s.name];
+            const known = new Set([...t.sites, ...t.done].map(s => s.name));
+            for (const [name, kind, lat, lon, query] of TOUR_DEFAULT_SITES_3) {
                 if (known.has(name)) continue;
                 t.sites.push({ id: 'ts' + Math.random().toString(36).slice(2, 10), name, kind, lat, lon, address: '', query, approx: true, status: 'waiting', added: Date.now() });
             }
@@ -4597,7 +5049,7 @@
         const el = document.getElementById('tourModal'); if (!el) return;
         const t = tourData(), q = tourQueue || [];
         const waiting = t.sites.filter(s => s.status === 'waiting' || s.status === 'failed').length;
-        const kindTxt = { both: 'Mounds + effigies', mounds: 'Mounds', effigy: 'Effigies' };
+        const kindTxt = TOUR_KIND_TEXT;
         const btn = 'width:auto;margin:0;padding:4px 10px;font-size:0.78rem;';
         el.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:620px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
             <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;z-index:1;">
@@ -4606,17 +5058,18 @@
               <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
                 <button onclick="document.getElementById('tourModal').remove(); tourRun();" style="${btn}background:#0f766e;color:#fff;border:none;" ${waiting && !tourBusy ? '' : 'disabled'}>&#9654; Run tour (${waiting} waiting)</button>
                 <button onclick="document.getElementById('tourModal').remove(); tourStartReview();" style="${btn}background:#dcfce7;color:#166534;" ${q.length ? '' : 'disabled'}>Review candidates (${q.length})</button>
+                <button onclick="tourTrainAll();" style="${btn}background:#f3e8ff;color:#6b21a8;" ${tourModelsToTrain().length && !tourBusy ? '' : 'disabled'}>&#129504; Train all models (${tourModelsToTrain().map(k => DL_PROFILES[k].label).join(', ') || 'none waiting'})</button>
               </div>
               <div style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:0.8rem;">Area scanned at each site:
                 <select style="width:auto;margin:0;padding:3px;" onchange="tourData().sizeM = +this.value; saveTrainingData(); renderTourManager();">${TOUR_SIZES.map(([v, l]) => `<option value="${v}" ${(t.sizeM || 500) === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
-              <div style="font-size:0.74rem;color:#64748b;margin-top:6px;line-height:1.4;">The tour zooms in on each waiting site and downloads only that square, at 1 m, runs the scans and keeps every candidate. Review them afterwards; your answers become training data. A site leaves this list once it's reviewed and its model trained. ${t.done.length ? `${t.done.length} site${t.done.length === 1 ? '' : 's'} finished so far.` : ''}</div>
+              <div style="font-size:0.74rem;color:#64748b;margin-top:6px;line-height:1.4;">The tour zooms in on each waiting site and downloads only that square, at 1 m, runs the scans and keeps every candidate. Review them afterwards; your answers become training data. When the last candidate is answered, every model you gave answers for (mounds, effigy &amp; linear mounds, shell middens) is trained automatically, and each finished site leaves this list. ${t.done.length ? `${t.done.length} site${t.done.length === 1 ? '' : 's'} finished so far.` : ''}</div>
             </div>
             <div style="padding:8px 12px;border-bottom:1px solid #e2e8f0;background:#f8fafc;">
               <b>Add a site</b>
               <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px;">
                 <input id="tourAddName" placeholder="Name (optional)" style="flex:1 1 140px;padding:5px;border:1px solid #cbd5e1;border-radius:5px;">
                 <input id="tourAddWhere" placeholder="Coordinates or address" style="flex:2 1 200px;padding:5px;border:1px solid #cbd5e1;border-radius:5px;">
-                <select id="tourAddKind" style="width:auto;margin:0;padding:5px;"><option value="both">Mounds + effigies</option><option value="mounds">Mounds</option><option value="effigy">Effigies</option></select>
+                <select id="tourAddKind" style="width:auto;margin:0;padding:5px;">${Object.entries(TOUR_KIND_TEXT).map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}</select>
                 <button onclick="tourAddSite()" style="${btn}background:#dbeafe;color:#1e3a8a;">+ Add</button>
                 <button onclick="const c = map.getCenter(); document.getElementById('tourAddWhere').value = c.lat.toFixed(5) + ', ' + c.lng.toFixed(5);" style="${btn}">Use map centre</button>
               </div>
@@ -4689,7 +5142,7 @@
         if (!todo.length) { tourBar('No sites are waiting. Add sites in the training-site tour list.', false); return; }
         tourBusy = true; tourStop = false;
         for (const k of Object.keys(DL_PROFILES)) dlPrefsFor(k).enabled = true;
-        await dlLoadPatchesFor('mounds'); await dlLoadPatchesFor('effigy');
+        for (const k of Object.keys(DL_PROFILES)) await dlLoadPatchesFor(k);
         const modeBefore = scanModeEl.value, t0 = Date.now();
         let nSites = 0, nCand = 0, nFail = 0;
         if (document.getElementById('panelContent').style.display !== 'none') togglePanel();
@@ -4715,11 +5168,20 @@
                     if (!g || g === gBefore || gridIndexAt(g, s.lat, s.lon) < 0) throw new Error('the download failed (check the connection)');
                     if (document.getElementById('enforce1m').checked && g.res > 1.05) throw new Error(`no 1 m LiDAR here (${g.res.toFixed(1)} m data)`);
                     const found = [];
-                    for (const mode of (s.kind === 'both' ? ['mounds', 'effigy'] : [s.kind])) {
-                        tourBar(head + `: ${mode === 'effigy' ? 'effigy' : 'mound'} scan...`, true);
+                    for (const mode of tourModes(s.kind)) {
+                        tourBar(head + `: ${TOUR_SCAN_NAME[mode]} scan...`, true);
                         scanModeEl.value = mode; onScanModeChange();
                         await runScanner();
                         for (const f of detectedFeatures) if (f.mode === mode && !f.known && f.k) found.push(f);
+                    }
+                    // a "mound" on an effigy or a shell midden is part of it (a
+                    // body, a hip, a wing tip, a heap on a ring): it would teach the
+                    // mound model that those shapes are mounds, so it isn't offered
+                    const effShapes = found.filter(f => (f.mode === 'effigy' || f.mode === 'shell') && f.polygon && f.polygon.length >= 3).map(f => f.polygon.map(([a, b]) => [b, a]));
+                    let onEffigy = 0;
+                    for (let k = found.length - 1; k >= 0; k--) {
+                        const f = found[k];
+                        if (f.mode === 'mounds' && effShapes.some(pg => pointInPoly(f.lon, f.lat, pg))) { found.splice(k, 1); onEffigy++; }
                     }
                     // keep each candidate with what it needs to be labelled later
                     const sample = dlSampler(g);
@@ -4728,21 +5190,21 @@
                     for (const f of found) {
                         if ((Math.abs(f.lat - s.lat) > dLat || Math.abs(f.lon - s.lon) > dLon) || already(f.mode, f.lat, f.lon)) continue;
                         if (tourQueue.some(c => c.mode === f.mode && approxMetersBetween(c.lat, c.lon, f.lat, f.lon) < 20)) continue;
-                        const moundCm = dlWithProfile('mounds', () => dlExtractPatch(sample, f.lat, f.lon));
-                        const effCm = dlWithProfile('effigy', () => dlExtractPatch(sample, f.lat, f.lon));
-                        const d = f.effigy;
+                        const cms = {};
+                        for (const k of Object.keys(DL_PROFILES)) cms[k] = dlWithProfile(k, () => dlExtractPatch(sample, f.lat, f.lon));
+                        const d = f.effigy, sh = f.shell;
                         tourQueue.push({ id: 'tc' + Math.random().toString(36).slice(2, 10), siteId: s.id, site: s.name, mode: f.mode, lat: f.lat, lon: f.lon, score: f.matchScore,
-                            label: f.mode === 'effigy' ? effigyKind(d) : 'Possible mound',
+                            label: f.mode === 'effigy' ? effigyKind(d) : f.mode === 'shell' ? shellKind(sh) : 'Possible mound',
                             meas: { d: f.diameter, h: f.k.maxMetric, circ: f.k.circularity, elong: f.k.elongation, template: f.mode === 'mounds' ? (f.k._template != null ? f.k._template : null) : null,
-                                    gs: f.mode === 'mounds' && f.k._gs != null ? f.k._gs : null, span: d ? d.span : null, width: d ? d.meanW : null },
-                            vec: featureVector(f.k, f.diameter), moundCm, effCm, res: g.res });
+                                    gs: f.mode === 'mounds' && f.k._gs != null ? f.k._gs : null, span: d ? d.span : null, width: d ? d.meanW : sh ? sh.W : null },
+                            vec: featureVector(f.k, f.diameter), cms, res: g.res });
                         added++;
                     }
                     // ordinary ground for both models, kept clear of every candidate
                     window.__dlExtraAvoid = found.map(f => ({ lat: f.lat, lon: f.lon }));
                     for (const k of Object.keys(DL_PROFILES)) await dlHarvestFor(k, g, true);
                     window.__dlExtraAvoid = null;
-                    s.status = 'toured'; s.touredAt = Date.now(); s.candidates = added; delete s.error;
+                    s.status = 'toured'; s.touredAt = Date.now(); s.candidates = added; s.onEffigy = onEffigy; delete s.error;
                     nSites++; nCand += added;
                 } catch (e) {
                     console.warn('Tour site failed', s.name, e);
@@ -4780,7 +5242,7 @@
     }
     async function tourStartReview() {
         await tourLoadQueue();
-        await dlLoadPatchesFor('mounds'); await dlLoadPatchesFor('effigy');
+        for (const k of Object.keys(DL_PROFILES)) await dlLoadPatchesFor(k);
         const b = document.getElementById('tourBar'); if (b) b.remove();
         if (!tourQueue.length) { tourBar('No candidates waiting for review.', false); return; }
         tourReview = { history: [], marker: null };
@@ -4803,9 +5265,9 @@
         card.innerHTML = `<div style="display:flex;align-items:baseline;gap:6px;"><b style="flex:1;">Review: ${tourQueue.length} left</b><span style="font-size:0.72rem;color:#64748b;">${siteLeft} at this site</span></div>
             <div style="font-size:0.78rem;color:#475569;margin:2px 0 6px;">${escapeHtml(c.site)}</div>
             <div id="tourShade" style="display:flex;gap:6px;justify-content:center;margin-bottom:6px;"></div>
-            <div style="font-size:0.72rem;color:#94a3b8;text-align:center;margin-bottom:6px;">Shaded terrain: ${c.mode === 'effigy' ? 'left 144 m, right 48 m square' : '48 m square (and 144 m)'}; the map shows the spot behind.</div>
+            <div style="font-size:0.72rem;color:#94a3b8;text-align:center;margin-bottom:6px;">Shaded terrain around the spot (${tourShadeSizes(c)}); the map shows it behind.</div>
             <b>${escapeHtml(c.label)}</b> &middot; score ${c.score}%<br>
-            <span style="font-size:0.8rem;">${c.mode === 'effigy' ? `Length ${ft(m.d)}${m.span ? `, ${ft(m.span)} tip to tip` : ''}, width ${ft(m.width || 0)}, height ${ft(m.h)}` : `Height ${ft(m.h)}, ${ft(m.d)} across, roundness ${(+m.circ).toFixed(2)}`}</span>
+            <span style="font-size:0.8rem;">${c.mode === 'effigy' ? `Length ${ft(m.d)}${m.span ? `, ${ft(m.span)} tip to tip` : ''}, width ${ft(m.width || 0)}, height ${ft(m.h)}` : c.mode === 'shell' ? `Length ${ft(m.d)}, width ${ft(m.width || 0)}, height ${ft(m.h)}` : `Height ${ft(m.h)}, ${ft(m.d)} across, roundness ${(+m.circ).toFixed(2)}`}</span>
             <div style="display:flex;gap:12px;margin-top:10px;">
               <button onclick="tourAnswer('yes')" style="flex:1;margin:0;min-height:40px;font-weight:bold;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;">&#10003; Yes, it's real</button>
               <button onclick="tourAnswer('no')" style="flex:1;margin:0;min-height:40px;font-weight:bold;background:#fee2e2;color:#991b1b;border:2px solid #ef4444;border-radius:8px;">&#10007; Not real</button>
@@ -4817,12 +5279,16 @@
             </div>
             <div style="font-size:0.7rem;color:#94a3b8;margin-top:6px;">Keys: Y = yes, N = not real, S = skip, B = back. Only say Yes when you can see a mound.</div>`;
         const shade = card.querySelector('#tourShade');
-        if (c.mode === 'effigy') { if (c.effCm) shade.appendChild(tourHillshade(c.effCm, 2, 140)); if (c.moundCm) shade.appendChild(tourHillshade(c.moundCm, 1, 140)); }
-        else { if (c.moundCm) shade.appendChild(tourHillshade(c.moundCm, 1, 140)); if (c.effCm) shade.appendChild(tourHillshade(c.effCm, 2, 140)); }
-        map.setView([c.lat, c.lon], c.mode === 'effigy' ? 18 : 19, { animate: false });
+        for (const k of tourShadeKeys(c)) { const cm = tourCm(c, k); if (cm) shade.appendChild(tourHillshade(cm, DL_PROFILES[k].RES, 140)); }
+        map.setView([c.lat, c.lon], c.mode === 'shell' ? 17 : c.mode === 'effigy' ? 18 : 19, { animate: false });
         if (tourReview.marker) map.removeLayer(tourReview.marker);
         tourReview.marker = L.circleMarker([c.lat, c.lon], { radius: 10, color: '#f59e0b', weight: 3, fill: false }).addTo(map);
     }
+    // a candidate's terrain sample for one model (older queue items kept two fields)
+    function tourCm(c, k) { return c.cms ? c.cms[k] : k === 'mounds' ? c.moundCm : k === 'effigy' ? c.effCm : null; }
+    // the two shaded views: its own model's window first, then a contrasting one
+    function tourShadeKeys(c) { return c.mode === 'mounds' ? ['mounds', 'effigy'] : [c.mode, 'mounds']; }
+    function tourShadeSizes(c) { return tourShadeKeys(c).filter(k => tourCm(c, k)).map(k => Math.round(DL_PROFILES[k].PATCH * DL_PROFILES[k].RES) + ' m').join(' and ') + ' squares'; }
     function tourKeys(e) {
         if (!document.getElementById('tourReview') || /input|textarea|select/i.test(e.target.tagName)) return;
         const k = e.key.toLowerCase();
@@ -4845,7 +5311,7 @@
         }
         // its terrain sample, for the deep-learning model of its kind
         if (key) {
-            const pk = c.mode === 'effigy' ? 'effigy' : 'mounds', cm = pk === 'effigy' ? c.effCm : c.moundCm;
+            const pk = c.mode, cm = tourCm(c, pk);
             if (cm && dlPatchCache[pk]) { dlPatchCache[pk].items[key] = { lat: c.lat, lon: c.lon, cm }; dlSavePatchesSoon(pk); }
             if (s) { s.labelled = s.labelled || {}; s.labelled[pk] = (s.labelled[pk] || 0) + 1; if (s.trained) delete s.trained[pk]; }
         }
@@ -4858,7 +5324,7 @@
         const h = tourReview && tourReview.history.pop(); if (!h) return;
         if (h.ans !== 'skip') {
             undoLastTraining();
-            const pk = h.c.mode === 'effigy' ? 'effigy' : 'mounds';
+            const pk = h.c.mode;
             if (h.key && dlPatchCache[pk]) { delete dlPatchCache[pk].items[h.key]; dlSavePatchesSoon(pk); }
             const s = tourData().sites.find(x => x.id === h.c.siteId);
             if (s && s.labelled && s.labelled[pk]) s.labelled[pk]--;
@@ -4875,9 +5341,54 @@
         tourFlushSaves();
         tourRetireFinished();
         updateDLSummary().catch(() => {});
-        const left = (tourQueue || []).length;
+        const left = (tourQueue || []).length, need = tourModelsToTrain();
+        if (!left && need.length) { tourTrainAll(`<b>Review finished</b>: ${n} answer${n === 1 ? '' : 's'} saved. `); return; }
         tourBar(`<b>Review ${left ? 'paused' : 'finished'}</b>: ${n} answer${n === 1 ? '' : 's'} saved to your training data.` + (left ? ` ${left} candidate${left === 1 ? '' : 's'} left.` : '') +
-            ' Train each deep-learning model (Mounds, and Effigy & linear mounds) to finish the sites you reviewed.', false);
+            (need.length ? ` <a href="#" onclick="event.preventDefault(); tourTrainAll();" style="font-weight:bold;">Train ${need.length === 1 ? 'the ' + DL_PROFILES[need[0]].label + ' model' : 'all ' + need.length + ' models'} now</a>` : ''), false);
+    }
+    // The models that reviewed sites still need trained into
+    function tourModelsToTrain() {
+        const q = tourQueue || [], need = new Set();
+        for (const s of tourData().sites) if (s.status === 'toured' && !q.some(c => c.siteId === s.id)) for (const k of tourModelsNeeded(s)) if (!(s.trained && s.trained[k])) need.add(k);
+        return Object.keys(DL_PROFILES).filter(k => need.has(k));
+    }
+    // Trains every model the reviewed sites need, one after another (mounds,
+    // effigy & linear mounds, shell middens); each finished site then leaves
+    // the list. The model you had selected is selected again afterwards.
+    let tourTraining = false;
+    async function tourTrainAll(prefix) {
+        if (tourTraining || tourBusy || dlBusy) { tourBar('Wait for the current tour, scan or training to finish.', false); return; }
+        await tourLoadQueue();
+        const need = tourModelsToTrain();
+        if (!need.length) { tourBar('No reviewed sites are waiting for training.', false); return; }
+        const m = document.getElementById('tourModal'); if (m) m.remove();
+        tourTraining = true;
+        const keep = DL.key, out = [], sitesBefore = tourData().sites.length, t0 = Date.now();
+        let poll = null;
+        try {
+            for (let i = 0; i < need.length; i++) {
+                const k = need[i], head = `${prefix || ''}<b>Training ${i + 1} of ${need.length}: ${DL_PROFILES[k].label}</b>`;
+                dlSelectProfile(k, false);
+                await updateDLSummary();
+                const before = (dlPrefs().model || {}).at || 0;
+                tourBar(head + '...', false);
+                poll = setInterval(() => { const st = document.getElementById('dlStatus'); if (st && st.innerText) tourBar(`${head}: ${escapeHtml(st.innerText)}`, false); }, 1000);
+                await dlTrain();
+                clearInterval(poll); poll = null;
+                const ok = ((dlPrefs().model || {}).at || 0) > before, msg = (document.getElementById('dlStatus') || {}).innerText || '';
+                out.push(ok ? `&#10003; ${DL_PROFILES[k].label}${dlPrefs().model.val ? ` (held-out check: found ${dlPrefs().model.val.posHit} of ${dlPrefs().model.val.pos})` : ''}`
+                            : `&#10007; ${DL_PROFILES[k].label}: ${escapeHtml(msg.split('.')[0])}`);
+            }
+        } finally {
+            if (poll) clearInterval(poll);
+            dlSelectProfile(keep, false);
+            tourTraining = false;
+            updateDLSummary().catch(() => {});
+        }
+        const gone = sitesBefore - tourData().sites.length;
+        tourBar(`${prefix || ''}<b>Training finished</b> (${Math.max(1, Math.round((Date.now() - t0) / 60000))} min): ${out.join('; ')}. ` +
+            (gone ? `${gone} site${gone === 1 ? '' : 's'} finished and left the tour list.` : 'No sites finished yet.') +
+            (out.some(x => x.startsWith('&#10007;')) ? ' A model that could not train keeps its sites on the list until it has enough examples.' : ''), false);
     }
     const dlPatchSaveTimers = {};
     function dlSavePatchesSoon(key) { clearTimeout(dlPatchSaveTimers[key]); dlPatchSaveTimers[key] = setTimeout(() => { delete dlPatchSaveTimers[key]; dlSavePatchesFor(key); }, 1500); }
@@ -5463,6 +5974,7 @@
         huntcamp: '<b>Phase 3: Transient hunt camps.</b> Small outcrops and overhangs facing any direction, with quick cover, placed beside game choke points (saddles, ridgeline gaps, canyon funnels) and with a commanding view over valley floors or stream crossings.',
         entrance: '<b>Horizontal cave entrances.</b> Walk-in cave mouths in bluff faces can\'t be seen from above in LiDAR, so this finds the settings they open into: cliff feet with karst drainage signs (amphitheater coves, springs or stream heads at the bluff foot, sinks upslope). South/southeast-facing cliffs and known caves score higher.',
         ceremonial: '<b>Phase 4: Deep ceremonial karst.</b> Maps the geological "plumbing" instead of surface relief: large closed sinkholes (possible collapsed karst windows), sinking streams that drain into cave entrances, and a cross-check against known cave surveys to confirm a system deep enough for a true Dark Zone.',
+        shell: '<b>Shell middens, mounds &amp; rings.</b> Heaps of discarded shell along coasts, estuaries and rivers: from low scatters to heaps 50 ft high, long ridges along old shorelines, and shell rings 150&ndash;300 ft across around an open plaza. Kept apart from the mound scan, because their size and shape would teach it the wrong thing. Finds every raised feature narrower than <i>Max width</i>, measures it and calls it a closed ring, an open ring or crescent, a ridge or a heap. Natural hills, levees, roads, spoil banks and sets of parallel beach ridges or dunes are ruled out. Tap the map on one it misses and choose <i>This is a Shell Midden</i> to see why.',
         caves: 'Closed depressions (dolines/sinkholes) from Priority-Flood depression filling.',
         mounds: 'Earthen mounds from a multi-scale Local Relief Model.',
         shelter: 'Flat ground at the base of a steep cliff, the setting rockshelters form in (any aspect).',
@@ -5484,8 +5996,9 @@
         document.getElementById('sinkShapeGroup').style.display = (mode === 'caves' || mode === 'ceremonial') ? 'block' : 'none';
         document.getElementById('modeDescription').innerHTML = MODE_DESCRIPTIONS[mode] || '';
         document.getElementById('moundPresetRow').style.display = mode === 'mounds' ? 'block' : 'none';
-        document.getElementById('geometricThresholdsGroup').style.display = (mode === 'settlement' || mode === 'effigy') ? 'none' : 'block';
+        document.getElementById('geometricThresholdsGroup').style.display = (mode === 'settlement' || mode === 'effigy' || mode === 'shell') ? 'none' : 'block';
         document.getElementById('effigyParamsGroup').style.display = mode === 'effigy' ? 'block' : 'none';
+        document.getElementById('shellParamsGroup').style.display = mode === 'shell' ? 'block' : 'none';
         document.getElementById('settlementWeightsGroup').style.display = mode === 'settlement' ? 'block' : 'none';
         // "Min Depth/Relief" doesn't quite describe what's being measured in
         // every mode - relabeled per mode so the number alongside it stays
@@ -5732,7 +6245,7 @@
     }
     // Every threshold-learning mode, in one place, so adding a mode means
     // updating this list once rather than every load/import/clear path.
-    const GEOMETRIC_MODES = ['caves', 'mounds', 'shelter', 'basecamp', 'huntcamp', 'ceremonial', 'entrance', 'effigy'];
+    const GEOMETRIC_MODES = ['caves', 'mounds', 'shelter', 'basecamp', 'huntcamp', 'ceremonial', 'entrance', 'effigy', 'shell'];
     // Fills in anything missing - older saved/exported data predates the
     // rejected lists and the karst workflow modes - so every code path can
     // rely on trainingData[mode].examples/.thresholds/.rejected existing.
@@ -5852,7 +6365,7 @@
     // needs to describe what's being detected - centralized so adding a mode
     // means updating these once, not hunting down every inline ternary.
     function modeFeatureName(mode) {
-        return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'effigy' ? 'Effigy / Linear Mound' : mode === 'dlmounds' ? 'Native Mound (deep learning)' : mode === 'dleffigy' ? 'Effigy / Linear Mound (deep learning)' : mode === 'shelter' ? 'Rockshelter / Overhang'
+        return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'effigy' ? 'Effigy / Linear Mound' : mode === 'shell' ? 'Shell Midden' : mode === 'dlshell' ? 'Shell Midden (deep learning)' : mode === 'dlmounds' ? 'Native Mound (deep learning)' : mode === 'dleffigy' ? 'Effigy / Linear Mound (deep learning)' : mode === 'shelter' ? 'Rockshelter / Overhang'
             : mode === 'basecamp' ? 'Base Camp Shelter (bluff-base bench)' : mode === 'huntcamp' ? 'Hunt Camp (outcrop at choke point)'
             : mode === 'ceremonial' ? 'Ceremonial Karst Entrance' : mode === 'entrance' ? 'Horizontal Cave Entrance Setting' : 'Feature';
     }
@@ -5937,7 +6450,7 @@
         const el = document.getElementById('trainingSummary');
         if (!el) return;
         const sigCount = ['caves', 'shelter', 'ceremonial'].reduce((n, m) => n + trainingData[m].examples.filter(e => e.significance).length, 0);
-        el.innerText = `Confirmed: ${trainingData.basecamp.examples.length} base camp, ${trainingData.huntcamp.examples.length} hunt camp, ${trainingData.ceremonial.examples.length} ceremonial karst, ${trainingData.entrance.examples.length} cave entrance, ${trainingData.caves.examples.length} cave/sinkhole, ${trainingData.mounds.examples.length} mound, ${trainingData.effigy.examples.length} effigy/linear mound, ${trainingData.shelter.examples.length} shelter, ${trainingData.settlement.examples.length} settlement example(s)` +
+        el.innerText = `Confirmed: ${trainingData.basecamp.examples.length} base camp, ${trainingData.huntcamp.examples.length} hunt camp, ${trainingData.ceremonial.examples.length} ceremonial karst, ${trainingData.entrance.examples.length} cave entrance, ${trainingData.caves.examples.length} cave/sinkhole, ${trainingData.mounds.examples.length} mound, ${trainingData.effigy.examples.length} effigy/linear mound, ${trainingData.shell.examples.length} shell midden, ${trainingData.shelter.examples.length} shelter, ${trainingData.settlement.examples.length} settlement example(s)` +
             (sigCount > 0 ? ` \u2014 ${sigCount} marked with burial/ritual significance` : '');
     }
     updateTrainingSummary();
@@ -5981,7 +6494,7 @@
             list.push(example);
         }
         saveTrainingData(true);
-        if (mode !== 'effigy') maybeWidenThresholds(mode, example);   // effigy scans use their own settings
+        if (mode !== 'effigy' && mode !== 'shell') maybeWidenThresholds(mode, example);   // effigy and shell scans use their own settings
         if (mode === 'mounds') { placeKnownMound(knownMounds().find(k => approxMetersBetween(k.lat, k.lon, lat, lon) < Math.max(10, 0.6 * k.d))); refreshLearnedMoundSettings(true); }
         updateTrainingSummary();
         if (checkboxEl) {
@@ -9194,6 +9707,7 @@
         const mode0 = document.getElementById('scanMode').value;
         if (mode0 === 'settlement') { await runSettlementScan(); return; }
         if (mode0 === 'effigy') { await runEffigyScan(); return; }
+        if (mode0 === 'shell') { await runShellScan(); return; }
 
         const status = document.getElementById("status");
         const scanBtn = document.getElementById("scanBtn");
@@ -10132,7 +10646,7 @@
     // scan's results drop straight into QGIS/ArcGIS or a Python pipeline.
     let lastExportRaster = null; // { data: Float32Array, name, mode } - the last scan's analysis raster
     function featureTypeCode(mode) {
-        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', dlmounds: 'DLMound', dleffigy: 'DLEffigy', effigy: 'Effigy', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial', entrance: 'CaveEntrnc' }[mode] || 'Feature';
+        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', dlmounds: 'DLMound', dleffigy: 'DLEffigy', dlshell: 'DLShell', effigy: 'Effigy', shell: 'Shell', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial', entrance: 'CaveEntrnc' }[mode] || 'Feature';
     }
     function updateExportButtons() {
         const hasFeatures = detectedFeatures.length > 0;
@@ -10181,11 +10695,11 @@
     //  - OsmAnd colour extension matching the app's marker colours
     const GPX_SYMBOLS = {
         basecamp: 'Campground', huntcamp: 'Hunting Area', ceremonial: 'Tunnel', entrance: 'Mine',
-        caves: 'Pin, Blue', mounds: 'Summit', effigy: 'Trail Head', shelter: 'Block, Red', settlement: 'Residence'
+        caves: 'Pin, Blue', mounds: 'Summit', effigy: 'Trail Head', shell: 'Fishing Area', shelter: 'Block, Red', settlement: 'Residence'
     };
     const GPX_TYPE_NAMES = {
         basecamp: 'Base camp', huntcamp: 'Hunt camp', ceremonial: 'Ceremonial karst', entrance: 'Cave entrance setting',
-        caves: 'Cave or sinkhole', mounds: 'Mound', effigy: 'Effigy or linear mound', shelter: 'Rockshelter', settlement: 'Settlement hotspot'
+        caves: 'Cave or sinkhole', mounds: 'Mound', effigy: 'Effigy or linear mound', shell: 'Shell midden', shelter: 'Rockshelter', settlement: 'Settlement hotspot'
     };
     const xmlEsc = (v) => String(v).replace(/[<>&"']/g, (ch) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&apos;' }[ch]));
     function buildGPX(features, title) {
@@ -10353,7 +10867,7 @@ ${wpts.join('\n')}
     function legend3D() {
         const counts = {};
         for (const f of detectedFeatures) if (modeVisible(f.mode)) counts[f.mode] = (counts[f.mode] || 0) + 1;
-        const modes = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy'].filter(m => counts[m]);
+        const modes = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy', 'dlshell'].filter(m => counts[m]);
         if (!modes.length) return '<span style="color:#cbd5e1">No detected features yet. Run a scan (or Scan All) to see them here.</span>';
         let html = modes.map(m => `<span style="color:${MODE_STYLE[m].color}">&#9632;</span> ${MODE_STYLE[m].label} (${counts[m]})`).join(' &nbsp;');
         if (last3DOverlays.length === 1 && last3DOverlays[0].highlightMask) html += ' &nbsp;<span style="color:#fbbf24">&#9632;</span> pipeline context (bluff faces / choke points / sinking streams)';
@@ -10520,7 +11034,7 @@ ${wpts.join('\n')}
         const stalk = Math.max(10, relief * 0.15);
         // Grouped by mode so each group can be drawn in its mode's colour
         const mk = [], mkGroups = [];
-        const ord3 = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy'];
+        const ord3 = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy', 'dlshell'];
         const featsSorted = detectedFeatures.filter(f => modeVisible(f.mode)).sort((a, b) => ord3.indexOf(a.mode) - ord3.indexOf(b.mode));
         for (const f of featsSorted) {
             if (f.lat > rb.n || f.lat < rb.s || f.lon < rb.w || f.lon > rb.e) continue;
@@ -10720,6 +11234,7 @@ ${wpts.join('\n')}
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="confirmMissedFeature('caves', ${r}, ${c})">This is a Cave/Sinkhole</button>
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="confirmMissedFeature('mounds', ${r}, ${c})">This is a Mound</button>
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="effigyCheckAt(${e.latlng.lat.toFixed(7)}, ${e.latlng.lng.toFixed(7)})">This is an Effigy</button>
+                        <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="shellCheckAt(${e.latlng.lat.toFixed(7)}, ${e.latlng.lng.toFixed(7)})">This is a Shell Midden</button>
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;margin-right:4px;" onclick="confirmMissedFeature('shelter', ${r}, ${c})">This is a Shelter</button>
                         <button style="width:auto;padding:4px 8px;font-size:0.8rem;" onclick="confirmSettlementSite(${e.latlng.lat.toFixed(6)}, ${e.latlng.lng.toFixed(6)}, event)">Confirm Known Site</button>
                      </div>
