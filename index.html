@@ -683,6 +683,9 @@
             <span class="val-display" id="maxResultsVal">40</span>
         </div>
         <div style="font-size:0.68rem; color:#94a3b8; margin-top:-4px; margin-bottom:6px; line-height:1.35;">Candidates are ranked by Match Score, and hits closer together than a mode's minimum spacing count as one landform. Only the best are shown.</div>
+        <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem;"><input type="checkbox" id="skipBuiltShapes" checked> Skip house pads and building foundations (straight sides, square corners)</label>
+        <label style="display:flex; align-items:center; gap:6px; font-size:0.8rem;"><input type="checkbox" id="skipMappedBuildings" checked> Skip buildings mapped in OpenStreetMap</label>
+        <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:6px; line-height:1.35;">Applies to the mound, effigy and shell midden scans and the deep-learning scans. A removed building leaves a flat, straight-sided patch in bare-earth LiDAR, and a raised house pad looks like a low mound. Flat-topped rectangles over 150 ft across or 6.5 ft tall are only flagged, never skipped, so platform mounds stay. The OpenStreetMap check sends the area's bounds to the Overpass service once per area; without a connection it is skipped.</div>
         <button id="scanBtn" onclick="runScanner()">Scan Downloaded DEM</button>
         <button id="scanAllBtn" onclick="runScanAll()" style="display:none; background:#7c3aed; color:white; border:none; cursor:pointer;">Scan All (every mode)</button>
         <div id="scanAllWrap" style="display:none; margin-top:6px;">
@@ -2728,6 +2731,187 @@
     }
     function toggleTrainingOnMap() { if (trainingMapShown) hideTrainingOnMap(); else showTrainingOnMap(true); }
 
+    // ==== HOUSES AND BUILDING FOUNDATIONS ====
+    // In a bare-earth DTM a removed building leaves a flat, straight-sided
+    // patch where the ground was interpolated under it, and a house built on
+    // a raised pad (common on flood plains) leaves the pad itself: both look
+    // like a low mound to any scan. Two checks keep them out:
+    //  1. shape: the raised area (above half its height) is measured against
+    //     the smallest rectangle around it, at every angle. A building
+    //     footprint fills that rectangle and its outline runs along the
+    //     rectangle's sides (straight walls, square corners); a mound is round
+    //     or oval (fills ~78%, touches the sides at four points) and domed.
+    //     Features over 150 ft across or 6.5 ft tall are only flagged, never
+    //     dropped, so rectangular platform mounds stay;
+    //  2. mapped buildings: building outlines from OpenStreetMap for the
+    //     loaded area (fetched once per area; skipped without a connection).
+    function builtSettings() {
+        const a = document.getElementById('skipBuiltShapes'), b = document.getElementById('skipMappedBuildings');
+        return { shape: a ? a.checked : true, mapped: b ? b.checked : true };
+    }
+    // Shape test around a point of a grid g ({data, w, h, bounds, res});
+    // dM = the feature's approximate width. Returns null when nothing
+    // isolated stands there, else { rect, edge, aspect, flat, peak, widthM, verdict }
+    function builtShapeAt(g, lat, lon, dM) {
+        const W = g.w, H = g.h, res = g.res, d = g.data, b = g.bounds;
+        const r0 = Math.round((b.n - lat) / (b.n - b.s) * H - 0.5), c0 = Math.round((lon - b.w) / (b.e - b.w) * W - 0.5);
+        if (r0 < 0 || c0 < 0 || r0 >= H || c0 >= W) return null;
+        const half = Math.max(8, Math.round(Math.max(20, 1.6 * (dM || 15)) / res));
+        const ra = Math.max(0, r0 - half), rb = Math.min(H - 1, r0 + half), ca = Math.max(0, c0 - half), cb = Math.min(W - 1, c0 + half);
+        const bw = cb - ca + 1, bh = rb - ra + 1;
+        if (bw < 8 || bh < 8) return null;
+        // ground: plane through the box's border
+        let n0 = 0, sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0;
+        for (let r = ra; r <= rb; r++) for (let c = ca; c <= cb; c++) {
+            if (r > ra + 1 && r < rb - 1 && c > ca + 1 && c < cb - 1) continue;
+            const z = d[r * W + c]; if (!(z > -100)) continue;
+            const x = c - c0, y = r - r0;
+            n0++; sx += x; sy += y; sz += z; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z;
+        }
+        if (n0 < 12) return null;
+        const A = [[n0, sx, sy], [sx, sxx, sxy], [sy, sxy, syy]], v = [sz, sxz, syz];
+        const det3 = (m) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+        const D = det3(A); if (!D) return null;
+        const sol = [0, 1, 2].map(j => det3(A.map((row, i) => row.map((x, k) => k === j ? v[i] : x))) / D);
+        const resid = new Float32Array(bw * bh);
+        for (let r = ra; r <= rb; r++) for (let c = ca; c <= cb; c++) {
+            const z = d[r * W + c];
+            resid[(r - ra) * bw + (c - ca)] = z > -100 ? z - (sol[0] + sol[1] * (c - c0) + sol[2] * (r - r0)) : -1e9;
+        }
+        // the highest point near the spot, then everything above half its height connected to it
+        const near = Math.max(2, Math.round(Math.max(6, 0.5 * (dM || 10)) / res));
+        let pk = -1, peak = -Infinity;
+        for (let r = Math.max(0, r0 - ra - near); r <= Math.min(bh - 1, r0 - ra + near); r++)
+            for (let c = Math.max(0, c0 - ca - near); c <= Math.min(bw - 1, c0 - ca + near); c++) { const vv = resid[r * bw + c]; if (vv > peak) { peak = vv; pk = r * bw + c; } }
+        if (pk < 0 || peak < 0.15) return null;
+        const t = 0.5 * peak, inS = new Uint8Array(bw * bh), q = [pk]; inS[pk] = 1;
+        let touches = false;
+        for (let k = 0; k < q.length; k++) {
+            const j = q[k], x = j % bw, y = (j / bw) | 0;
+            if (x === 0 || y === 0 || x === bw - 1 || y === bh - 1) touches = true;
+            for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                const xx = x + dx, yy = y + dy; if (xx < 0 || yy < 0 || xx >= bw || yy >= bh) continue;
+                const jj = yy * bw + xx; if (inS[jj] || resid[jj] < t) continue; inS[jj] = 1; q.push(jj);
+            }
+        }
+        const n = q.length;
+        if (touches || n < 12) return null;
+        // smallest rectangle around it, at every angle (3 degree steps)
+        const pts = q.map(j => [j % bw, (j / bw) | 0]);
+        const edgePts = q.filter(j => { const x = j % bw, y = (j / bw) | 0; return !inS[j - 1] || !inS[j + 1] || !inS[j - bw] || !inS[j + bw] || x === 0 || y === 0; }).map(j => [j % bw, (j / bw) | 0]);
+        let best = null;
+        for (let a = 0; a < 90; a += 3) {
+            const th = a * Math.PI / 180, ct = Math.cos(th), st = Math.sin(th);
+            let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity;
+            for (const [x, y] of pts) { const u = x * ct + y * st, w2 = -x * st + y * ct; if (u < u0) u0 = u; if (u > u1) u1 = u; if (w2 < v0) v0 = w2; if (w2 > v1) v1 = w2; }
+            const area = (u1 - u0 + 1) * (v1 - v0 + 1);
+            if (!best || area < best.area) best = { area, ct, st, u0, u1, v0, v1 };
+        }
+        const { ct, st, u0, u1, v0, v1 } = best;
+        let onSide = 0;
+        for (const [x, y] of edgePts) {
+            const u = x * ct + y * st, w2 = -x * st + y * ct;
+            if (Math.min(u - u0, u1 - u, w2 - v0, v1 - w2) <= 1.2) onSide++;
+        }
+        // straight edges: redraw the shape in the rectangle's own frame and
+        // count the outline cells that lie on a straight run of 3+ cells along
+        // one of its axes (a building's walls; a round shape steps instead)
+        const GU = Math.ceil(u1 - u0) + 3, GV = Math.ceil(v1 - v0) + 3, rg = new Uint8Array(GU * GV);
+        for (const [x, y] of pts) { const U = Math.round(x * ct + y * st - u0) + 1, V = Math.round(-x * st + y * ct - v0) + 1; rg[V * GU + U] = 1; }
+        for (let V = 1; V < GV - 1; V++) for (let U = 1; U < GU - 1; U++) { const i = V * GU + U; if (!rg[i] && rg[i - 1] + rg[i + 1] + rg[i - GU] + rg[i + GU] >= 3) rg[i] = 2; }
+        const on = (U, V) => U >= 0 && V >= 0 && U < GU && V < GV && rg[V * GU + U] > 0;
+        let bnd = 0, straightN = 0;
+        for (let V = 0; V < GV; V++) for (let U = 0; U < GU; U++) {
+            if (!on(U, V)) continue;
+            const up = !on(U, V - 1), dn = !on(U, V + 1), lf = !on(U - 1, V), rt = !on(U + 1, V);
+            if (!(up || dn || lf || rt)) continue;
+            bnd++;
+            const runH = (side) => { let L = 1; for (const s of [-1, 1]) for (let k = 1; k < 4; k++) { const UU = U + s * k; if (on(UU, V) && !on(UU, V + side)) L++; else break; } return L; };
+            const runV = (side) => { let L = 1; for (const s of [-1, 1]) for (let k = 1; k < 4; k++) { const VV = V + s * k; if (on(U, VV) && !on(U + side, VV)) L++; else break; } return L; };
+            if ((up && runH(-1) >= 3) || (dn && runH(1) >= 3) || (lf && runV(-1) >= 3) || (rt && runV(1) >= 3)) straightN++;
+        }
+        const straight = bnd ? straightN / bnd : 0;
+        let flatN = 0; for (const j of q) if (resid[j] >= 0.85 * peak) flatN++;
+        const rect = n / best.area, edge = edgePts.length ? onSide / edgePts.length : 0;
+        const sideA = (u1 - u0 + 1) * res, sideB = (v1 - v0 + 1) * res, aspect = Math.max(sideA, sideB) / Math.max(1e-6, Math.min(sideA, sideB));
+        const flat = flatN / n, widthM = Math.max(sideA, sideB);
+        // A pad or building patch is flat-topped with a sharp edge (most of it
+        // is within 15% of its top) as well as rectangular; a mound, even a
+        // small one whose outline is only a few cells across, is domed (about
+        // a quarter of it is that close to the top)
+        // L-shaped and long buildings fill less of their rectangle but keep
+        // straight walls
+        let verdict = null;
+        if (rect >= 0.85 && edge >= 0.6 && ((aspect <= 4 && flat >= 0.6) || (aspect <= 8 && flat >= 0.7))) verdict = 'built';
+        else if (rect >= 0.55 && straight >= 0.8 && flat >= 0.7 && aspect <= 8 && widthM >= 8) verdict = 'built';
+        else if (aspect <= 3 && rect >= 0.82 && flat >= 0.45) verdict = 'maybe';
+        // a platform mound is never dropped: over 150 ft across or 6.5 ft tall, only flagged
+        if (verdict === 'built' && (widthM > 45 || peak > 2.0)) verdict = 'maybe';
+        return { rect, edge, straight, aspect, flat, peak, widthM, verdict };
+    }
+    const BUILT_WHY = 'rectangular with straight sides and square corners: a house pad or building foundation';
+    function builtNote(bs) {
+        return `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Straight sides and square corners (fills ${Math.round(bs.rect * 100)}% of its outline rectangle): could be a house pad or building foundation. Check it on aerial imagery.</div>`;
+    }
+    // ---- Buildings mapped in OpenStreetMap ----
+    const osmBuildingCache = new Map();
+    async function osmBuildingsFor(bounds) {
+        const key = [bounds.s, bounds.w, bounds.n, bounds.e].map(v => v.toFixed(4)).join(',');
+        if (osmBuildingCache.has(key)) return osmBuildingCache.get(key);
+        const q = `[out:json][timeout:25];way["building"](${key});out geom;`;
+        let list = null;
+        for (const url of ['https://overpass-api.de/api/interpreter', 'https://overpass.kumi.systems/api/interpreter']) {
+            try {
+                const ctrl = new AbortController(), tm = setTimeout(() => ctrl.abort(), 20000);
+                const r = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, signal: ctrl.signal });
+                clearTimeout(tm);
+                if (!r.ok) continue;
+                const j = await r.json();
+                list = (j.elements || []).filter(e => e.geometry && e.geometry.length >= 3).map(e => {
+                    const poly = e.geometry.map(p => [p.lon, p.lat]);
+                    let s = 90, n = -90, w = 180, ee = -180;
+                    for (const [x, y] of poly) { if (y < s) s = y; if (y > n) n = y; if (x < w) w = x; if (x > ee) ee = x; }
+                    return { poly, s, n, w, e: ee };
+                });
+                break;
+            } catch (e) { console.warn('OpenStreetMap buildings lookup failed', e); }
+        }
+        osmBuildingCache.set(key, list);   // null = unavailable (offline or the service refused)
+        return list;
+    }
+    // A point on, or within padM of, a mapped building
+    function onMappedBuilding(list, lat, lon, padM) {
+        if (!list || !list.length) return false;
+        const mLat = padM / 111320, mLon = padM / (111320 * Math.cos(lat * Math.PI / 180));
+        for (const bd of list) {
+            if (lat < bd.s - mLat || lat > bd.n + mLat || lon < bd.w - mLon || lon > bd.e + mLon) continue;
+            if (pointInPoly(lon, lat, bd.poly)) return true;
+            // distance to each wall, in metres
+            const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 111320;
+            for (let i = 0; i < bd.poly.length; i++) {
+                const [x1, y1] = bd.poly[i], [x2, y2] = bd.poly[(i + 1) % bd.poly.length];
+                const ax = (x1 - lon) * kx, ay = (y1 - lat) * ky, bx = (x2 - lon) * kx, by = (y2 - lat) * ky;
+                const vx = bx - ax, vy = by - ay, tt = Math.max(0, Math.min(1, -(ax * vx + ay * vy) / (vx * vx + vy * vy || 1)));
+                if (Math.hypot(ax + tt * vx, ay + tt * vy) <= padM) return true;
+            }
+        }
+        return false;
+    }
+    // Both checks for one candidate; returns 'mapped' | 'built' | 'maybe' | null (+ the shape)
+    function builtCheck(g, buildings, lat, lon, dM) {
+        const S = builtSettings();
+        if (S.mapped && onMappedBuilding(buildings, lat, lon, Math.max(4, 0.3 * (dM || 10)))) return { why: 'mapped' };
+        if (!S.shape) return { why: null };
+        const bs = builtShapeAt(g, lat, lon, dM);
+        return { why: bs ? bs.verdict : null, bs };
+    }
+    // the buildings for the grid being scanned, when that check is on
+    async function builtBuildingsForScan(g) {
+        if (!builtSettings().mapped || !g || !g.bounds) return null;
+        const status = document.getElementById('status'); if (status) status.innerText = 'Looking up mapped buildings (OpenStreetMap)...';
+        return osmBuildingsFor(g.bounds);
+    }
+
     // ==== EFFIGY AND LINEAR MOUNDS ====
     // Effigy mounds (birds, bears, panthers, water spirits) and linear mounds
     // are long, narrow and low: typically 1-3 ft high and 15-40 ft wide, but
@@ -3010,6 +3194,7 @@
             if (d.edgeTouch && d.L > 150) why.push('long and running off the edge of the area: probably a road, levee or ridge');
             if (d.kind === 'ring') why.push('a closed ring (enclosure or pond bank), not an effigy');
             if (d.kind === 'linear' && !S.linear) why.push('a single strip (linear mounds are switched off)');
+            if (builtSettings().shape && !why.length) { const [la, lo] = effigyLatLon(d.anchor); const bs = builtShapeAt(gridInfo(true), la, lo, d.L); d.built = bs; if (bs && bs.verdict === 'built') why.push(BUILT_WHY); }
             d.why = why;
         }
         // parallel strips side by side: plough ridges, terraces, crop rows
@@ -3090,12 +3275,14 @@
             await new Promise(r => setTimeout(r, 0));
             const { resid, feats } = effigyFind(S);
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
-            let skipped = 0, resembled = 0;
+            const blds = await builtBuildingsForScan(gridInfo());
+            let skipped = 0, resembled = 0, onBld = 0;
             const ranked = [];
             for (const d of feats) {
                 if (d.why.length) continue;
                 const [lat, lon] = effigyLatLon(d.anchor);
                 if (trainingData.effigy.rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, lat, lon) < Math.max(20, 0.3 * d.L))) { skipped++; continue; }
+                if (builtSettings().mapped && onMappedBuilding(blds, lat, lon, 5)) { onBld++; continue; }
                 let score = 40 + 15 * Math.min(1, d.maxH / 0.8) + 15 * Math.min(1, d.flank / 15) + 10 * (1 - Math.min(1, d.widthCV)) + (d.bird ? 20 : d.kind === 'effigy' ? 12 : 5);
                 score = Math.min(99, Math.round(score));
                 const sv = similarityVerdict('effigy', effigyVector(d));
@@ -3106,6 +3293,7 @@
                     score = Math.round(score * (1 - 0.5 * sv.neg.sim));
                     simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles something you marked not real (${Math.round(sv.neg.sim * 100)}% similar), so it is ranked lower</div>`;
                 }
+                if (d.built && d.built.verdict === 'maybe') { score = Math.round(score * 0.7); simHtml += builtNote(d.built); }
                 ranked.push({ d, score, simHtml });
             }
             ranked.sort((a, b) => b.score - a.score);
@@ -3135,7 +3323,7 @@
             const dropped = feats.filter(d => d.why.length).length;
             status.innerText = `Effigy & linear mounds: ${shown.length} found` + (shown.length ? ` (${birds} possible bird${birds === 1 ? '' : 's'}, ${eff - birds} other effigy shape${eff - birds === 1 ? '' : 's'}, ${shown.length - eff} linear)` : '') +
                 `. ${dropped} narrow raised feature${dropped === 1 ? ' was' : 's were'} ruled out (roads, terraces, ridges, plough ridges, too small or too gentle)` +
-                (skipped ? `; ${skipped} skipped at spots you marked not real` : '') + (resembled ? `; ${resembled} skipped as look-alikes` : '') +
+                (skipped ? `; ${skipped} skipped at spots you marked not real` : '') + (resembled ? `; ${resembled} skipped as look-alikes` : '') + (onBld ? `; ${onBld} skipped on buildings mapped in OpenStreetMap` : '') +
                 (ranked.length > shown.length ? `; ${ranked.length - shown.length} more held back by Max results` : '') + '. Tap the map on one it missed and choose "This is an Effigy" to see why.';
         } finally { if (scanBtn) scanBtn.disabled = false; }
     }
@@ -3312,6 +3500,7 @@
             if (d.flank < S.minFlank) why.push(`sides too gentle (${d.flank.toFixed(1)}&deg;, needs ${S.minFlank}&deg;): a natural swell`);
             if (d.kind === 'ridge' && d.elong > 8 && d.L > 300) why.push('a long, even ridge (over 1,000 ft): a levee, road, causeway or spoil bank');
             if (d.edgeTouch && d.L > 300) why.push('long and running off the edge of the area: probably a levee, ridge or dune line');
+            if (builtSettings().shape && !why.length && d.kind === 'heap') { const [la, lo] = effigyLatLon(d.anchor); const bs = builtShapeAt(gridInfo(true), la, lo, d.L); d.built = bs; if (bs && bs.verdict === 'built') why.push(BUILT_WHY); }
             d.why = why;
         }
         // sets of parallel ridges: beach ridges, dune lines, dredge spoil rows
@@ -3372,12 +3561,14 @@
             await new Promise(r => setTimeout(r, 0));
             const { resid, feats } = shellFind(S);
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
-            let skipped = 0, resembled = 0;
+            const blds = await builtBuildingsForScan(gridInfo());
+            let skipped = 0, resembled = 0, onBld = 0;
             const ranked = [];
             for (const d of feats) {
                 if (d.why.length) continue;
                 const [lat, lon] = effigyLatLon(d.anchor);
                 if (trainingData.shell.rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, lat, lon) < Math.max(25, 0.3 * d.L))) { skipped++; continue; }
+                if (builtSettings().mapped && onMappedBuilding(blds, lat, lon, 5)) { onBld++; continue; }
                 let score = shellScore(d), simHtml = '';
                 const sv = similarityVerdict('shell', shellVector(d));
                 if (rejectsDrop(sv)) { resembled++; continue; }
@@ -3386,6 +3577,7 @@
                     score = Math.round(score * (1 - 0.5 * sv.neg.sim));
                     simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles something you marked not real (${Math.round(sv.neg.sim * 100)}% similar), so it is ranked lower</div>`;
                 }
+                if (d.built && d.built.verdict === 'maybe') { score = Math.round(score * 0.7); simHtml += builtNote(d.built); }
                 ranked.push({ d, score, simHtml });
             }
             ranked.sort((a, b) => b.score - a.score);
@@ -3415,7 +3607,7 @@
             const dropped = feats.filter(d => d.why.length).length;
             status.innerText = `Shell middens & rings: ${shown.length} found` + (shown.length ? ` (${cnt('ring')} closed ring${cnt('ring') === 1 ? '' : 's'}, ${cnt('crescent')} open ring/crescent, ${cnt('heap')} heap${cnt('heap') === 1 ? '' : 's'}, ${cnt('ridge')} ridge${cnt('ridge') === 1 ? '' : 's'})` : '') +
                 `. ${dropped} raised feature${dropped === 1 ? ' was' : 's were'} ruled out (hills, levees, dunes and beach ridges, too small or too gentle)` +
-                (skipped ? `; ${skipped} skipped at spots you marked not real` : '') + (resembled ? `; ${resembled} skipped as look-alikes` : '') +
+                (skipped ? `; ${skipped} skipped at spots you marked not real` : '') + (resembled ? `; ${resembled} skipped as look-alikes` : '') + (onBld ? `; ${onBld} skipped on buildings mapped in OpenStreetMap` : '') +
                 (ranked.length > shown.length ? `; ${ranked.length - shown.length} more held back by Max results` : '') + '. Tap the map on one it missed and choose "This is a Shell Midden" to see why.';
         } finally { if (scanBtn) scanBtn.disabled = false; }
     }
@@ -4420,14 +4612,23 @@
             for (const pk of sure) if (!kept.some(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < DL.PEAK_SEP)) kept.push(pk);
             const effigyModel = DL.TRAIN_MODE !== 'mounds', shellModel = DL.TRAIN_MODE === 'shell';   // effigyModel: either traced (non-mound) model
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
-            let skippedRejected = 0;
+            let skippedRejected = 0, skippedBuilt = 0;
             const results = [];
+            const dlBuildings = await builtBuildingsForScan(g);
             for (const pk of kept) {
                 if (results.length >= 2 * maxResults) break;
                 // your "Not real" marks and look-alike outlines always win
                 if (trainingData[DL.TRAIN_MODE].rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, pk.lat, pk.lon) < (effigyModel ? 30 : 20)) ||
                     (!effigyModel && trainingData.outlines.some(o => o.label === 'not' && pointInPoly(pk.lon, pk.lat, o.polygon.map(([a2, b2]) => [b2, a2]))))) { skippedRejected++; continue; }
-                results.push({ ...pk, meas: shellModel ? dlMeasureShell(g, pk.lat, pk.lon) : effigyModel ? dlMeasureEffigy(g, pk.lat, pk.lon) : dlMeasure(g, pk.lat, pk.lon) });
+                const meas = shellModel ? dlMeasureShell(g, pk.lat, pk.lon) : effigyModel ? dlMeasureEffigy(g, pk.lat, pk.lon) : dlMeasure(g, pk.lat, pk.lon);
+                // house pads and building foundations: mapped buildings, then the shape test
+                {
+                    const la = meas ? meas.lat : pk.lat, lo = meas ? meas.lon : pk.lon;
+                    if (builtSettings().mapped && onMappedBuilding(dlBuildings, la, lo, 5)) { skippedBuilt++; continue; }
+                    if (effigyModel && meas && meas.why && meas.why.includes(BUILT_WHY)) { skippedBuilt++; continue; }
+                    if (!effigyModel && builtSettings().shape) { const bs = builtShapeAt(g, la, lo, meas ? meas.d : 15); if (bs && bs.verdict === 'built') { skippedBuilt++; continue; } if (bs && bs.verdict === 'maybe') pk.builtMaybe = bs; }
+                }
+                results.push({ ...pk, meas });
                 if (results.length % 5 === 0) { dlSetStatus(`Measuring candidates: ${results.length}...`); await dlTick(); }
             }
             // A long effigy (or a big shell ring) can light up several windows
@@ -4468,7 +4669,7 @@
                 }
             }
             results.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!b2.meas - !!a.meas) || b2.p - a.p);
-            const heldBack = Math.max(0, kept.length - skippedRejected - maxResults);
+            const heldBack = Math.max(0, kept.length - skippedRejected - skippedBuilt - maxResults);
             results.length = Math.min(results.length, maxResults);
             clearModeDetections(DL.RESULT_MODE);
             window.__dlFeats = [];
@@ -4482,6 +4683,7 @@
                 (known ? ` (${known} of them your confirmed ${DL.NOUNS})` : '') +
                 (regular.length ? `; the regular ${scanName} agrees on ${agreed}` : `; run the regular ${scanName} too, then this one again, to see where both agree`) +
                 (skippedRejected ? `; ${skippedRejected} skipped at spots you marked not real` : '') +
+                (skippedBuilt ? `; ${skippedBuilt} skipped as house pads, building foundations or mapped buildings` : '') +
                 (mergedDup ? `; ${mergedDup} more hit${mergedDup === 1 ? '' : 's'} on the same ${DL.NOUNS} merged, so each is listed once` : '') +
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
                 ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
@@ -4630,6 +4832,7 @@
             <b>Network confidence:</b> ${Math.round(res.p * 100)}% (averaged over 8 rotations)<br>
             ${res.small ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; Smaller across than your smallest mound size setting (${Math.round(res.minD / FT_TO_M)} ft): could be a tree throw, boulder or natural knob.</div>` : ''}
             ${res.agree ? '<div style="margin:3px 0;color:#166534;background:#dcfce7;padding:3px 6px;border-radius:4px;font-size:0.8rem;"><b>&#10003; The regular mound scan found this too</b>: both methods agree.</div>' : ''}
+            ${res.builtMaybe ? builtNote(res.builtMaybe) : ''}
             ${m ? `<b>Height:</b> ${ft(m.h)}<br><b>Across:</b> ${ft(m.d)}<br><b>Roundness:</b> ${m.circ.toFixed(2)}, <b>stretch</b> ${m.elong.toFixed(2)}&times;<br>${m.rugged ? '<span style="color:#92400e;">&#9888; Rugged ground: measurements are rough.</span><br>' : ''}`
                  : '<span style="color:#92400e;">&#9888; No closed high to measure here: the network sees something mound-like, but the ground doesn\'t rise above a closed contour. Often a false alarm. If it is a mound, outline it to record its true size.</span><br>'}
             <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}${answer}`;
@@ -10167,7 +10370,8 @@
         //  4. show the top "Max results per mode".
         const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
         const spacingM = { basecamp: 60, huntcamp: 60, shelter: 40, mounds: 25, caves: 10, ceremonial: 15, entrance: 40 }[mode] || 20;
-        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0, resembledCount = 0, rejectionsLearned = 0;
+        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0, resembledCount = 0, rejectionsLearned = 0, builtSkipped = 0, mappedSkipped = 0;
+        const scanBuildings = mode === 'mounds' ? await builtBuildingsForScan(gridInfo()) : null, scanGrid = gridInfo(true);
         const ranked = [];
         // Spots you marked not real before features were recorded: learn what
         // is there now (first, so it applies to this whole scan)
@@ -10193,6 +10397,14 @@
                 continue;
             }
             const diameter = k._sizeD || 2 * Math.sqrt(k.area / Math.PI);
+            // house pads and building foundations
+            k._builtMaybe = null;
+            if (mode === 'mounds') {
+                const bc = builtCheck(scanGrid, scanBuildings, lat, lon, diameter);
+                if (bc.why === 'mapped') { mappedSkipped++; continue; }
+                if (bc.why === 'built') { builtSkipped++; continue; }
+                if (bc.why === 'maybe') k._builtMaybe = bc.bs;
+            }
             const waterDistM = waterwayDist
                 ? waterwayDist[Math.min(demHeight-1, Math.max(0, Math.round(k.centroidR))) * demWidth + Math.min(demWidth-1, Math.max(0, Math.round(k.centroidC)))] * effRes
                 : Infinity;
@@ -10221,6 +10433,7 @@
                 base = Math.round(base * (1 - 0.5 * sv.neg.sim));
                 k._simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles ${escapeHtml(sv.neg.kind)}${sv.neg.name ? ' ' + escapeHtml(sv.neg.name) : ''} (${Math.round(sv.neg.sim * 100)}% similar), so it is ranked lower</div>`;
             }
+            if (k._builtMaybe) { base = Math.round(base * 0.7); k._simHtml += builtNote(k._builtMaybe); }
             ranked.push({ k, lat, lon, diameter, base });
         }
         ranked.sort((x, y) => y.base - x.base || y.k.maxMetric - x.k.maxMetric);
@@ -10366,6 +10579,8 @@
             (heldBackCount ? `; ${heldBackCount} lower-ranked candidate(s) held back (raise Max results per mode to see them)` : '') +
             (suppressedCount > 0 ? `; ${suppressedCount} matched a spot you marked not real` : '') +
             (resembledCount > 0 ? `; ${resembledCount} closely resembled features you marked not real and were skipped` : '') +
+            (builtSkipped ? `; ${builtSkipped} skipped as house pads or building foundations (straight sides, square corners)` : '') +
+            (mappedSkipped ? `; ${mappedSkipped} skipped on buildings mapped in OpenStreetMap` : '') +
             (rejectionsLearned > 0 ? `; learned what ${rejectionsLearned} earlier "not real" mark(s) look like, so look-alikes are avoided from now on` : '') +
             (moundUnchecked ? `; ${moundUnchecked} weaker mound candidate(s) were not tested (only the best 400 get the LiDAR-error test; zoom in to scan a smaller area)` : '') + '.' +
             (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '') +
