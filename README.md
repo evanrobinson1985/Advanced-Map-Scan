@@ -122,6 +122,15 @@ Similarity to anything you confirmed real wins a tie. That matters because a sma
 
 **Review Training Data** lists everything you've taught the app, newest first, with **Go to** and **Remove** for each item. A confirmed mound's popup also has "Added by mistake? Remove this confirmation". Removing or undoing a confirmed mound takes it off the map and brings back the scan's own result for that spot. The legend and learned settings update with every change.
 
+**Review training images.** **🖼 Review training images** (in the Training panel, the Deep Learning section, and the training data list) shows the terrain under every training item as a shaded picture. That's the same sample each deep-learning model learns from, so you can spot items that aren't really mounds and fix them.
+
+- **Model:** choose *Mounds*, *Effigy & linear mounds* or *Shell middens & rings*. Each picture covers that model's window (48 m, 144 m or 216 m square). A red ring marks the labelled spot, drawn at the recorded size for mounds. A real one should be a clear rise right in the middle.
+- **Filters:** All, Real, Not real, Outlines, and *No image yet* (items whose area hasn't been loaded).
+- **Sorting:** newest, oldest, lowest first, or *Network disagrees most first*. That last option needs the training data check to have run with a trained mound model; it lists the real mounds the network doubts and the "not real" marks it thinks are mounds.
+- **Each card:** **Not real** / **Real** switches the label, 🗑 removes the item, and **Go to** shows it on the map. A "not real" item stays in your training data as a "not a mound" example, which also teaches the network.
+- **Several at once:** click pictures to select them (or **Select all shown**), then **Mark selected not real**, **Mark selected real** or **Remove selected**.
+- **Undo:** every change is an ordinary training edit, so **Undo** reverses it. Train the model again to use the cleaned data.
+
 **Show Training Data on Map** (in the Training panel, or **Show all on map** in the review list) puts everything on the map at once and zooms to fit it all:
 
 - confirmed features: the scan mode's colour with a green ✓;

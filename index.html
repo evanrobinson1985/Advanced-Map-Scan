@@ -721,6 +721,7 @@
         <div style="display:flex; gap:6px; margin-bottom:6px;">
             <button id="undoTrainingBtn" onclick="undoLastTraining()" style="font-size:0.8rem;" disabled>&#8630; Undo last training change</button>
             <button onclick="openTrainingReview()" style="font-size:0.8rem;">Review Training Data</button>
+            <button onclick="openTrainingGallery()" style="font-size:0.8rem;background:#e0e7ff;color:#3730a3;">&#128444; Review training images</button>
         </div>
         <div id="trainingIssuesNote" style="display:none;font-size:0.78rem;color:#92400e;background:#fef3c7;border-radius:6px;padding:6px 8px;margin-bottom:6px;"></div>
         <button onclick="openTrainingCheck()" style="font-size:0.8rem;background:#fef3c7;color:#92400e;">&#129658; Check training data for issues</button>
@@ -773,6 +774,7 @@
         <button id="dlCollectBtn" onclick="dlCollectNow()" style="font-size:0.8rem;">Collect samples from this DTM</button>
         <button id="dlTrainBtn" onclick="dlTrain()" style="background:#f3e8ff;color:#6b21a8;">&#129504; Train model</button>
         <button id="dlCheckBtn" onclick="openTrainingCheck()" style="font-size:0.8rem;background:#fef3c7;color:#92400e;">&#129658; Check training data</button>
+        <button id="dlGalleryBtn" onclick="openTrainingGallery(DL.key)" style="font-size:0.8rem;background:#e0e7ff;color:#3730a3;">&#128444; Review training images</button>
         <button id="dlTourBtn" onclick="openTourManager()" style="font-size:0.8rem;background:#ccfbf1;color:#115e59;">&#128506; Training-site tour (public mound sites)</button>
         <button id="dlScanBtn" onclick="dlScan()" style="background:#9333ea;color:#fff;">Scan with deep learning (area in view)</button>
         <button id="dlStopBtn" onclick="dlCancel = true;" style="display:none;background:#fee2e2;color:#991b1b;">Stop</button>
@@ -2479,6 +2481,7 @@
             <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:8px;">
               <b style="flex:1;">Your training data (${rows.length})</b>
               <button onclick="document.getElementById('trainingReview').remove(); showTrainingOnMap(true);" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;background:#dbeafe;color:#1e3a8a;" ${rows.length ? '' : 'disabled'}>&#128506; Show all on map</button>
+              <button onclick="document.getElementById('trainingReview').remove(); openTrainingGallery();" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;background:#e0e7ff;color:#3730a3;">&#128444; Images</button>
               <button onclick="undoLastTraining()" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;" ${(trainingData._undo || []).length ? '' : 'disabled'}>&#8630; Undo last</button>
               <button onclick="document.getElementById('trainingReview').remove()" style="width:auto;margin:0;padding:4px 10px;">Close</button></div>
             ${rows.length ? rows.map((r, i) => `<div style="padding:7px 12px;border-bottom:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;">
@@ -4768,6 +4771,182 @@
         clearModeDetections(DL.RESULT_MODE);
         await updateDLSummary();
         dlSetStatus('Deep-learning model and samples deleted.');
+    }
+
+    // ==== TRAINING IMAGES ====
+    // A gallery of the terrain sample under every training item of one model
+    // (mounds, effigy & linear mounds, shell middens), shaded so the ground
+    // can be judged at a glance: is there really a mound in the middle? Each
+    // card can be removed or switched between real and not real, one at a
+    // time or several selected at once. Every change is an ordinary training
+    // edit (Undo works), and the deep-learning models learn from the cleaned
+    // data the next time they are trained.
+    const gal = { model: 'mounds', filter: 'all', sort: 'new', shown: 60, sel: new Set(), items: [] };
+    async function openTrainingGallery(model) {
+        if (model && DL_PROFILES[model]) gal.model = model;
+        else if (typeof DL !== 'undefined' && DL && DL_PROFILES[DL.key]) gal.model = DL.key;
+        gal.sel.clear(); gal.shown = 60;
+        let el = document.getElementById('trainingGallery');
+        if (!el) {
+            el = document.createElement('div'); el.id = 'trainingGallery';
+            el.style.cssText = 'position:fixed;inset:0;z-index:4000;background:rgba(15,23,42,0.5);display:flex;align-items:flex-start;justify-content:center;padding:3vh 6px;box-sizing:border-box;';
+            el.onclick = (e) => { if (e.target === el) closeTrainingGallery(); };
+            document.body.appendChild(el);
+        }
+        await dlLoadPatchesFor(gal.model);
+        renderTrainingGallery();
+    }
+    function closeTrainingGallery() { const el = document.getElementById('trainingGallery'); if (el) el.remove(); gal.sel.clear(); }
+    // DL item key ('ex:ts', 'rj:ts', 'ol:id') -> training-data key
+    function galTrainingKey(model, dlKey) {
+        const mode = DL_PROFILES[model].TRAIN_MODE, [kind, rest] = [dlKey.slice(0, 2), dlKey.slice(3)];
+        if (kind === 'ol') return { list: 'outlines', id: rest };
+        return { list: kind === 'ex' ? 'examples' : 'rejected', mode, ts: Number(rest) };
+    }
+    function galCollect() {
+        const P = DL_PROFILES[gal.model], cs = gal.model === 'mounds' ? (dlPrefsFor('mounds').checkScores || {}).s || {} : {};
+        return dlWithProfile(gal.model, () => dlTrainingItems().map(it => {
+            const p = dlSampleFor(it), key = galTrainingKey(gal.model, it.key);
+            const { item } = trainingItemByKey(key);
+            const sc = cs[it.key];
+            return { ...it, key, dlKey: it.key, cm: p && approxMetersBetween(p.lat, p.lon, it.lat, it.lon) < 2 ? p.cm : null, ts: item ? (item.ts || 0) : 0,
+                     outline: key.list === 'outlines', net: sc ? sc[0] : null, tooBig: it.label && it.d > P.MAX_POS_D, verified: item && item.verified };
+        }));
+    }
+    function galVisible() {
+        let v = gal.items;
+        if (gal.filter === 'real') v = v.filter(x => x.label === 1);
+        else if (gal.filter === 'not') v = v.filter(x => x.label === 0);
+        else if (gal.filter === 'outlines') v = v.filter(x => x.outline);
+        else if (gal.filter === 'noimg') v = v.filter(x => !x.cm);
+        v = v.slice();
+        if (gal.sort === 'new') v.sort((a, b) => b.ts - a.ts);
+        else if (gal.sort === 'old') v.sort((a, b) => a.ts - b.ts);
+        else if (gal.sort === 'height') v.sort((a, b) => (a.h == null) - (b.h == null) || (a.h || 0) - (b.h || 0));
+        else if (gal.sort === 'net') v.sort((a, b) => (a.net == null) - (b.net == null) || (a.label ? a.net - b.net : b.net - a.net));
+        return v;
+    }
+    function renderTrainingGallery() {
+        const el = document.getElementById('trainingGallery'); if (!el) return;
+        const keepScroll = el.firstElementChild ? el.firstElementChild.scrollTop : 0;
+        gal.items = galCollect();
+        const P = DL_PROFILES[gal.model], all = gal.items, vis = galVisible(), page = vis.slice(0, gal.shown);
+        for (const k of [...gal.sel]) if (!all.some(x => x.dlKey === k)) gal.sel.delete(k);
+        const cnt = (f) => all.filter(f).length, sq = Math.round(P.PATCH * P.RES), px = 132;
+        const btn = 'width:auto;margin:0;padding:4px 9px;font-size:0.76rem;';
+        const pill = (v, label, n) => `<button onclick="gal.filter='${v}'; gal.shown=60; renderTrainingGallery();" style="${btn}${gal.filter === v ? 'background:#1e293b;color:#fff;' : ''}">${label} (${n})</button>`;
+        const real = P.NOUN.charAt(0).toUpperCase() + P.NOUN.slice(1);
+        const hasNet = all.some(x => x.net != null);
+        el.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:1100px;width:100%;max-height:92vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
+          <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;z-index:2;">
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              <b style="flex:1;min-width:160px;">Training images</b>
+              <select onchange="openTrainingGallery(this.value)" style="width:auto;margin:0;padding:4px;">${Object.values(DL_PROFILES).map(p => `<option value="${p.key}" ${p.key === gal.model ? 'selected' : ''}>${p.label}</option>`).join('')}</select>
+              <select onchange="gal.sort=this.value; renderTrainingGallery();" style="width:auto;margin:0;padding:4px;">
+                <option value="new" ${gal.sort === 'new' ? 'selected' : ''}>Newest first</option><option value="old" ${gal.sort === 'old' ? 'selected' : ''}>Oldest first</option>
+                <option value="height" ${gal.sort === 'height' ? 'selected' : ''}>Lowest first</option>
+                ${hasNet ? `<option value="net" ${gal.sort === 'net' ? 'selected' : ''}>Network disagrees most first</option>` : ''}</select>
+              <button onclick="undoLastTraining(); renderTrainingGallery();" style="${btn}" ${(trainingData._undo || []).length ? '' : 'disabled'}>&#8630; Undo</button>
+              <button onclick="closeTrainingGallery()" style="${btn}">Close</button>
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px;">
+              ${pill('all', 'All', all.length)}${pill('real', 'Real', cnt(x => x.label === 1))}${pill('not', 'Not real', cnt(x => x.label === 0))}${gal.model === 'mounds' ? pill('outlines', 'Outlines', cnt(x => x.outline)) : ''}${pill('noimg', 'No image yet', cnt(x => !x.cm))}
+            </div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+              <span style="font-size:0.78rem;color:#475569;">${gal.sel.size} selected</span>
+              <button onclick="galSelectAll(true)" style="${btn}">Select all shown</button>
+              <button onclick="galSelectAll(false)" style="${btn}" ${gal.sel.size ? '' : 'disabled'}>Clear</button>
+              <button onclick="galBulk('not')" style="${btn}background:#fef3c7;color:#92400e;" ${gal.sel.size ? '' : 'disabled'}>&#10007; Mark selected not real</button>
+              <button onclick="galBulk('real')" style="${btn}background:#dcfce7;color:#166534;" ${gal.sel.size ? '' : 'disabled'}>&#10003; Mark selected real</button>
+              <button onclick="galBulk('remove')" style="${btn}background:#fee2e2;color:#991b1b;" ${gal.sel.size ? '' : 'disabled'}>&#128465; Remove selected</button>
+            </div>
+            <div style="font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4;">Shaded terrain ${sq} m (${Math.round(sq / FT_TO_M)} ft) square around each item, light from the north-west; the red ring is the spot that was labelled${gal.model === 'mounds' ? ', drawn at the recorded size' : ''}. A real ${P.NOUN} should be a clear rise right in the middle. <b>Remove</b> deletes the item; <b>Not real</b> keeps it as a "not a ${P.NOUN}" example, which also teaches the network. Click a picture to select it.</div>
+          </div>
+          <div id="galGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(${px + 16}px,1fr));gap:8px;padding:10px 12px;"></div>
+          ${vis.length > page.length ? `<div style="padding:4px 12px 14px;text-align:center;"><button onclick="gal.shown += 60; renderTrainingGallery();" style="${btn}">Show more (${vis.length - page.length} left)</button></div>` : ''}
+          ${vis.length ? '' : `<div style="padding:18px;color:#64748b;">Nothing here. ${all.length ? 'Try another filter.' : `No ${P.NOUNS} or not-${P.NOUNS} in your training data for this model yet.`}</div>`}
+        </div>`;
+        const grid = el.querySelector('#galGrid'), ft = metersToFeetInches;
+        page.forEach(x => {
+            const card = document.createElement('div'), sel = gal.sel.has(x.dlKey);
+            const col = x.label ? '#16a34a' : '#dc2626';
+            card.style.cssText = `border:2px solid ${sel ? '#2563eb' : '#e2e8f0'};border-radius:8px;padding:6px;background:${sel ? '#eff6ff' : '#fff'};display:flex;flex-direction:column;gap:4px;`;
+            const pic = document.createElement('div');
+            pic.style.cssText = `position:relative;width:${px}px;height:${px}px;margin:0 auto;cursor:pointer;`;
+            pic.onclick = () => { if (gal.sel.has(x.dlKey)) gal.sel.delete(x.dlKey); else gal.sel.add(x.dlKey); renderTrainingGallery(); };
+            if (x.cm) {
+                const cv = tourHillshade(x.cm, P.RES, px); cv.style.display = 'block'; pic.appendChild(cv);
+                const dPx = gal.model === 'mounds' && x.d ? Math.max(10, Math.min(px - 4, x.d / sq * px)) : 16;
+                const ring = document.createElement('div');
+                ring.style.cssText = `position:absolute;left:${(px - dPx) / 2}px;top:${(px - dPx) / 2}px;width:${dPx}px;height:${dPx}px;border:1.5px solid rgba(239,68,68,0.85);border-radius:50%;box-sizing:border-box;pointer-events:none;`;
+                pic.appendChild(ring);
+            } else {
+                pic.style.cssText += 'background:#f1f5f9;border:1px dashed #94a3b8;border-radius:6px;display:flex;align-items:center;justify-content:center;text-align:center;font-size:0.72rem;color:#64748b;padding:6px;box-sizing:border-box;';
+                pic.innerText = 'No terrain sample yet: load a DTM that covers it';
+            }
+            const tick = document.createElement('div');
+            tick.style.cssText = `position:absolute;left:4px;top:4px;width:16px;height:16px;border-radius:4px;border:2px solid #fff;background:${sel ? '#2563eb' : 'rgba(15,23,42,0.35)'};color:#fff;font:bold 11px/14px sans-serif;text-align:center;`;
+            tick.innerHTML = sel ? '&#10003;' : '';
+            pic.appendChild(tick);
+            card.appendChild(pic);
+            const info = document.createElement('div');
+            info.style.cssText = 'font-size:0.72rem;line-height:1.35;';
+            info.innerHTML = `<b style="color:${col};">${x.label ? '&#10003; ' + (x.outline ? 'Mound outline' : real) : '&#10007; ' + (x.outline ? 'Look-alike outline' : 'Not real')}</b>${x.verified ? ' <span title="You checked this item">&#128270;</span>' : ''}<br>
+                <span style="color:#475569;">${x.name ? escapeHtml(x.name) + '<br>' : ''}${x.h != null ? ft(x.h) + ' tall' : ''}${x.h != null && x.d ? ', ' : ''}${x.d ? ft(x.d) + ' across' : ''}${x.ts > 1e9 ? `${x.h != null || x.d ? '<br>' : ''}${new Date(x.ts).toLocaleDateString()}` : ''}</span>
+                ${x.net != null ? `<br><span style="color:${(x.label ? x.net < 0.3 : x.net > 0.7) ? '#b45309' : '#64748b'};">Network: ${Math.round(x.net * 100)}% ${P.NOUN}</span>` : ''}
+                ${x.tooBig ? '<br><span style="color:#64748b;">Too big for the network\'s window (not used)</span>' : ''}`;
+            card.appendChild(info);
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;gap:4px;flex-wrap:wrap;';
+            const mk = (txt, style, fn, title) => { const b = document.createElement('button'); b.innerHTML = txt; b.title = title || ''; b.style.cssText = 'width:auto;flex:1;margin:0;padding:3px 4px;font-size:0.7rem;' + style; b.onclick = (e) => { e.stopPropagation(); fn(); }; row.appendChild(b); };
+            mk(x.label ? '&#10007; Not real' : '&#10003; Real', x.label ? 'background:#fef3c7;color:#92400e;' : 'background:#dcfce7;color:#166534;', () => { galFlip(x); renderTrainingGallery(); }, x.label ? `Keep it as a "not a ${P.NOUN}" example` : `Count it as a real ${P.NOUN}`);
+            mk('&#128465;', 'background:#fee2e2;color:#991b1b;flex:0 0 30px;', () => { removeTrainingItem(x.key); renderTrainingGallery(); }, 'Remove from the training data');
+            mk('Go to', 'flex:0 0 46px;', () => { closeTrainingGallery(); map.setView([x.lat, x.lon], gal.model === 'mounds' ? 19 : 18); }, 'Show it on the map');
+            card.appendChild(row);
+            grid.appendChild(card);
+        });
+        if (el.firstElementChild) el.firstElementChild.scrollTop = keepScroll;
+    }
+    function galSelectAll(on) {
+        if (on) for (const x of galVisible().slice(0, gal.shown)) gal.sel.add(x.dlKey); else gal.sel.clear();
+        renderTrainingGallery();
+    }
+    // Real <-> not real, as one ordinary training edit
+    function galFlip(x) {
+        const P = DL_PROFILES[gal.model];
+        if (x.key.list === 'outlines') {
+            applyTrainingEdit(x.key, ({ item }) => { item.label = item.label === 'mound' ? 'not' : 'mound'; if (item.label === 'mound') delete item.lookalike; return x.key; },
+                x.label ? 'Outline changed to a look-alike.' : 'Outline changed to a mound.');
+            return;
+        }
+        const mode = x.key.mode, to = x.key.list === 'examples' ? 'rejected' : 'examples';
+        applyTrainingEdit(x.key, ({ list, idx, item }) => {
+            if (to === 'rejected') {
+                const sc = item.scanner || {};
+                item.features = { diameterM: item.diameter, heightM: item.maxMetric, circularity: item.circularity, elongation: item.elongation,
+                                  template: sc.template != null ? sc.template : null, groundSlopeDeg: sc.groundSlopeDeg != null ? sc.groundSlopeDeg : null, flankSlopeDeg: null };
+                for (const k of ['diameter', 'maxMetric', 'circularity', 'elongation', 'scanner', 'significance']) delete item[k];
+            } else {
+                const f = item.features || {};
+                item.diameter = f.diameterM; item.maxMetric = f.heightM;
+                item.circularity = f.circularity != null ? f.circularity : 0.7; item.elongation = f.elongation != null ? f.elongation : 1.2;
+                if (mode === 'mounds' && f.template != null) item.scanner = { heightM: f.heightM, diameterM: f.diameterM, circularity: f.circularity, elongation: f.elongation, template: f.template, groundSlopeDeg: f.groundSlopeDeg || 0 };
+                delete item.features;
+            }
+            list.splice(idx, 1); trainingData[mode][to].push(item);
+            return { list: to, mode, ts: x.key.ts };
+        }, to === 'rejected' ? `Marked not a real ${P.NOUN}.` : `Marked as a real ${P.NOUN}.`);
+    }
+    function galBulk(action) {
+        const P = DL_PROFILES[gal.model];
+        const xs = gal.items.filter(x => gal.sel.has(x.dlKey) && (action === 'remove' || (action === 'not' ? x.label === 1 : x.label === 0)));
+        if (!xs.length) { document.getElementById('status').innerText = `None of the selected items ${action === 'not' ? 'are marked real' : 'are marked not real'}.`; return; }
+        const verb = action === 'remove' ? 'Remove' : action === 'not' ? 'Mark as not real:' : 'Mark as real:';
+        if (!confirm(`${verb} ${xs.length} item${xs.length === 1 ? '' : 's'}? Each one can be undone with Undo.`)) return;
+        for (const x of xs) { if (action === 'remove') removeTrainingItem(x.key); else galFlip(x); }
+        gal.sel.clear();
+        document.getElementById('status').innerText = `${action === 'remove' ? 'Removed' : 'Changed'} ${xs.length} training item${xs.length === 1 ? '' : 's'} for the ${P.label} model. Train the model again to use the cleaned data.`;
+        renderTrainingGallery();
     }
 
     // ==== TRAINING-SITE TOUR ====
