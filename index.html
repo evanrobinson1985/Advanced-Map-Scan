@@ -3133,6 +3133,22 @@
                  cr: sr, cc: sc, orientation: 0.5 * Math.atan2(2 * mrc, mcc - mrr), areaM2, circ: Math.min(1, 4 * Math.PI * areaM2 / Math.max(1, (perim * res) ** 2)),
                  anchor: toG(anchor), paths, pix };
     }
+    const EFFIGY_MAX_H = 3;   // m: taller is an embankment or a natural ridge
+    // Why one traced feature isn't an effigy (empty = it passes)
+    function effigyChecks(d, S) {
+        const why = [];
+        if (d.L < S.minL) why.push(`shorter than the ${Math.round(S.minL / FT_TO_M)} ft minimum`);
+        if (d.meanW > S.maxW * 1.15) why.push(`wider than the ${Math.round(S.maxW / FT_TO_M)} ft maximum`);
+        if (d.meanW < 2.5) why.push('too thin for a mound (under 8 ft wide): a bank, ditch edge or plough ridge');
+        if (d.maxH > EFFIGY_MAX_H) why.push('taller than any effigy (over 10 ft): an embankment or natural ridge');
+        if (d.flank < S.minFlank) why.push(`sides too gentle (${d.flank.toFixed(1)}&deg;, needs ${S.minFlank}&deg;): a broad natural swell`);
+        if (d.straight > 0.97 && d.L > 200) why.push('dead straight for over 650 ft: a road, fence line or railroad');
+        if (d.edgeTouch && d.L > 150) why.push('long and running off the edge of the area: probably a road, levee or ridge');
+        if (d.kind === 'ring') why.push('a closed ring (enclosure or pond bank), not an effigy');
+        if (d.kind === 'linear' && !S.linear) why.push('a single strip (linear mounds are switched off)');
+        if (builtSettings().shape && !why.length) { const [la, lo] = effigyLatLon(d.anchor); const bs = builtShapeAt(gridInfo(true), la, lo, d.L); d.built = bs; if (bs && bs.verdict === 'built') why.push(BUILT_WHY); }
+        return why;
+    }
     // Finds and describes every narrow raised feature on the current grid.
     // Returns { resid, feats } (feats unfiltered, with .why for rejections).
     function effigyFind(S, onlyNear) {
@@ -3164,6 +3180,17 @@
         const N8 = [-W - 1, -W, -W + 1, -1, 1, W - 1, W, W + 1];
         let id = 0;
         const minPx = Math.max(12, (S.minL * 2.5) / (res * res));
+        // ground taller than any effigy, grown by half the widest effigy: a
+        // ridge or bluff edge together with its sides (made when first needed)
+        let tallNear = null;
+        const effigyTallNear = () => {
+            if (tallNear) return tallNear;
+            const t = new Float32Array(n); for (let i = 0; i < n; i++) t[i] = resid[i] > EFFIGY_MAX_H ? 1 : 0;
+            const rr = Math.max(1, Math.round(S.maxW / 2 / res));
+            const g2 = vhFilter(vhFilter(t, W, H, rr, true, true), W, H, rr, true, false);
+            tallNear = new Uint8Array(n); for (let i = 0; i < n; i++) tallNear[i] = g2[i] > 0.5 ? 1 : 0;
+            return tallNear;
+        };
         for (let s = 0; s < n; s++) {
             if (lab[s] || resid[s] < hi) continue;
             if (onlyNear && Math.hypot(((s / W) | 0) - onlyNear.r, (s % W) - onlyNear.c) > onlyNear.px) continue;
@@ -3179,24 +3206,39 @@
                 if (pix.length > 400000) break;
             }
             if (pix.length < minPx) continue;
+            // A component spreading over 1,300 ft (on broken ground the low
+            // fringe of ridges, terraces and bluff edges can join into one
+            // network) is a landform, not an effigy: it is split into its
+            // parts at least Min height high, without gap joining, so an
+            // effigy beside a ridge is still found on its own
+            // The same when part of it is taller than any effigy: an effigy
+            // whose wing runs into a ridge is cut free of the ridge
+            let br0 = H, br1 = 0, bc0 = W, bc1 = 0, top = 0;
+            for (const i of pix) { const r = (i / W) | 0, c = i % W; if (r < br0) br0 = r; if (r > br1) br1 = r; if (c < bc0) bc0 = c; if (c > bc1) bc1 = c; if (resid[i] > top) top = resid[i]; }
+            if (pix.length >= 400000 || Math.max(br1 - br0, bc1 - bc0) * res > 400 || top > EFFIGY_MAX_H) {
+                // only ground at effigy height (Min height to 10 ft): ridges and
+                // bluff edges taller than any effigy are cut away, which frees
+                // an effigy whose wing or tail runs into one
+                const core = new Uint8Array(n), tall = effigyTallNear();
+                for (const i of pix) if (resid[i] >= hi && !tall[i]) core[i] = 1;
+                for (const s2 of pix) {
+                    if (core[s2] !== 1) continue;
+                    const part = [s2]; core[s2] = 2;
+                    for (let k = 0; k < part.length; k++) {
+                        const i = part[k], c = i % W;
+                        for (const o of N8) { const j = i + o; if (j < 0 || j >= n || core[j] !== 1 || Math.abs((j % W) - c) > 1) continue; core[j] = 2; part.push(j); }
+                    }
+                    if (part.length < minPx) continue;
+                    const d = effigyDescribe(part, resid, slopeDeg, W, H, res, S);
+                    if (d) feats.push(d);
+                }
+                continue;
+            }
             const d = effigyDescribe(pix, resid, slopeDeg, W, H, res, S);
             if (d) feats.push(d);
         }
         // why each would be dropped
-        for (const d of feats) {
-            const why = [];
-            if (d.L < S.minL) why.push(`shorter than the ${Math.round(S.minL / FT_TO_M)} ft minimum`);
-            if (d.meanW > S.maxW * 1.15) why.push(`wider than the ${Math.round(S.maxW / FT_TO_M)} ft maximum`);
-            if (d.meanW < 2.5) why.push('too thin for a mound (under 8 ft wide): a bank, ditch edge or plough ridge');
-            if (d.maxH > 3) why.push('taller than any effigy (over 10 ft): an embankment or natural ridge');
-            if (d.flank < S.minFlank) why.push(`sides too gentle (${d.flank.toFixed(1)}&deg;, needs ${S.minFlank}&deg;): a broad natural swell`);
-            if (d.straight > 0.97 && d.L > 200) why.push('dead straight for over 650 ft: a road, fence line or railroad');
-            if (d.edgeTouch && d.L > 150) why.push('long and running off the edge of the area: probably a road, levee or ridge');
-            if (d.kind === 'ring') why.push('a closed ring (enclosure or pond bank), not an effigy');
-            if (d.kind === 'linear' && !S.linear) why.push('a single strip (linear mounds are switched off)');
-            if (builtSettings().shape && !why.length) { const [la, lo] = effigyLatLon(d.anchor); const bs = builtShapeAt(gridInfo(true), la, lo, d.L); d.built = bs; if (bs && bs.verdict === 'built') why.push(BUILT_WHY); }
-            d.why = why;
-        }
+        for (const d of feats) d.why = effigyChecks(d, S);
         // parallel strips side by side: plough ridges, terraces, crop rows
         if (S.skipFields) {
             const lin = feats.filter(d => d.kind === 'linear' && !d.why.length);
@@ -3213,7 +3255,7 @@
                 if (par >= 2) a.why.push('one of a set of parallel strips side by side: plough ridges, terraces or crop rows');
             }
         }
-        return { resid, feats };
+        return { resid, feats, tallNear: effigyTallNear };
     }
     // shape class in the similarity "template" slot, so a strip you marked
     // not real doesn't make birds look alike to it: 0 linear, 0.5 effigy, 1 bird
@@ -3341,12 +3383,42 @@
         try {
             await withGrid(cropGrid(g, r0, c0, r1, c1), async () => {
                 const rr = r - r0, cc = c - c0, snap = Math.round(10 / effRes);
-                const { feats } = effigyFind({ ...S, minL: Math.min(S.minL, 10) }, null);
+                const { feats, resid, tallNear } = effigyFind({ ...S, minL: Math.min(S.minL, 10) }, null);
                 // the feature under (or nearest within 10 m of) the tap
-                let best = null, bd = Infinity;
+                let best = null, bd = Infinity, bestPix = -1;
                 for (const d of feats) for (let k = 0; k < d.pix.length; k += Math.max(1, d.pix.length >> 10)) {
                     const i = d.pix[k], dist = Math.hypot(((i / demWidth) | 0) - rr, (i % demWidth) - cc);
-                    if (dist < bd) { bd = dist; best = d; }
+                    if (dist < bd) { bd = dist; best = d; bestPix = i; }
+                }
+                // Raised ground that reaches far beyond the tap (it joins a
+                // ridge, terrace or bluff edge) is measured only within 330 ft
+                // of the tap, from the part connected to it, so the trace stays
+                // on the feature you meant instead of the whole network
+                let localNote = '';
+                if (best && bd <= snap) {
+                    const reach = Math.round(100 / effRes), Wd = demWidth;
+                    const isFar = (i) => Math.hypot(((i / Wd) | 0) - rr, (i % Wd) - cc) > reach;
+                    if (best.L > 400 || best.limbs > 10 || best.edgeTouch || best.pix.some(isFar)) {
+                        const tall = tallNear(), tapTall = tall[bestPix];
+                        const band = (i) => tapTall || !tall[i];
+                        const inSet = new Set(best.pix.filter(i => !isFar(i) && band(i))), part = [bestPix], seen = new Set([bestPix]);
+                        for (let k = 0; k < part.length; k++) {
+                            const i = part[k];
+                            for (const o of [-Wd - 1, -Wd, -Wd + 1, -1, 1, Wd - 1, Wd, Wd + 1]) { const j = i + o; if (inSet.has(j) && !seen.has(j) && Math.abs((j % Wd) - (i % Wd)) <= 1) { seen.add(j); part.push(j); } }
+                        }
+                        const d2 = part.length >= 12 ? effigyDescribe(part, resid, computeSlopeDegrees(resid, demWidth, demHeight, effRes, -100), demWidth, demHeight, effRes, S) : null;
+                        if (d2) {
+                            d2.why = effigyChecks(d2, S);
+                            const cut = part.some(i => Math.hypot(((i / Wd) | 0) - rr, (i % Wd) - cc) > reach - 2);
+                            if (cut) d2.why.push('part of raised ground that continues more than 330 ft beyond your tap (a ridge, terrace or bluff edge)');
+                            localNote = `<div style="font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;margin:3px 0;">The raised ground here joins a much larger network (${metersToFeetInches(best.L)} of ridges, terraces or edges), so only the part within 330 ft of your tap is traced and measured.</div>`;
+                            best = d2;
+                        }
+                    }
+                }
+                if ((!best || bd > snap) && resid[rr * demWidth + cc] > EFFIGY_MAX_H) {
+                    L.popup({ maxWidth: 360 }).setLatLng([lat, lon]).setContent(`<b>Too tall for an effigy</b><br>The ground here stands ${metersToFeetInches(resid[rr * demWidth + cc])} above its surroundings: a natural ridge, bluff edge or embankment. Effigy mounds are under 10 ft high. If an effigy joins this ridge, tap on the effigy itself.`).openOn(map);
+                    return;
                 }
                 if (!best || bd > snap) {
                     L.popup({ maxWidth: 360 }).setLatLng([lat, lon]).setContent(`<b>No narrow raised feature here</b><br>Nothing at least ${metersToFeetInches(S.minH)} high and under ${metersToFeetInches(S.maxW)} wide within 33 ft of where you tapped. Try a lower <b>Min height</b> or a wider <b>Max width</b> in the Effigy settings, or tap right on the mound.`).openOn(map);
@@ -3367,13 +3439,20 @@
                     chk(!(best.straight > 0.97 && best.L > 200), 'Not a long, dead-straight road or fence line') +
                     chk(!best.why.some(w2 => /parallel/.test(w2)), 'Not one of a set of parallel strips');
                 const hl = L.layerGroup().addTo(map);
-                for (const p of best.paths) if (p.length >= 2) L.polyline(p.map(effigyLatLon), { color: '#b45309', weight: 4 }).addTo(hl);
+                // the traced centre lines only for a readable shape; a tangle
+                // of ridges gets just its outline
+                const simple = best.limbs <= 8 && best.L <= 400;
+                if (simple) for (const p of best.paths) if (p.length >= 2) L.polyline(p.map(effigyLatLon), { color: '#b45309', weight: 4 }).addTo(hl);
                 L.polygon(f.polygon, { color: '#b45309', weight: 1, dashArray: '4,4', fillOpacity: 0.05 }).addTo(hl);
-                const pop = L.popup({ maxWidth: 380 }).setLatLng([f.lat, f.lon]).setContent(`<b>${effigyKind(best)}</b><br>
+                // the popup opens where you tapped; the saved point is the
+                // effigy's body when that is close by, else your tap
+                const nearAnchor = approxMetersBetween(f.lat, f.lon, lat, lon) <= Math.max(40, 0.5 * best.L);
+                if (!nearAnchor) { f.lat = lat; f.lon = lon; }
+                const pop = L.popup({ maxWidth: 380 }).setLatLng([lat, lon]).setContent(`<b>${effigyKind(best)}</b><br>${localNote}
                     <table style="font-size:0.8rem;border-collapse:collapse;margin:4px 0;">${rows}</table>
                     ${why.length ? `<div style="font-size:0.78rem;color:#991b1b;">Why the scan skips it: ${why.join('; ')}.</div>` : '<div style="font-size:0.78rem;color:#166534;">It passes every check; the scan should list it (unless Max results is full or it resembles something you marked not real).</div>'}
                     <button style="margin-top:8px;padding:6px 10px;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;font-weight:bold;" onclick="confirmFeature('effigy', ${best.L.toFixed(2)}, ${f.k.circularity.toFixed(3)}, ${f.k.elongation.toFixed(3)}, ${best.maxH.toFixed(3)}, ${f.lat.toFixed(6)}, ${f.lon.toFixed(6)}, event, this, null, null)">&#10003; Save as a confirmed effigy / linear mound</button>
-                    <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">The brown line is the shape the app traced.</div>`).openOn(map);
+                    <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">${simple ? 'The brown line is the shape the app traced.' : 'The dashed brown outline is the raised ground the app traced (too tangled to draw its centre lines).'}</div>`).openOn(map);
                 pop.on('remove', () => map.removeLayer(hl));
             });
         } finally { scanInProgress = false; }
@@ -3687,13 +3766,13 @@
     // effigy scan uses). DL is the one selected in the panel.
     const DL_PROFILES = {
         mounds: { key: 'mounds', label: 'Mounds', PATCH: 48, INPUT: 40, RES: 1.0, BORDER: 3, STRIDE: 4, BG_PER_AREA: 150, BG_MAX: 4000, MAX_POS_D: 35, MAX_SCAN_CELLS: 2.5e6,
-                  CH: 3, MODEL_VERSION: 2, MODEL_URL: 'indexeddb://lidar-dl-mounds-v2', EPOCHS: 40, IDB_KEY: 'dlPatches', PREFS_KEY: 'dl', TRAIN_MODE: 'mounds',
+                  CH: 4, MODEL_VERSION: 3, MODEL_URL: 'indexeddb://lidar-dl-mounds-v3', EPOCHS: 40, IDB_KEY: 'dlPatches', PREFS_KEY: 'dl', TRAIN_MODE: 'mounds',
                   RESULT_MODE: 'dlmounds', FEATURES: 'mound', PEAK_SEP: 15, AVOID_M: 35, NOUN: 'mound', NEG_NOUN: 'not-mound', NOUNS: 'mounds', NEG_NOUNS: 'not-mounds' },
         effigy: { key: 'effigy', label: 'Effigy & linear mounds', PATCH: 72, INPUT: 64, RES: 2.0, BORDER: 4, STRIDE: 8, BG_PER_AREA: 120, BG_MAX: 1500, MAX_POS_D: 1e9, MAX_SCAN_CELLS: 1.2e6,
-                  CH: 3, MODEL_VERSION: 1, MODEL_URL: 'indexeddb://lidar-dl-effigy-v1', EPOCHS: 40, IDB_KEY: 'dlPatchesEffigy', PREFS_KEY: 'dlEffigy', TRAIN_MODE: 'effigy',
+                  CH: 4, MODEL_VERSION: 2, MODEL_URL: 'indexeddb://lidar-dl-effigy-v2', EPOCHS: 40, IDB_KEY: 'dlPatchesEffigy', PREFS_KEY: 'dlEffigy', TRAIN_MODE: 'effigy',
                   RESULT_MODE: 'dleffigy', FEATURES: 'effigy', PEAK_SEP: 40, AVOID_M: 80, NOUN: 'effigy', NEG_NOUN: 'not-effigy', NOUNS: 'effigies', NEG_NOUNS: 'not-effigies' },
         shell: { key: 'shell', label: 'Shell middens & rings', PATCH: 72, INPUT: 64, RES: 3.0, BORDER: 4, STRIDE: 6, BG_PER_AREA: 100, BG_MAX: 1500, MAX_POS_D: 1e9, MAX_SCAN_CELLS: 1.5e6,
-                 CH: 3, MODEL_VERSION: 1, MODEL_URL: 'indexeddb://lidar-dl-shell-v1', EPOCHS: 40, IDB_KEY: 'dlPatchesShell', PREFS_KEY: 'dlShell', TRAIN_MODE: 'shell', CLIP: 15,
+                 CH: 4, MODEL_VERSION: 2, MODEL_URL: 'indexeddb://lidar-dl-shell-v2', EPOCHS: 40, IDB_KEY: 'dlPatchesShell', PREFS_KEY: 'dlShell', TRAIN_MODE: 'shell', CLIP: 15,
                  RESULT_MODE: 'dlshell', FEATURES: 'shell', PEAK_SEP: 60, AVOID_M: 100, NOUN: 'shell midden', NEG_NOUN: 'not-midden', NOUNS: 'shell middens', NEG_NOUNS: 'not-middens' }
     };
     let DL = DL_PROFILES.mounds;
@@ -3803,36 +3882,71 @@
     }
     // Least-squares plane through the border ring of an INPUT x INPUT window,
     // precomputed once: plane = M * [sum z, sum x z, sum y z]
+    // Least-squares curved surface (a quadratic: tilt plus the bend of a
+    // hill top, hollow or valley side) through the border ring of an
+    // INPUT x INPUT window, precomputed once per model: its 6 coefficients
+    // are inv * (sums of z, xz, yz, x2z, xyz, y2z over the ring)
     function dlPlaneFor(P) {
-        if (P._plane) return P._plane;
-        const N = P.INPUT, B = P.BORDER, idx = [];
-        let sx = 0, sy = 0, sxx = 0, syy = 0, sxy = 0;
+        if (P._quad) return P._quad;
+        const N = P.INPUT, B = P.BORDER, idx = [], X = [], Y = [];
         for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
             if (r >= B && r < N - B && c >= B && c < N - B) continue;
-            const x = c - (N - 1) / 2, y = r - (N - 1) / 2;
-            idx.push(r * N + c); sx += x; sy += y; sxx += x * x; syy += y * y; sxy += x * y;
+            idx.push(r * N + c); X.push((c - (N - 1) / 2) / N); Y.push((r - (N - 1) / 2) / N);
         }
-        const n = idx.length, A = [[n, sx, sy], [sx, sxx, sxy], [sy, sxy, syy]];
-        const det = (m) => m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-        const D = det(A), inv = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
-            const m = A.filter((_, a) => a !== j).map(row => row.filter((_, b) => b !== i));
-            inv[i][j] = ((i + j) % 2 ? -1 : 1) * (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / D;
+        const basis = (x, y) => [1, x, y, x * x, x * y, y * y];
+        const A = Array.from({ length: 6 }, () => new Array(6).fill(0));
+        for (let k = 0; k < idx.length; k++) { const b = basis(X[k], Y[k]); for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) A[i][j] += b[i] * b[j]; }
+        // Gauss-Jordan inverse
+        const M = A.map((row, i) => [...row, ...Array.from({ length: 6 }, (_, j) => i === j ? 1 : 0)]);
+        for (let c = 0; c < 6; c++) {
+            let p = c; for (let r = c + 1; r < 6; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+            [M[c], M[p]] = [M[p], M[c]];
+            const d = M[c][c]; for (let j = 0; j < 12; j++) M[c][j] /= d;
+            for (let r = 0; r < 6; r++) if (r !== c) { const f = M[r][c]; for (let j = 0; j < 12; j++) M[r][j] -= f * M[c][j]; }
         }
-        return (P._plane = { idx, inv });
+        const inv = M.map(row => row.slice(6));
+        return (P._quad = { idx, X, Y, inv, basis });
     }
-    // In place: remove the tilt of the ground (plane through the window's
-    // border) and clip, so the network sees relief in metres above it
+    // In place: remove the ground's tilt and curve (the surface through the
+    // window's border) and clip, so the network sees relief in metres above
+    // it. Returns the ground slope at the window's centre, in degrees.
     function dlDetrend(w, off) {
-        const N = DL.INPUT, { idx, inv } = dlPlaneFor(DL), CL = DL.CLIP || 5;
-        let s = 0, sxz = 0, syz = 0;
-        for (const i of idx) { const z = w[off + i], x = (i % N) - (N - 1) / 2, y = Math.floor(i / N) - (N - 1) / 2; s += z; sxz += x * z; syz += y * z; }
-        const a = inv[0][0] * s + inv[0][1] * sxz + inv[0][2] * syz, bx = inv[1][0] * s + inv[1][1] * sxz + inv[1][2] * syz, by = inv[2][0] * s + inv[2][1] * sxz + inv[2][2] * syz;
-        for (let r = 0; r < N; r++) for (let c = 0; c < N; c++) {
-            const i = off + r * N + c, v = w[i] - (a + bx * (c - (N - 1) / 2) + by * (r - (N - 1) / 2));
-            w[i] = v > CL ? CL : v < -CL ? -CL : v;
+        const N = DL.INPUT, { idx, X, Y, inv, basis } = dlPlaneFor(DL), CL = DL.CLIP || 5;
+        const s = [0, 0, 0, 0, 0, 0];
+        for (let k = 0; k < idx.length; k++) { const z = w[off + idx[k]], b = basis(X[k], Y[k]); for (let i = 0; i < 6; i++) s[i] += b[i] * z; }
+        const co = inv.map(row => row.reduce((a, v, j) => a + v * s[j], 0));
+        for (let r = 0; r < N; r++) {
+            const y = (r - (N - 1) / 2) / N;
+            for (let c = 0; c < N; c++) {
+                const x = (c - (N - 1) / 2) / N, i = off + r * N + c;
+                const v = w[i] - (co[0] + co[1] * x + co[2] * y + co[3] * x * x + co[4] * x * y + co[5] * y * y);
+                w[i] = v > CL ? CL : v < -CL ? -CL : v;
+            }
         }
+        // the linear terms are the slope at the centre, per window width
+        return Math.atan(Math.hypot(co[1], co[2]) / (N * DL.RES)) * 180 / Math.PI;
     }
+    // Ground slope (degrees) at a point: a plane through 24 points on a
+    // circle of radiusM around it, so the feature itself doesn't count
+    function dlGroundSlopeAt(g, lat, lon, radiusM) {
+        const sample = dlSampler(g), mLat = 1 / 111320, mLon = 1 / (111320 * Math.cos(lat * Math.PI / 180));
+        let n = 0, sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0;
+        for (let k = 0; k < 24; k++) {
+            const a = k / 24 * 2 * Math.PI, x = radiusM * Math.cos(a), y = radiusM * Math.sin(a), z = sample(lat + y * mLat, lon + x * mLon);
+            if (z !== z) continue;
+            n++; sx += x; sy += y; sz += z; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z;
+        }
+        if (n < 12) return null;
+        const mx = sx / n, my = sy / n, mz = sz / n;
+        const cxx = sxx / n - mx * mx, cyy = syy / n - my * my, cxy = sxy / n - mx * my, cxz = sxz / n - mx * mz, cyz = syz / n - my * mz;
+        const det = cxx * cyy - cxy * cxy; if (!det) return null;
+        const bx = (cxz * cyy - cyz * cxy) / det, by = (cyz * cxx - cxz * cxy) / det;
+        return Math.atan(Math.hypot(bx, by)) * 180 / Math.PI;
+    }
+    // the 4th view: the ground slope under the window, the same everywhere
+    // in it (0 = flat, 1 = 20 degrees, capped at 1.5), so the network can
+    // learn that a bump on a steep hillside is less likely a mound
+    function dlSlopeView(slopeDeg) { return Math.min(1.5, slopeDeg / 20); }
     // The three views the network gets of a window of raw elevations
     // (N x N at woff in w), written interleaved (N x N x 3) to out at ooff:
     //  1. relief: height above the tilted ground (plane through the
@@ -3847,7 +3961,7 @@
         if (DL.FEATURES === 'shell') return dlFeaturesShell(w, woff, out, ooff);
         const N = DL.INPUT, M = N + 1, C = DL.CH, R = dlScratch().rel, dlInt = dlScratch().int;
         for (let i = 0; i < N * N; i++) R[i] = w[woff + i];
-        dlDetrend(R, 0);
+        const sv = dlSlopeView(dlDetrend(R, 0));
         for (let r = 0; r < N; r++) { let rs = 0; for (let c = 0; c < N; c++) { rs += R[r * N + c]; dlInt[(r + 1) * M + c + 1] = dlInt[r * M + c + 1] + rs; } }
         for (let r = 0; r < N; r++) {
             const r0 = Math.max(0, r - 3), r1 = Math.min(N, r + 4);
@@ -3860,6 +3974,7 @@
                 out[o] = R[i];
                 out[o + 1] = fine > 4 ? 4 : fine < -4 ? -4 : fine;
                 out[o + 2] = Math.min(2, 2 * Math.hypot(gx, gy));
+                out[o + 3] = sv;
             }
         }
     }
@@ -3871,7 +3986,7 @@
     function dlFeaturesEffigy(w, woff, out, ooff) {
         const N = DL.INPUT, C = DL.CH, R = dlScratch().rel;
         for (let i = 0; i < N * N; i++) R[i] = w[woff + i];
-        dlDetrend(R, 0);
+        const sv = dlSlopeView(dlDetrend(R, 0));
         const trend = boxSmooth(R, N, N, 12, -1e9), zd = new Float32Array(N * N);
         for (let i = 0; i < N * N; i++) zd[i] = R[i] - trend[i];
         const th = topHat(zd, N, N, 6, -1e9), res = DL.RES;
@@ -3883,6 +3998,7 @@
             out[o] = nr > 4 ? 4 : nr;
             out[o + 1] = Math.max(-2.5, Math.min(2.5, 0.5 * R[i]));
             out[o + 2] = Math.min(2, 4 * Math.hypot(gx, gy));
+            out[o + 3] = sv;
         }
     }
     // The shell model's three views of a window (192 m at 3 m): the raised
@@ -3892,7 +4008,7 @@
     function dlFeaturesShell(w, woff, out, ooff) {
         const N = DL.INPUT, C = DL.CH, R = dlScratch().rel, res = DL.RES;
         for (let i = 0; i < N * N; i++) R[i] = w[woff + i];
-        dlDetrend(R, 0);
+        const sv = dlSlopeView(dlDetrend(R, 0));
         const trend = boxSmooth(R, N, N, 20, -1e9), zd = new Float32Array(N * N);
         for (let i = 0; i < N * N; i++) zd[i] = R[i] - trend[i];
         const th = topHat(zd, N, N, 12, -1e9);
@@ -3904,6 +4020,7 @@
             out[o] = b > 5 ? 5 : b;
             out[o + 1] = Math.max(-3, Math.min(3, 0.3 * R[i]));
             out[o + 2] = Math.min(2, 2 * Math.hypot(gx, gy));
+            out[o + 3] = sv;
         }
     }
     // Copies an N x N window turned/mirrored by t (0-7: the 8 ways a square
@@ -4614,7 +4731,7 @@
             for (const pk of sure) if (!kept.some(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < DL.PEAK_SEP)) kept.push(pk);
             const effigyModel = DL.TRAIN_MODE !== 'mounds', shellModel = DL.TRAIN_MODE === 'shell';   // effigyModel: either traced (non-mound) model
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
-            let skippedRejected = 0, skippedBuilt = 0;
+            let skippedRejected = 0, skippedBuilt = 0, skippedSteep = 0;
             const results = [];
             const dlBuildings = await builtBuildingsForScan(g);
             for (const pk of kept) {
@@ -4629,6 +4746,15 @@
                     if (builtSettings().mapped && onMappedBuilding(dlBuildings, la, lo, 5)) { skippedBuilt++; continue; }
                     if (effigyModel && meas && meas.why && meas.why.includes(BUILT_WHY)) { skippedBuilt++; continue; }
                     if (!effigyModel && builtSettings().shape) { const bs = builtShapeAt(g, la, lo, meas ? meas.d : 15); if (bs && bs.verdict === 'built') { skippedBuilt++; continue; } if (bs && bs.verdict === 'maybe') pk.builtMaybe = bs; }
+                    // the mound scan's hillside rules: nothing on ground steeper
+                    // than 20 degrees; above the Flat-ground slope setting only a
+                    // clean mound shape counts (others are listed last, flagged)
+                    pk.groundSlope = dlGroundSlopeAt(g, la, lo, effigyModel ? 60 : 25);
+                    if (!effigyModel && pk.groundSlope != null) {
+                        if (pk.groundSlope > MOUND_SLOPE_HARD_MAX) { skippedSteep++; continue; }
+                        const flatMax = parseFloat((document.getElementById('moundMaxGroundSlope') || { value: 8 }).value);
+                        pk.hillside = pk.groundSlope > flatMax && !(meas && meas.template != null && meas.template >= 0.85 && meas.elong <= 1.5 && meas.circ >= 0.45);
+                    }
                 }
                 results.push({ ...pk, meas });
                 if (results.length % 5 === 0) { dlSetStatus(`Measuring candidates: ${results.length}...`); await dlTick(); }
@@ -4670,8 +4796,8 @@
                     res.known = knownMounds().some(k2 => approxMetersBetween(k2.lat, k2.lon, la, lo) < Math.max(10, 0.6 * k2.d));
                 }
             }
-            results.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!b2.meas - !!a.meas) || b2.p - a.p);
-            const heldBack = Math.max(0, kept.length - skippedRejected - skippedBuilt - maxResults);
+            results.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!a.hillside - !!b2.hillside) || (!!b2.meas - !!a.meas) || b2.p - a.p);
+            const heldBack = Math.max(0, kept.length - skippedRejected - skippedBuilt - skippedSteep - maxResults);
             results.length = Math.min(results.length, maxResults);
             clearModeDetections(DL.RESULT_MODE);
             window.__dlFeats = [];
@@ -4686,6 +4812,7 @@
                 (regular.length ? `; the regular ${scanName} agrees on ${agreed}` : `; run the regular ${scanName} too, then this one again, to see where both agree`) +
                 (skippedRejected ? `; ${skippedRejected} skipped at spots you marked not real` : '') +
                 (skippedBuilt ? `; ${skippedBuilt} skipped as house pads, building foundations or mapped buildings` : '') +
+                (skippedSteep ? `; ${skippedSteep} skipped on ground steeper than ${MOUND_SLOPE_HARD_MAX}&deg;`.replace('&deg;', '°') : '') +
                 (mergedDup ? `; ${mergedDup} more hit${mergedDup === 1 ? '' : 's'} on the same ${DL.NOUNS} merged, so each is listed once` : '') +
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
                 ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
@@ -4835,6 +4962,8 @@
             ${res.small ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; Smaller across than your smallest mound size setting (${Math.round(res.minD / FT_TO_M)} ft): could be a tree throw, boulder or natural knob.</div>` : ''}
             ${res.agree ? '<div style="margin:3px 0;color:#166534;background:#dcfce7;padding:3px 6px;border-radius:4px;font-size:0.8rem;"><b>&#10003; The regular mound scan found this too</b>: both methods agree.</div>' : ''}
             ${res.builtMaybe ? builtNote(res.builtMaybe) : ''}
+            ${res.hillside ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; On a ${Math.round(res.groundSlope)}&deg; hillside without a clean mound shape: often a natural knob or ridge nose (the regular scan would drop it). Listed last.</div>` : ''}
+            ${res.groundSlope != null ? `<b>Ground slope:</b> ${res.groundSlope.toFixed(1)}&deg;<br>` : ''}
             ${m ? `<b>Height:</b> ${ft(m.h)}<br><b>Across:</b> ${ft(m.d)}<br><b>Roundness:</b> ${m.circ.toFixed(2)}, <b>stretch</b> ${m.elong.toFixed(2)}&times;<br>${m.rugged ? '<span style="color:#92400e;">&#9888; Rugged ground: measurements are rough.</span><br>' : ''}`
                  : '<span style="color:#92400e;">&#9888; No closed high to measure here: the network sees something mound-like, but the ground doesn\'t rise above a closed contour. Often a false alarm. If it is a mound, outline it to record its true size.</span><br>'}
             <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}${answer}`;

@@ -61,6 +61,8 @@ A second *spur pass* detrends with the curved surface alone, so a mound on a spu
 2. **Keep the narrow rises.** A morphological top-hat keeps every raised feature narrower than *Max width*, at its own height, whatever its length or shape. Hills and broad swells drop out.
 3. **Outline them.** It keeps features at least *Min height* high, following their tapering ends down to 40% of that.
    - **One effigy is one object.** Plough-worn or eroded stretches can drop a wing, neck or tail below *Min height* for a few feet, which would split one effigy into several "mounds". Gaps up to *Join gaps up to* wide (20 ft by default) are bridged first, so the pieces are traced and classified as one shape. In a test, a bird with a 13 ft ploughed-out gap in one wing was two unrelated pieces without joining, and one bird with its full wingspan with it.
+   - **An effigy beside a ridge.** Where the raised ground spreads over 1,300 ft, or part of it stands taller than any effigy (10 ft), only the ground at effigy height is kept. Ridges and bluff edges are removed together with their sides. This cuts an effigy free of a ridge its wing or tail runs into, instead of tracing the whole network as one tangled "effigy".
+   - **This is an Effigy.** The popup opens where you tapped. If the raised ground there joins a larger network, only the part within 330 ft of the tap is traced, and the popup says so. A tangle is drawn as an outline, not a mass of lines. Tapping a ridge taller than any effigy says so.
 4. **Trace the shape.** It thins each feature to its centre line and reads its limbs, length, width, height and side steepness.
 5. **Classify it.**
    - Two long, roughly opposite limbs make a **bird**, and its wingspan is reported.
@@ -219,6 +221,14 @@ How it works:
 - **Background across all areas.** Background is kept up to 4,000 samples. Over the cap, samples are trimmed from whichever area has the most, so every area keeps a share. An area whose background was dropped by an older version is sampled again the next time it is loaded.
 - **Save deep-learning model / Load deep-learning model.** Saving writes one file (`lidar-deep-learning-model-DATE.json.gz`). It holds the trained network, all its terrain samples, its accuracy check and a copy of your training data, which says which samples are mounds. Load it to restore everything after clearing the browser, or to use the model on another device. Loading adds to what is already there: samples and training data are merged without duplicates, and the network in the file replaces the one in the browser. If the file's network was made by an older method, its samples are still loaded and you press Train model.
 - **Answering.** **Yes** / **Not real** on a candidate saves to the same training data as the regular scan and takes its terrain sample at once. Train again to update the network.
+
+**Slope in the deep-learning models.** Every window the networks see has the ground's tilt and curve removed: a curved surface fitted to the window's border (a hilltop, hollow or valley side, not just a flat tilt). A mound on a curved 25° hillside reaches the network at the same 1.2 m as on flat ground in tests. Each window also carries a fourth view, the ground slope under it, so a network can learn that a bump on a steep hillside is less likely a mound. Deep-learning mound results follow the mound scan's hillside rules:
+
+- nothing on ground steeper than 20°;
+- above the *Flat-ground slope* setting, a candidate without a clean mound shape is flagged as a likely natural knob and listed last;
+- each popup gives the ground slope.
+
+This changed what the networks see, so each model must be trained once more. Your terrain samples are kept, and the panel says when to retrain.
 
 **Three models.** The **Model** menu at the top of the Deep Learning section switches between *Mounds*, *Effigy & linear mounds* and *Shell middens & rings*. Each has its own samples, network, accuracy check and save file. The effigy model:
 
