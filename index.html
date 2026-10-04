@@ -2599,6 +2599,35 @@
     // look-alike), its height, width and name, and Move lets you drag it to
     // where it really is (an outline moves with its marker). Each edit is one
     // Undo step, and confirmed mounds on the map follow it at once.
+    // ---- Changing an item's kind: mound / effigy / shell midden ----
+    const KIND_MODES = ['mounds', 'effigy', 'shell'];
+    const KIND_LABEL = { mounds: 'Mound', effigy: 'Effigy / linear mound', shell: 'Shell midden' };
+    // what only the mound scan records doesn't carry over
+    function trainingKindFix(item, toMode) {
+        if (toMode !== 'mounds') { delete item.scanner; if (item.features) { item.features.template = null; item.features.groundSlopeDeg = null; } }
+    }
+    // An item keeps its time stamp, so its old terrain sample is dropped
+    // and the new model takes one the next time the area is loaded (now,
+    // when it is)
+    async function trainingKindAfter(fromMode, toMode, tsList) {
+        try {
+            for (const k of [fromMode, toMode]) await dlLoadPatchesFor(k);
+            const old = dlPatchCache[fromMode];
+            for (const ts of tsList || []) { delete old.items['ex:' + ts]; delete old.items['rj:' + ts]; }
+            await dlSavePatchesFor(fromMode);
+            if (fullDemGrid) await dlHarvestFor(toMode, fullDemGrid, false);
+            updateDLSummary().catch(() => {});
+        } catch (e) { console.warn(e); }
+    }
+    // Moves one training item (key {list, mode, ts}) to another kind; one Undo step
+    function trainingChangeKind(key, toMode) {
+        if (key.list === 'outlines' || key.mode === toMode || !KIND_MODES.includes(toMode)) return null;
+        return applyTrainingEdit(key, ({ list, idx, item }) => {
+            trainingKindFix(item, toMode);
+            list.splice(idx, 1); trainingData[toMode][key.list].push(item);
+            return { list: key.list, mode: toMode, ts: key.ts };
+        }, `Changed to ${KIND_LABEL[toMode].toLowerCase()}.`);
+    }
     function trainingItemByKey(key) {
         const list = key.list === 'outlines' ? trainingData.outlines : trainingData[key.mode][key.list];
         const idx = key.list === 'outlines' ? list.findIndex(o => o.id === key.id) : list.findIndex(e => e.ts === key.ts);
@@ -2628,6 +2657,7 @@
             h = item.outline.heightM; d = item.outline.eqDiameterM;
         } else if (r.mode !== 'settlement') {
             typeSel = `<select id="tmType" style="${inp}"><option value="examples" ${r.key.list === 'examples' ? 'selected' : ''}>Real ${trainingItemLabel(r.mode)} (confirmed)</option><option value="rejected" ${r.key.list === 'rejected' ? 'selected' : ''}>Not real</option></select>`;
+            if (KIND_MODES.includes(r.mode)) typeSel += `</label><label style="font-size:0.75rem;">Kind<select id="tmMode" style="${inp}">${KIND_MODES.map(m => `<option value="${m}" ${m === r.mode ? 'selected' : ''}>${KIND_LABEL[m]}</option>`).join('')}</select>`;
             if (r.key.list === 'examples') { h = item.maxMetric; d = item.diameter; }
             else if (item.features) { h = item.features.heightM; d = item.features.diameterM; }
             if (r.mode === 'caves' || r.mode === 'ceremonial') hLabel = 'Depth (ft)';
@@ -2661,6 +2691,7 @@
         const r = (window.__trainingMapRows || [])[i]; if (!r) return;
         const val = (id) => { const e = document.getElementById(id); if (!e || e.value.trim() === '') return null; const v = parseFloat(e.value); return isFinite(v) && v > 0 ? feetToMeters(v) : null; };
         const type = document.getElementById('tmType') ? document.getElementById('tmType').value : null;
+        const newMode = document.getElementById('tmMode') ? document.getElementById('tmMode').value : r.mode;
         const h = val('tmH'), d = val('tmD');
         const name = (document.getElementById('tmName') || { value: '' }).value.trim();
         map.closePopup();
@@ -2696,9 +2727,13 @@
                 if (item.features) { if (h != null) item.features.heightM = h; if (d != null) item.features.diameterM = d; }
                 else if (h != null && d != null) item.features = { diameterM: d, heightM: h, circularity: 0.7, elongation: 1.2, template: null, groundSlopeDeg: null, flankSlopeDeg: null };
             }
-            if (target !== r.key.list) { list.splice(idx, 1); trainingData[r.mode][target].push(item); }
-            return { list: target, mode: r.mode, ts: r.key.ts };
-        }, 'Training item updated.');
+            // another kind (mound / effigy / shell midden): its own data from now on
+            const toMode = KIND_MODES.includes(newMode) ? newMode : r.mode;
+            if (toMode !== r.mode) trainingKindFix(item, toMode);
+            if (target !== r.key.list || toMode !== r.mode) { list.splice(idx, 1); trainingData[toMode][target].push(item); }
+            return { list: target, mode: toMode, ts: r.key.ts };
+        }, newMode !== r.mode ? `Changed to ${KIND_LABEL[newMode].toLowerCase()}.` : 'Training item updated.');
+        if (newMode !== r.mode) trainingKindAfter(r.mode, newMode, [r.key.ts]);
     }
     function startTrainingMove(i) {
         const r = (window.__trainingMapRows || [])[i]; if (!r) return;
@@ -5297,6 +5332,7 @@
               <button class="galNeedSel" onclick="galBulk('not')" style="${btn}background:#fef3c7;color:#92400e;">&#10007; Mark selected not real</button>
               <button class="galNeedSel" onclick="galBulk('real')" style="${btn}background:#dcfce7;color:#166534;">&#10003; Mark selected real</button>
               <button class="galNeedSel" onclick="galBulk('remove')" style="${btn}background:#fee2e2;color:#991b1b;">&#128465; Remove selected</button>
+              <select class="galNeedSel" onchange="if (this.value) { const v = this.value; this.value = ''; galMoveKind(gal.items.filter(x => gal.sel.has(x.dlKey)), v, true); }" style="width:auto;margin:0;padding:4px;font-size:0.76rem;"><option value="">&#8644; Change selected to...</option>${KIND_MODES.filter(m => m !== gal.model).map(m => `<option value="${m}">${KIND_LABEL[m]}</option>`).join('')}</select>
             </div>
             <div style="font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4;">Shaded terrain ${sq} m (${Math.round(sq / FT_TO_M)} ft) square around each item, light from the north-west; the red ring is the spot that was labelled${gal.model === 'mounds' ? ', drawn at the recorded size' : ''}. A real ${P.NOUN} should be a clear rise right in the middle. <b>Remove</b> deletes the item; <b>Not real</b> keeps it as a "not a ${P.NOUN}" example, which also teaches the network. Tap a picture to select it. More pictures load as you scroll.</div>
             <div id="galShowing" style="font-size:0.78rem;font-weight:600;color:#1e293b;margin-top:6px;"></div>
@@ -5363,6 +5399,15 @@
         const mk = (txt, style, fn, title) => { const b = document.createElement('button'); b.innerHTML = txt; b.title = title || ''; b.style.cssText = 'width:auto;flex:1;margin:0;padding:3px 4px;font-size:0.7rem;' + style; b.onclick = (e) => { e.stopPropagation(); fn(); }; row.appendChild(b); };
         mk(x.label ? '&#10007; Not real' : '&#10003; Real', x.label ? 'background:#fef3c7;color:#92400e;' : 'background:#dcfce7;color:#166534;', () => { galFlip(x); renderTrainingGallery(); }, x.label ? `Keep it as a "not a ${P.NOUN}" example` : `Count it as a real ${P.NOUN}`);
         mk('&#128465;', 'background:#fee2e2;color:#991b1b;flex:0 0 30px;', () => { removeTrainingItem(x.key); renderTrainingGallery(); }, 'Remove from the training data');
+        if (!x.outline) {
+            const sel2 = document.createElement('select');
+            sel2.title = 'Change what kind of feature it is';
+            sel2.style.cssText = 'width:100%;margin:2px 0 0;padding:2px;font-size:0.7rem;';
+            sel2.innerHTML = `<option value="">Kind: ${KIND_LABEL[gal.model]}</option>` + KIND_MODES.filter(m => m !== gal.model).map(m => `<option value="${m}">Change to ${KIND_LABEL[m].toLowerCase()}</option>`).join('');
+            sel2.onclick = (e) => e.stopPropagation();
+            sel2.onchange = () => { if (sel2.value) { galMoveKind([x], sel2.value); } };
+            setTimeout(() => card.appendChild(sel2), 0);
+        }
         mk('Go to', 'flex:0 0 46px;', () => { closeTrainingGallery(); map.setView([x.lat, x.lon], gal.model === 'mounds' ? 19 : 18); }, 'Show it on the map');
         card.appendChild(row);
         paint();
@@ -5397,6 +5442,18 @@
             list.splice(idx, 1); trainingData[mode][to].push(item);
             return { list: to, mode, ts: x.key.ts };
         }, to === 'rejected' ? `Marked not a real ${P.NOUN}.` : `Marked as a real ${P.NOUN}.`);
+    }
+    // Moves items to another kind (mound / effigy / shell midden)
+    function galMoveKind(xs, toMode, ask) {
+        xs = xs.filter(x => !x.outline);
+        if (!xs.length) { document.getElementById('status').innerText = 'Outlines are mound outlines and stay with the mound model; nothing changed.'; return; }
+        if (ask && !confirm(`Change ${xs.length} item${xs.length === 1 ? '' : 's'} to ${KIND_LABEL[toMode].toLowerCase()}? Real ones stay real, not-real marks stay not real. Undo reverses each one.`)) return;
+        const from = gal.model;
+        for (const x of xs) trainingChangeKind(x.key, toMode);
+        gal.sel.clear();
+        document.getElementById('status').innerText = `Changed ${xs.length} item${xs.length === 1 ? '' : 's'} from ${KIND_LABEL[from].toLowerCase()} to ${KIND_LABEL[toMode].toLowerCase()}. They teach the ${DL_PROFILES[toMode].label} model from now on; its terrain picture is taken the next time their area is loaded. Train both models again.`;
+        trainingKindAfter(from, toMode, xs.map(x => x.key.ts)).then(() => renderTrainingGallery());
+        renderTrainingGallery();
     }
     function galBulk(action) {
         const P = DL_PROFILES[gal.model];
