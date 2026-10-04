@@ -760,6 +760,7 @@
                 <option value="mounds">Mounds</option>
                 <option value="effigy">Effigy &amp; linear mounds</option>
                 <option value="shell">Shell middens &amp; rings</option>
+                <option value="large">Large &amp; platform mounds</option>
             </select>
         </div>
         <div id="dlProfileHelp" style="font-size:0.72rem; color:#475569; margin-bottom:6px; line-height:1.4;"></div>
@@ -1072,7 +1073,7 @@
         if (!div) return;
         const counts = {};
         for (const f of detectedFeatures) counts[f.mode] = (counts[f.mode] || 0) + 1;
-        const modes = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy', 'dlshell'].filter(m => counts[m]);
+        const modes = [...SCAN_ALL_ORDER, 'dlmounds', 'dlbigmounds', 'dleffigy', 'dlshell'].filter(m => counts[m]);
         if (!modes.length) { div.style.display = 'none'; return; }
         div.innerHTML = `<div style="display:flex;justify-content:space-between;gap:8px;"><b>Detected features (${detectedFeatures.length})</b>` +
             `<a href="#" onclick="event.preventDefault(); clearAllDetectionsByUser();" style="color:#b91c1c;font-size:11px;">Clear all</a></div>` + modes.map(m => {
@@ -2612,11 +2613,14 @@
     // when it is)
     async function trainingKindAfter(fromMode, toMode, tsList) {
         try {
-            for (const k of [fromMode, toMode]) await dlLoadPatchesFor(k);
-            const old = dlPatchCache[fromMode];
-            for (const ts of tsList || []) { delete old.items['ex:' + ts]; delete old.items['rj:' + ts]; }
-            await dlSavePatchesFor(fromMode);
-            if (fullDemGrid) await dlHarvestFor(toMode, fullDemGrid, false);
+            const of = (m) => Object.keys(DL_PROFILES).filter(k => DL_PROFILES[k].TRAIN_MODE === m);
+            for (const k of [...of(fromMode), ...of(toMode)]) await dlLoadPatchesFor(k);
+            for (const k of of(fromMode)) {
+                const old = dlPatchCache[k];
+                for (const ts of tsList || []) { delete old.items['ex:' + ts]; delete old.items['rj:' + ts]; }
+                await dlSavePatchesFor(k);
+            }
+            if (fullDemGrid) for (const k of of(toMode)) await dlHarvestFor(k, fullDemGrid, false);
             updateDLSummary().catch(() => {});
         } catch (e) { console.warn(e); }
     }
@@ -2672,6 +2676,8 @@
             <div style="display:flex;gap:6px;flex-wrap:wrap;">
               <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#16a34a;color:#fff;" onclick="event.stopPropagation(); saveTrainingEdit(${i})">Save</button>
               <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;" onclick="event.stopPropagation(); startTrainingMove(${i})">&#10021; Move</button>
+              ${r.mode === 'mounds' || r.mode === 'shell' ? `<button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#e0f2fe;color:#075985;" onclick="event.stopPropagation(); trainingRemeasure(${i})">&#8635; Re-measure</button>` : ''}
+              <div id="tmMeasureMsg" style="flex-basis:100%;font-size:0.72rem;color:#475569;"></div>
               <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;" onclick="map.closePopup()">Cancel</button></div></div>`);
         // a cancelled edit leaves the popup as it was
         open.once('popupclose', () => open.getPopup().setContent(orig));
@@ -2687,6 +2693,25 @@
         refreshKnownMoundIds([...ids]);
         document.getElementById('status').innerText = `${verb} Undo can put it back the way it was.`;
         return res;
+    }
+    // Measures the mound under an item from the loaded terrain and puts its
+    // height and width in the editor (Save keeps them): the mound scan's
+    // measurer for mounds up to ~115 ft, a plain rise measurement for
+    // bigger ones (or when that finds nothing)
+    function trainingRemeasure(i) {
+        const r = (window.__trainingMapRows || [])[i], msg = document.getElementById('tmMeasureMsg'); if (!r || !msg) return;
+        const g = fullDemGrid;
+        if (!g || gridIndexAt(g, r.lat, r.lon) < 0) { msg.innerHTML = '<span style="color:#b91c1c;">Load the terrain here first (Download or Load Local DTM), then press Re-measure.</span>'; return; }
+        const { item } = trainingItemByKey(r.key); if (!item) return;
+        const d0 = r.key.list === 'outlines' ? item.outline.eqDiameterM : r.key.list === 'examples' ? item.diameter : item.features && item.features.diameterM;
+        let m = null, how = '';
+        if (!(d0 > 35)) { m = dlWithProfile('mounds', () => dlMeasure(g, r.lat, r.lon)); how = 'the mound scan\'s measurer'; }
+        if (!m) { m = measureRiseAt(g, r.lat, r.lon, d0 > 0 && d0 < 600 ? d0 : 40); how = 'the rise above the surrounding ground'; }
+        if (!m) { msg.innerHTML = '<span style="color:#b91c1c;">No rise found here to measure: the point may be off the mound (use Move), or it is not a mound.</span>'; return; }
+        const toFt = (x) => (x / FT_TO_M).toFixed(1);
+        const hI = document.getElementById('tmH'), dI = document.getElementById('tmD');
+        if (hI) hI.value = toFt(m.h); if (dI) dI.value = toFt(m.d);
+        msg.innerHTML = `Measured from ${how}: <b>${metersToFeetInches(m.h)} tall, ${metersToFeetInches(m.d)} across</b>${m.open ? ' (it runs into higher ground, so the width is rough)' : ''}${approxMetersBetween(m.lat, m.lon, r.lat, r.lon) > 15 ? `; its centre is ${Math.round(approxMetersBetween(m.lat, m.lon, r.lat, r.lon) / FT_TO_M)} ft from the point (use Move to fix)` : ''}. Press Save to keep it.`;
     }
     function saveTrainingEdit(i) {
         const r = (window.__trainingMapRows || [])[i]; if (!r) return;
@@ -3809,7 +3834,13 @@
                   RESULT_MODE: 'dleffigy', FEATURES: 'effigy', PEAK_SEP: 40, AVOID_M: 80, NOUN: 'effigy', NEG_NOUN: 'not-effigy', NOUNS: 'effigies', NEG_NOUNS: 'not-effigies' },
         shell: { key: 'shell', label: 'Shell middens & rings', PATCH: 72, INPUT: 64, RES: 3.0, BORDER: 4, STRIDE: 6, BG_PER_AREA: 100, BG_MAX: 1500, MAX_POS_D: 1e9, MAX_SCAN_CELLS: 1.5e6,
                  CH: 6, MODEL_VERSION: 3, MODEL_URL: 'indexeddb://lidar-dl-shell-v3', EPOCHS: 40, IDB_KEY: 'dlPatchesShell', PREFS_KEY: 'dlShell', TRAIN_MODE: 'shell', CLIP: 15,
-                 RESULT_MODE: 'dlshell', FEATURES: 'shell', PEAK_SEP: 60, AVOID_M: 100, NOUN: 'shell midden', NEG_NOUN: 'not-midden', NOUNS: 'shell middens', NEG_NOUNS: 'not-middens' }
+                 RESULT_MODE: 'dlshell', FEATURES: 'shell', PEAK_SEP: 60, AVOID_M: 100, NOUN: 'shell midden', NEG_NOUN: 'not-midden', NOUNS: 'shell middens', NEG_NOUNS: 'not-middens' },
+        // Mounds too big for the mound model's 40 m window (platform mounds
+        // and big conical ones, 30-180 m across): 200 m squares at 2.5 m,
+        // learning from the same mound training data, only the big ones
+        large: { key: 'large', label: 'Large & platform mounds', PATCH: 96, INPUT: 80, RES: 2.5, BORDER: 4, STRIDE: 6, BG_PER_AREA: 80, BG_MAX: 2000, MIN_POS_D: 30, MAX_POS_D: 180, MAX_SCAN_CELLS: 1.5e6,
+                 CH: 6, MODEL_VERSION: 1, MODEL_URL: 'indexeddb://lidar-dl-large-v1', EPOCHS: 40, IDB_KEY: 'dlPatchesLarge', PREFS_KEY: 'dlLarge', TRAIN_MODE: 'mounds', CLIP: 15,
+                 RESULT_MODE: 'dlbigmounds', FEATURES: 'mound', PEAK_SEP: 60, AVOID_M: 120, NOUN: 'large mound', NEG_NOUN: 'not-mound', NOUNS: 'large mounds', NEG_NOUNS: 'not-mounds' }
     };
     let DL = DL_PROFILES.mounds;
     const dlPatchCache = {}, dlModelCache = {};
@@ -3822,6 +3853,7 @@
     MODE_STYLE.dlmounds = { color: '#9333ea', letter: 'D', label: 'Mounds (deep learning)' };
     MODE_STYLE.dleffigy = { color: '#4d7c0f', letter: 'F', label: 'Effigies (deep learning)' };
     MODE_STYLE.dlshell = { color: '#0e7490', letter: 'O', label: 'Shell middens (deep learning)' };
+    MODE_STYLE.dlbigmounds = { color: '#7e22ce', letter: 'P', label: 'Large & platform mounds (deep learning)' };
 
     function dlPrefsFor(key) { const p = trainingData.prefs || (trainingData.prefs = {}), k = DL_PROFILES[key].PREFS_KEY; return p[k] || (p[k] = {}); }
     function dlPrefs() { return dlPrefsFor(DL.key); }
@@ -4151,6 +4183,14 @@
         for (const rj of trainingData.mounds.rejected) items.push({ key: 'rj:' + rj.ts, lat: rj.lat, lon: rj.lon, label: 0, name: rj.name });
         for (const o of trainingData.outlines) items.push({ key: 'ol:' + o.id, lat: o.centroid[0], lon: o.centroid[1], label: o.label === 'mound' ? 1 : 0,
                                                             d: o.outline && o.outline.eqDiameterM, h: o.outline && o.outline.heightM, name: o.name });
+        // the large-mound model learns only from mounds big enough for it;
+        // smaller confirmed mounds are neither mounds nor not-mounds to it
+        // and from "Not real" marks on things at least 80% of that size (a tree
+        // throw teaches a big-mound model nothing that background doesn't)
+        if (DL.MIN_POS_D) {
+            const rjD = new Map(trainingData.mounds.rejected.map(r => ['rj:' + r.ts, r.features && r.features.diameterM]));
+            return items.filter(i => i.label ? i.d >= DL.MIN_POS_D : i.key.startsWith('ol:') ? i.d >= 0.8 * DL.MIN_POS_D : rjD.get(i.key) >= 0.8 * DL.MIN_POS_D);
+        }
         return items;
     }
     // An item's terrain sample. A confirmation and a "Not real" mark that
@@ -4369,7 +4409,9 @@
         if (save) { (trainingData.prefs || (trainingData.prefs = {})).dlProfile = key; saveTrainingData(); }
         const sel = document.getElementById('dlProfile'); if (sel) sel.value = key;
         const help = document.getElementById('dlProfileHelp');
-        if (help) help.innerHTML = key === 'shell'
+        if (help) help.innerHTML = key === 'large'
+            ? 'Learns large and platform mounds, 100 to 590 ft across, from your confirmed mounds of that size (the Mounds model can only use mounds under 115 ft). It looks at 650 ft squares at 8 ft, so a whole platform mound fits. Smaller mounds are left to the Mounds model. Results are violet "P" diamonds.'
+            : key === 'shell'
             ? 'Learns shell middens, mounds and rings from your confirmed shell middens (scan results answered Yes, or <i>This is a Shell Midden</i>) and your "Not real" marks in that mode, kept apart from the mound model because their size and shape differ. It looks at 192 m squares at 3 m, so a whole shell ring fits. Results are teal "O" diamonds, cross-checked with the shell midden scan.'
             : key === 'effigy'
             ? 'Learns effigy and linear mounds from your confirmed effigies (scan results answered Yes, or <i>This is an Effigy</i>) and your "Not real" marks in that mode. It looks at 128 m squares at 2 m through the same narrow-relief view the effigy scan uses, so a whole bird fits. Results are olive "F" diamonds, cross-checked with the effigy scan.'
@@ -4928,7 +4970,7 @@
                     // the mound scan's hillside rules: nothing on ground steeper
                     // than 20 degrees; above the Flat-ground slope setting only a
                     // clean mound shape counts (others are listed last, flagged)
-                    pk.groundSlope = dlGroundSlopeAt(g, la, lo, effigyModel ? 60 : 25);
+                    pk.groundSlope = dlGroundSlopeAt(g, la, lo, effigyModel ? 60 : DL.key === 'large' ? Math.max(60, 0.8 * (meas ? meas.d : 60)) : 25);
                     if (!effigyModel && pk.groundSlope != null) {
                         if (pk.groundSlope > MOUND_SLOPE_HARD_MAX) { skippedSteep++; continue; }
                         const flatMax = parseFloat((document.getElementById('moundMaxGroundSlope') || { value: 8 }).value);
@@ -4942,12 +4984,12 @@
             // along its body: keep one candidate per traced feature, the most
             // confident, so each effigy is reported once, as a whole
             let mergedDup = 0;
-            if (effigyModel) {
+            if (effigyModel || DL.key === 'large') {
                 results.sort((a, b2) => b2.p - a.p);
                 const one = [];
                 for (const r2 of results) {
                     const la = r2.meas ? r2.meas.lat : r2.lat, lo = r2.meas ? r2.meas.lon : r2.lon;
-                    const same = one.some(k2 => k2.meas && (approxMetersBetween(k2.meas.lat, k2.meas.lon, la, lo) < 10 ||
+                    const same = one.some(k2 => k2.meas && (approxMetersBetween(k2.meas.lat, k2.meas.lon, la, lo) < (DL.key === 'large' ? Math.max(10, 0.5 * (k2.meas.d || 0)) : 10) ||
                         (k2.meas.hull && k2.meas.hull.length >= 3 && (pointInPoly(lo, la, k2.meas.hull.map(([a2, b2]) => [b2, a2])) || pointInPoly(r2.lon, r2.lat, k2.meas.hull.map(([a2, b2]) => [b2, a2]))))));
                     if (same) { mergedDup++; continue; }
                     one.push(r2);
@@ -4963,7 +5005,7 @@
             // boulders and knobs usually are; effigies: under Min length):
             // listed last
             const pd = moundShapePresetDefs();
-            const minD = shellModel ? shellSettings().minSize : effigyModel ? effigySettings().minL : feetToMeters(Math.min(pd.conical.minDiameter, pd.platform.minDiameter, parseFloat(document.getElementById('minDiameter').value) || Infinity));
+            const minD = DL.MIN_POS_D ? DL.MIN_POS_D : shellModel ? shellSettings().minSize : effigyModel ? effigySettings().minL : feetToMeters(Math.min(pd.conical.minDiameter, pd.platform.minDiameter, parseFloat(document.getElementById('minDiameter').value) || Infinity));
             for (const res of results) {
                 res.small = !!res.meas && (effigyModel ? res.meas.L : res.meas.d) < minD; res.minD = minD;
                 const la = res.meas ? res.meas.lat : res.lat, lo = res.meas ? res.meas.lon : res.lon;
@@ -4994,7 +5036,7 @@
                 (skippedSteep ? `; ${skippedSteep} skipped on ground steeper than ${MOUND_SLOPE_HARD_MAX}&deg;`.replace('&deg;', '°') : '') +
                 (mergedDup ? `; ${mergedDup} more hit${mergedDup === 1 ? '' : 's'} on the same ${DL.NOUNS} merged, so each is listed once` : '') +
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
-                ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
+                ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : DL.key === 'large' ? 'violet "P" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
             dlSetStatus(msg); status.innerText = msg;
         } catch (e) {
             console.error(e);
@@ -5003,7 +5045,52 @@
     }
     // Height, size and shape at a candidate, from the mound measurer, or null
     // when there is no closed high there to measure
+    // Height and width of a big raised feature at a point: a plane through
+    // the ground around it, then everything connected to its top that
+    // stands above 15% of its height (widened once if it fills the box).
+    // For platform and big conical mounds the scan's measurer, tuned to
+    // smaller mounds, can miss.
+    function measureRiseAt(g, lat, lon, guessD) {
+        let half = Math.min(400, Math.max(40, 1.2 * (guessD || 40)));
+        for (let tries = 0; tries < 3; tries++, half *= 1.7) {
+            const W = g.w, H = g.h, res = g.res, d = g.data, b = g.bounds;
+            const r0 = Math.round((b.n - lat) / (b.n - b.s) * H - 0.5), c0 = Math.round((lon - b.w) / (b.e - b.w) * W - 0.5);
+            if (r0 < 0 || c0 < 0 || r0 >= H || c0 >= W) return null;
+            const hp = Math.round(half / res), ra = Math.max(0, r0 - hp), rb = Math.min(H - 1, r0 + hp), ca = Math.max(0, c0 - hp), cb = Math.min(W - 1, c0 + hp);
+            const bw = cb - ca + 1, bh = rb - ra + 1; if (bw < 8 || bh < 8) return null;
+            let n0 = 0, sx = 0, sy = 0, sz = 0, sxx = 0, syy = 0, sxy = 0, sxz = 0, syz = 0;
+            for (let r = ra; r <= rb; r++) for (let c = ca; c <= cb; c++) {
+                if (r > ra + 1 && r < rb - 1 && c > ca + 1 && c < cb - 1) continue;
+                const z = d[r * W + c]; if (!(z > -100)) continue;
+                const x = c - c0, y = r - r0; n0++; sx += x; sy += y; sz += z; sxx += x * x; syy += y * y; sxy += x * y; sxz += x * z; syz += y * z;
+            }
+            if (n0 < 12) return null;
+            const mx = sx / n0, my = sy / n0, mz = sz / n0, cxx = sxx / n0 - mx * mx, cyy = syy / n0 - my * my, cxy = sxy / n0 - mx * my, cxz = sxz / n0 - mx * mz, cyz = syz / n0 - my * mz;
+            const det = cxx * cyy - cxy * cxy; if (!det) return null;
+            const bx = (cxz * cyy - cyz * cxy) / det, by = (cyz * cxx - cxz * cxy) / det, a0 = mz - bx * mx - by * my;
+            const resid = (r, c) => { const z = d[r * W + c]; return z > -100 ? z - (a0 + bx * (c - c0) + by * (r - r0)) : -1e9; };
+            const near = Math.max(2, Math.round(Math.max(15, 0.3 * (guessD || 30)) / res));
+            let pr = -1, pc = -1, peak = -Infinity;
+            for (let r = Math.max(ra, r0 - near); r <= Math.min(rb, r0 + near); r++) for (let c = Math.max(ca, c0 - near); c <= Math.min(cb, c0 + near); c++) { const v = resid(r, c); if (v > peak) { peak = v; pr = r; pc = c; } }
+            if (peak < 0.2) { if (tries < 2) continue; return null; }   // the box may sit on a broad flat top: widen it
+            const t = 0.15 * peak, seen = new Uint8Array(bw * bh), q = [[pr, pc]]; seen[(pr - ra) * bw + pc - ca] = 1;
+            let touches = false, sr = 0, sc = 0;
+            for (let k = 0; k < q.length; k++) {
+                const [r, c] = q[k]; sr += r; sc += c;
+                if (r === ra || r === rb || c === ca || c === cb) touches = true;
+                for (const [dr, dc] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+                    const rr = r + dr, cc = c + dc; if (rr < ra || rr > rb || cc < ca || cc > cb) continue;
+                    const j = (rr - ra) * bw + cc - ca; if (seen[j] || resid(rr, cc) < t) continue; seen[j] = 1; q.push([rr, cc]);
+                }
+            }
+            if (touches && tries < 2) continue;
+            const cr = sr / q.length, cc2 = sc / q.length;
+            return { h: peak, d: 2 * Math.sqrt(q.length * res * res / Math.PI), lat: b.n - ((cr + 0.5) / H) * (b.n - b.s), lon: b.w + ((cc2 + 0.5) / W) * (b.e - b.w), circ: 0.7, elong: 1.2, template: null, gs: null, rugged: touches, open: touches };
+        }
+        return null;
+    }
     function dlMeasure(g, lat, lon) {
+        if (DL.key === 'large') return measureRiseAt(g, lat, lon, 60);
         try {
             const idx = gridIndexAt(g, lat, lon); if (idx < 0) return null;
             const r = Math.floor(idx / g.w), c = idx % g.w, half = Math.round(60 / g.res);
@@ -5126,7 +5213,7 @@
         const km = knownMounds().find(k2 => approxMetersBetween(k2.lat, k2.lon, lat, lon) < Math.max(10, 0.6 * k2.d));
         const f = knownMoundFeature({ id: 'dl' + Math.random().toString(36).slice(2), lat, lon, d, h, circ: m ? m.circ : 0.7, elong: m ? m.elong : 1 }, Math.round(res.p * 100));
         delete f.known;
-        f.mode = 'dlmounds'; f.dlProb = res.p; f.dlKnown = !!km; f.matchScore = Math.round(res.p * 100);
+        f.mode = DL.RESULT_MODE; f.dlProb = res.p; f.dlKnown = !!km; f.matchScore = Math.round(res.p * 100);
         const i = window.__dlFeats.push(f) - 1;
         const ft = metersToFeetInches;
         const answer = km ? `<div style="margin-top:8px;color:#166534;"><b>&#10003; This is your confirmed mound</b>${km.name ? ' (' + escapeHtml(km.name) + ')' : ''}: the network recognised it.</div>`
@@ -5135,10 +5222,10 @@
                  <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#fee2e2;color:#991b1b;border:2px solid #ef4444;border-radius:8px;" onclick="dlAnswer(${i}, false, event, this)">&#10007; Not real</button>
                </div>
                <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;line-height:1.3;">Your answer goes into the training data (the regular scans use it too). Train again to update the network.</div>`;
-        const html = `<b>Possible Native Mound</b> <span style="background:#9333ea;color:#fff;border-radius:4px;padding:0 4px;font-size:0.7rem;">deep learning, experimental</span><br>
+        const html = `<b>Possible ${DL.key === 'large' ? 'large or platform mound' : 'Native Mound'}</b> <span style="background:${MODE_STYLE[DL.RESULT_MODE].color};color:#fff;border-radius:4px;padding:0 4px;font-size:0.7rem;">deep learning, experimental</span><br>
             <i style="color:#64748b">Found by the neural network trained on your data &mdash; confirm in the field; mounds may be legally protected</i><br>
             <b>Network confidence:</b> ${Math.round(res.p * 100)}% (averaged over 8 rotations)<br>
-            ${res.small ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; Smaller across than your smallest mound size setting (${Math.round(res.minD / FT_TO_M)} ft): could be a tree throw, boulder or natural knob.</div>` : ''}
+            ${res.small ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; ${DL.MIN_POS_D ? `Smaller than this model's ${Math.round(res.minD / FT_TO_M)} ft minimum: the Mounds model covers smaller mounds.` : `Smaller across than your smallest mound size setting (${Math.round(res.minD / FT_TO_M)} ft): could be a tree throw, boulder or natural knob.`}</div>` : ''}
             ${res.agree ? '<div style="margin:3px 0;color:#166534;background:#dcfce7;padding:3px 6px;border-radius:4px;font-size:0.8rem;"><b>&#10003; The regular mound scan found this too</b>: both methods agree.</div>' : ''}
             ${res.builtMaybe ? builtNote(res.builtMaybe) : ''}
             ${res.hillside ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; On a ${Math.round(res.groundSlope)}&deg; hillside without a clean mound shape: often a natural knob or ridge nose (the regular scan would drop it). Listed last.</div>` : ''}
@@ -5146,9 +5233,9 @@
             ${m ? `<b>Height:</b> ${ft(m.h)}<br><b>Across:</b> ${ft(m.d)}<br><b>Roundness:</b> ${m.circ.toFixed(2)}, <b>stretch</b> ${m.elong.toFixed(2)}&times;<br>${m.rugged ? '<span style="color:#92400e;">&#9888; Rugged ground: measurements are rough.</span><br>' : ''}`
                  : '<span style="color:#92400e;">&#9888; No closed high to measure here: the network sees something mound-like, but the ground doesn\'t rise above a closed contour. Often a false alarm. If it is a mound, outline it to record its true size.</span><br>'}
             <b>Coords:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}${answer}`;
-        const st = MODE_STYLE.dlmounds, layer = modeLayer('dlmounds');
+        const st = MODE_STYLE[DL.RESULT_MODE], layer = modeLayer(DL.RESULT_MODE);
         const icon = L.divIcon({ className: 'det-icon', iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12],
-            html: `<div style="background:${st.color};color:#fff;width:20px;height:20px;border-radius:4px;transform:rotate(45deg);border:2px solid ${km ? '#16a34a' : '#fff'};box-shadow:0 1px 4px rgba(0,0,0,0.5);"><div style="transform:rotate(-45deg);font:bold 11px/20px sans-serif;text-align:center;">D</div></div>` });
+            html: `<div style="background:${st.color};color:#fff;width:20px;height:20px;border-radius:4px;transform:rotate(45deg);border:2px solid ${km ? '#16a34a' : '#fff'};box-shadow:0 1px 4px rgba(0,0,0,0.5);"><div style="transform:rotate(-45deg);font:bold 11px/20px sans-serif;text-align:center;">${st.letter}</div></div>` });
         f._layers = [L.marker([lat, lon], { icon }).bindPopup(html, { maxWidth: 320 }).addTo(layer),
                      L.circle([lat, lon], { radius: d / 2, color: st.color, weight: 2, dashArray: '4,3', fillOpacity: 0.08, interactive: false }).addTo(layer)];
         detectedFeatures.push(f);
@@ -5158,7 +5245,7 @@
     async function dlAnswer(i, real, ev, btn) {
         if (ev) { ev.stopPropagation(); if (ev.preventDefault) ev.preventDefault(); }
         const f = (window.__dlFeats || [])[i]; if (!f) return;
-        const tm = f.mode === 'dleffigy' ? 'effigy' : f.mode === 'dlshell' ? 'shell' : 'mounds';
+        const tm = f.mode === 'dleffigy' ? 'effigy' : f.mode === 'dlshell' ? 'shell' : 'mounds';   // dlmounds, dlbigmounds
         if (real) {
             confirmFeature(tm, f.diameter, f.k.circularity, f.k.elongation, f.k.maxMetric, f.lat, f.lon, null, btn, null, null);
         } else {
@@ -5168,7 +5255,7 @@
             updateDetectionLegend();
             document.getElementById('status').innerText = 'Marked not real: saved in your training data. Train the deep-learning model again to teach it.';
         }
-        if (fullDemGrid) { await dlHarvestFor(tm, fullDemGrid, false); updateDLSummary(); }
+        if (fullDemGrid) { for (const k of Object.keys(DL_PROFILES)) if (DL_PROFILES[k].TRAIN_MODE === tm) await dlHarvestFor(k, fullDemGrid, false); updateDLSummary(); }
     }
     // ---- Saving the deep-learning model to a file ----
     // One file holds everything needed to use the model elsewhere or restore
@@ -5372,7 +5459,7 @@
               <button class="galNeedSel" onclick="galBulk('not')" style="${btn}background:#fef3c7;color:#92400e;">&#10007; Mark selected not real</button>
               <button class="galNeedSel" onclick="galBulk('real')" style="${btn}background:#dcfce7;color:#166534;">&#10003; Mark selected real</button>
               <button class="galNeedSel" onclick="galBulk('remove')" style="${btn}background:#fee2e2;color:#991b1b;">&#128465; Remove selected</button>
-              <select class="galNeedSel" onchange="if (this.value) { const v = this.value; this.value = ''; galMoveKind(gal.items.filter(x => gal.sel.has(x.dlKey)), v, true); }" style="width:auto;margin:0;padding:4px;font-size:0.76rem;"><option value="">&#8644; Change selected to...</option>${KIND_MODES.filter(m => m !== gal.model).map(m => `<option value="${m}">${KIND_LABEL[m]}</option>`).join('')}</select>
+              <select class="galNeedSel" onchange="if (this.value) { const v = this.value; this.value = ''; galMoveKind(gal.items.filter(x => gal.sel.has(x.dlKey)), v, true); }" style="width:auto;margin:0;padding:4px;font-size:0.76rem;"><option value="">&#8644; Change selected to...</option>${KIND_MODES.filter(m => m !== DL_PROFILES[gal.model].TRAIN_MODE).map(m => `<option value="${m}">${KIND_LABEL[m]}</option>`).join('')}</select>
             </div>
             <div style="font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4;">Shaded terrain ${sq} m (${Math.round(sq / FT_TO_M)} ft) square around each item, light from the north-west; the red ring is the spot that was labelled${gal.model === 'mounds' ? ', drawn at the recorded size' : ''}. A real ${P.NOUN} should be a clear rise right in the middle. <b>Remove</b> deletes the item; <b>Not real</b> keeps it as a "not a ${P.NOUN}" example, which also teaches the network. Tap a picture to select it. More pictures load as you scroll.</div>
             <div id="galDlRow" style="display:none;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;padding:6px 8px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;">
@@ -5497,7 +5584,8 @@
             const sel2 = document.createElement('select');
             sel2.title = 'Change what kind of feature it is';
             sel2.style.cssText = 'width:100%;margin:2px 0 0;padding:2px;font-size:0.7rem;';
-            sel2.innerHTML = `<option value="">Kind: ${KIND_LABEL[gal.model]}</option>` + KIND_MODES.filter(m => m !== gal.model).map(m => `<option value="${m}">Change to ${KIND_LABEL[m].toLowerCase()}</option>`).join('');
+            const gm = DL_PROFILES[gal.model].TRAIN_MODE;
+            sel2.innerHTML = `<option value="">Kind: ${KIND_LABEL[gm]}</option>` + KIND_MODES.filter(m => m !== gm).map(m => `<option value="${m}">Change to ${KIND_LABEL[m].toLowerCase()}</option>`).join('');
             sel2.onclick = (e) => e.stopPropagation();
             sel2.onchange = () => { if (sel2.value) { galMoveKind([x], sel2.value); } };
             setTimeout(() => card.appendChild(sel2), 0);
@@ -5542,7 +5630,7 @@
         xs = xs.filter(x => !x.outline);
         if (!xs.length) { document.getElementById('status').innerText = 'Outlines are mound outlines and stay with the mound model; nothing changed.'; return; }
         if (ask && !confirm(`Change ${xs.length} item${xs.length === 1 ? '' : 's'} to ${KIND_LABEL[toMode].toLowerCase()}? Real ones stay real, not-real marks stay not real. Undo reverses each one.`)) return;
-        const from = gal.model;
+        const from = DL_PROFILES[gal.model].TRAIN_MODE;
         for (const x of xs) trainingChangeKind(x.key, toMode);
         gal.sel.clear();
         document.getElementById('status').innerText = `Changed ${xs.length} item${xs.length === 1 ? '' : 's'} from ${KIND_LABEL[from].toLowerCase()} to ${KIND_LABEL[toMode].toLowerCase()}. They teach the ${DL_PROFILES[toMode].label} model from now on; its terrain picture is taken the next time their area is loaded. Train both models again.`;
@@ -6228,7 +6316,11 @@
         // its terrain sample, for the deep-learning model of its kind
         if (key) {
             const pk = c.mode, cm = tourCm(c, pk);
-            if (cm && dlPatchCache[pk]) { dlPatchCache[pk].items[key] = { lat: c.lat, lon: c.lon, cm }; dlSavePatchesSoon(pk); }
+            for (const k of Object.keys(DL_PROFILES)) {
+                if (DL_PROFILES[k].TRAIN_MODE !== c.mode) continue;
+                const cmk = tourCm(c, k);
+                if (cmk && dlPatchCache[k]) { dlPatchCache[k].items[key] = { lat: c.lat, lon: c.lon, cm: cmk }; dlSavePatchesSoon(k); }
+            }
             if (s) { s.labelled = s.labelled || {}; s.labelled[pk] = (s.labelled[pk] || 0) + 1; if (s.trained) delete s.trained[pk]; }
         }
         if (s) s.reviewedAt = Date.now();
@@ -6241,7 +6333,7 @@
         if (h.ans !== 'skip') {
             undoLastTraining();
             const pk = h.c.mode;
-            if (h.key && dlPatchCache[pk]) { delete dlPatchCache[pk].items[h.key]; dlSavePatchesSoon(pk); }
+            for (const k of Object.keys(DL_PROFILES)) if (DL_PROFILES[k].TRAIN_MODE === pk && h.key && dlPatchCache[k]) { delete dlPatchCache[k].items[h.key]; dlSavePatchesSoon(k); }
             const s = tourData().sites.find(x => x.id === h.c.siteId);
             if (s && s.labelled && s.labelled[pk]) s.labelled[pk]--;
         }
@@ -7281,7 +7373,7 @@
     // needs to describe what's being detected - centralized so adding a mode
     // means updating these once, not hunting down every inline ternary.
     function modeFeatureName(mode) {
-        return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'effigy' ? 'Effigy / Linear Mound' : mode === 'shell' ? 'Shell Midden' : mode === 'dlshell' ? 'Shell Midden (deep learning)' : mode === 'dlmounds' ? 'Native Mound (deep learning)' : mode === 'dleffigy' ? 'Effigy / Linear Mound (deep learning)' : mode === 'shelter' ? 'Rockshelter / Overhang'
+        return mode === 'caves' ? 'Cave / Sinkhole' : mode === 'mounds' ? 'Native Mound' : mode === 'effigy' ? 'Effigy / Linear Mound' : mode === 'shell' ? 'Shell Midden' : mode === 'dlshell' ? 'Shell Midden (deep learning)' : mode === 'dlbigmounds' ? 'Large / Platform Mound (deep learning)' : mode === 'dlmounds' ? 'Native Mound (deep learning)' : mode === 'dleffigy' ? 'Effigy / Linear Mound (deep learning)' : mode === 'shelter' ? 'Rockshelter / Overhang'
             : mode === 'basecamp' ? 'Base Camp Shelter (bluff-base bench)' : mode === 'huntcamp' ? 'Hunt Camp (outcrop at choke point)'
             : mode === 'ceremonial' ? 'Ceremonial Karst Entrance' : mode === 'entrance' ? 'Horizontal Cave Entrance Setting' : 'Feature';
     }
@@ -11574,7 +11666,7 @@
     // scan's results drop straight into QGIS/ArcGIS or a Python pipeline.
     let lastExportRaster = null; // { data: Float32Array, name, mode } - the last scan's analysis raster
     function featureTypeCode(mode) {
-        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', dlmounds: 'DLMound', dleffigy: 'DLEffigy', dlshell: 'DLShell', effigy: 'Effigy', shell: 'Shell', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial', entrance: 'CaveEntrnc' }[mode] || 'Feature';
+        return { caves: 'Cave', mounds: 'Mound', shelter: 'Shelter', settlement: 'Settlement', dlmounds: 'DLMound', dlbigmounds: 'DLPlatform', dleffigy: 'DLEffigy', dlshell: 'DLShell', effigy: 'Effigy', shell: 'Shell', basecamp: 'BaseCamp', huntcamp: 'HuntCamp', ceremonial: 'Ceremonial', entrance: 'CaveEntrnc' }[mode] || 'Feature';
     }
     function updateExportButtons() {
         const hasFeatures = detectedFeatures.length > 0;
@@ -11795,7 +11887,7 @@ ${wpts.join('\n')}
     function legend3D() {
         const counts = {};
         for (const f of detectedFeatures) if (modeVisible(f.mode)) counts[f.mode] = (counts[f.mode] || 0) + 1;
-        const modes = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy', 'dlshell'].filter(m => counts[m]);
+        const modes = [...SCAN_ALL_ORDER, 'dlmounds', 'dlbigmounds', 'dleffigy', 'dlshell'].filter(m => counts[m]);
         if (!modes.length) return '<span style="color:#cbd5e1">No detected features yet. Run a scan (or Scan All) to see them here.</span>';
         let html = modes.map(m => `<span style="color:${MODE_STYLE[m].color}">&#9632;</span> ${MODE_STYLE[m].label} (${counts[m]})`).join(' &nbsp;');
         if (last3DOverlays.length === 1 && last3DOverlays[0].highlightMask) html += ' &nbsp;<span style="color:#fbbf24">&#9632;</span> pipeline context (bluff faces / choke points / sinking streams)';
@@ -11962,7 +12054,7 @@ ${wpts.join('\n')}
         const stalk = Math.max(10, relief * 0.15);
         // Grouped by mode so each group can be drawn in its mode's colour
         const mk = [], mkGroups = [];
-        const ord3 = [...SCAN_ALL_ORDER, 'dlmounds', 'dleffigy', 'dlshell'];
+        const ord3 = [...SCAN_ALL_ORDER, 'dlmounds', 'dlbigmounds', 'dleffigy', 'dlshell'];
         const featsSorted = detectedFeatures.filter(f => modeVisible(f.mode)).sort((a, b) => ord3.indexOf(a.mode) - ord3.indexOf(b.mode));
         for (const f of featsSorted) {
             if (f.lat > rb.n || f.lat < rb.s || f.lon < rb.w || f.lon > rb.e) continue;

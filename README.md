@@ -244,6 +244,18 @@ This changed what the networks see, so each model must be trained once more. You
 
 A model that has never been trained, or whose method was upgraded, is trained too. One with fewer than 3 examples with a picture is skipped. A bar shows progress, then each model's result. If nothing is new, the panel says why for each model ("up to date", "only 1 shell midden with a picture").
 
+**Large & platform mounds model.** The Mounds model looks at 130 ft squares, so mounds wider than about 115 ft are left out of its training: platform mounds, and big conical mounds like Grave Creek. A fourth model, *Large & platform mounds*, covers them:
+
+- **What it sees:** 650 ft squares at 8 ft per cell, with the same six views as the others.
+- **What it learns from:** the confirmed mounds you already have, but only those recorded as 100 to 590 ft across. Smaller mounds are left to the Mounds model and don't count as "not a mound" to it. It also learns from your "Not real" mound marks on things at least 80 ft across, such as natural hills and ridges, and from background ground.
+- **Measuring its results:** each candidate is measured as the rise above a plane fitted to the ground around it, widened until the whole mound fits. The scan's own mound measurer is tuned for smaller mounds.
+- **Results:** violet "P" diamonds.
+- **Getting started:** pick it in the **Model** menu, open **Review training images** and use **Download terrain** for its "No image yet" items. Then train it, or press **Train all models with new data**. Tour answers and Yes / Not real on mound results take pictures for both mound models.
+
+In a synthetic test it found all 8 large mounds in two areas it never saw, with no false alarms.
+
+**Re-measure.** In the training data map's **Edit** popup for a mound (or shell midden), **Re-measure** measures the feature under the point from the loaded terrain and fills in its height and width; **Save** keeps them. Mounds up to about 115 ft use the scan's mound measurer; bigger ones use the rise above the surrounding ground. In tests that was within about 10% of the true size for platform and conical mounds 120–440 ft across. Use it to fix records like a mound saved at the size of a whole site, then train again.
+
 **Three models.** The **Model** menu at the top of the Deep Learning section switches between *Mounds*, *Effigy & linear mounds* and *Shell middens & rings*. Each has its own samples, network, accuracy check and save file. The effigy model:
 
 - learns from your confirmed effigies (scan results answered Yes, or *This is an Effigy*) and your "Not real" marks in the effigy mode, plus random ground;
