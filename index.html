@@ -5335,6 +5335,10 @@
               <select class="galNeedSel" onchange="if (this.value) { const v = this.value; this.value = ''; galMoveKind(gal.items.filter(x => gal.sel.has(x.dlKey)), v, true); }" style="width:auto;margin:0;padding:4px;font-size:0.76rem;"><option value="">&#8644; Change selected to...</option>${KIND_MODES.filter(m => m !== gal.model).map(m => `<option value="${m}">${KIND_LABEL[m]}</option>`).join('')}</select>
             </div>
             <div style="font-size:0.72rem;color:#64748b;margin-top:6px;line-height:1.4;">Shaded terrain ${sq} m (${Math.round(sq / FT_TO_M)} ft) square around each item, light from the north-west; the red ring is the spot that was labelled${gal.model === 'mounds' ? ', drawn at the recorded size' : ''}. A real ${P.NOUN} should be a clear rise right in the middle. <b>Remove</b> deletes the item; <b>Not real</b> keeps it as a "not a ${P.NOUN}" example, which also teaches the network. Tap a picture to select it. More pictures load as you scroll.</div>
+            <div id="galDlRow" style="display:none;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;padding:6px 8px;background:#fff7ed;border:1px solid #fed7aa;border-radius:6px;">
+              <button id="galDlBtn" onclick="galDownloadMissing()" style="${btn}background:#ea580c;color:#fff;border:none;"></button>
+              <span id="galDlMsg" style="font-size:0.74rem;color:#7c2d12;flex:1 1 200px;">Downloads the terrain around each item without a picture, area by area, and takes their pictures.</span>
+            </div>
             <div id="galShowing" style="font-size:0.78rem;font-weight:600;color:#1e293b;margin-top:6px;"></div>
           </div>
           <div id="galGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));gap:8px;padding:10px 12px;"></div>
@@ -5364,6 +5368,56 @@
     function galUpdateSel() {
         const c = document.getElementById('galSelCount'); if (c) c.innerText = `${gal.sel.size} selected`;
         for (const b of document.querySelectorAll('#trainingGallery .galNeedSel')) b.disabled = !gal.sel.size;
+        // terrain downloads for items without a picture: the selected ones, or
+        // every one shown in the "No image yet" view when none are selected
+        const row = document.getElementById('galDlRow'), b = document.getElementById('galDlBtn'); if (!row || !b) return;
+        const todo = galMissingTodo();
+        row.style.display = todo.items.length || gal.dlRunning ? 'flex' : 'none';
+        if (!gal.dlRunning) { b.disabled = !todo.items.length; b.innerHTML = `&#11015; Download terrain for ${todo.selected ? `the ${todo.items.length} selected` : `all ${todo.items.length}`} without a picture`; }
+    }
+    function galMissingTodo() {
+        const sel = (gal.items || []).filter(x => gal.sel.has(x.dlKey) && !x.cm);
+        if (sel.length) return { items: sel, selected: true };
+        return { items: gal.filter === 'noimg' ? (gal.vis || []).filter(x => !x.cm) : [], selected: false };
+    }
+    // Downloads each area holding items without a picture (the grouping the
+    // "Show them on the map" tool uses, about a mile square at most), takes
+    // the pictures for this model, and moves on; Stop ends after the area
+    async function galDownloadMissing() {
+        const b = document.getElementById('galDlBtn'), msg = document.getElementById('galDlMsg');
+        if (gal.dlRunning) { gal.dlStop = true; b.disabled = true; b.innerText = 'Stopping after this area...'; return; }
+        if (downloadAbort || scanInProgress || tourBusy || dlBusy) { msg.innerText = 'Wait for the current download, scan, tour or training to finish.'; return; }
+        const todo = galMissingTodo().items; if (!todo.length) return;
+        const model = gal.model, P = DL_PROFILES[model], areas = dlGroupAreas(todo);
+        const half = P.PATCH * P.RES / 2 + 30;   // room for each item's whole picture
+        gal.dlRunning = true; gal.dlStop = false;
+        b.innerHTML = '&#9632; Stop';
+        dlPrefsFor(model).enabled = true;
+        let got = 0, failed = 0, done = 0;
+        try {
+            for (const a of areas) {
+                if (gal.dlStop) break;
+                const dLat = half / 111320, dLon = half / (111320 * Math.cos((a.n + a.s) / 2 * Math.PI / 180));
+                const bnd = { n: a.n + dLat, s: a.s - dLat, e: a.e + dLon, w: a.w - dLon };
+                msg.innerText = `Area ${done + 1} of ${areas.length} (${a.items.length} item${a.items.length === 1 ? '' : 's'}): downloading...`;
+                map.fitBounds([[bnd.s, bnd.w], [bnd.n, bnd.e]], { animate: false });
+                const before = fullDemGrid;
+                window.__dlBoundsOverride = bnd;
+                try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
+                done++;
+                if (!fullDemGrid || fullDemGrid === before) { failed++; continue; }
+                msg.innerText = `Area ${done} of ${areas.length}: taking pictures...`;
+                const r = await dlHarvestFor(model, fullDemGrid, true);
+                got += r.items || 0;
+            }
+        } finally {
+            gal.dlRunning = false; gal.dlStop = false;
+            await dlLoadPatchesFor(model);
+            renderTrainingGallery();
+            const m2 = document.getElementById('galDlMsg');
+            if (m2) m2.innerHTML = `<b>${got} picture${got === 1 ? '' : 's'} taken</b> from ${done} area${done === 1 ? '' : 's'}` + (failed ? `; ${failed} download${failed === 1 ? '' : 's'} failed (check the connection)` : '') + (done < areas.length ? `; ${areas.length - done} area${areas.length - done === 1 ? '' : 's'} left` : '') + '.' + (got ? ' Train the model again to use them.' : '');
+            const row = document.getElementById('galDlRow'); if (row) row.style.display = 'flex';
+        }
     }
     function galCard(x, P) {
         const px = 132, sq = Math.round(P.PATCH * P.RES), ft = metersToFeetInches, real = P.NOUN.charAt(0).toUpperCase() + P.NOUN.slice(1);
