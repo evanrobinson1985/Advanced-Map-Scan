@@ -776,6 +776,7 @@
         </div>
         <button id="dlCollectBtn" onclick="dlCollectNow()" style="font-size:0.8rem;">Collect samples from this DTM</button>
         <button id="dlTrainBtn" onclick="dlTrain()" style="background:#f3e8ff;color:#6b21a8;">&#129504; Train model</button>
+        <button id="dlTrainAllBtn" onclick="dlTrainAllNew()" style="font-size:0.8rem;background:#ede9fe;color:#5b21b6;">&#129504; Train all models with new data (mounds, effigies, shell middens)</button>
         <button id="dlCheckBtn" onclick="openTrainingCheck()" style="font-size:0.8rem;background:#fef3c7;color:#92400e;">&#129658; Check training data</button>
         <button id="dlGalleryBtn" onclick="openTrainingGallery(DL.key)" style="font-size:0.8rem;background:#e0e7ff;color:#3730a3;">&#128444; Review training images</button>
         <button id="dlTourBtn" onclick="openTourManager()" style="font-size:0.8rem;background:#ccfbf1;color:#115e59;">&#128506; Training-site tour (public mound sites)</button>
@@ -4422,6 +4423,45 @@
         m.compile({ optimizer: tf.train.adam(0.001), loss: 'binaryCrossentropy', metrics: ['accuracy'] });
         return m;
     }
+    // A fingerprint of the samples a model learns from: which items, with
+    // which labels, which are too big to use, and how much background. Any
+    // new, removed, relabelled or re-kinded item, or new background, changes it.
+    function dlDataSig(S) {
+        const parts = [S.pos.map(s => s.key).sort().join(','), S.neg.map(s => s.key).sort().join(','), S.tooBig.map(s => s.key).sort().join(','), S.bg.length];
+        let h = 2166136261; const str = parts.join('|');
+        for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+        return h.toString(36) + ':' + str.length;
+    }
+    // Whether a model has data it hasn't learned from yet; { need, why, pos, neg, bg }
+    async function dlTrainingNeed(key) {
+        await dlLoadPatchesFor(key);
+        return dlWithProfile(key, () => {
+            const S = dlUsableSamples(), m = dlPrefs().model, neg = S.neg.length + S.bg.length;
+            const base = { pos: S.pos.length, neg, bg: S.bg.length };
+            if (S.pos.length < 3) return { ...base, need: false, why: `only ${S.pos.length} ${S.pos.length === 1 ? DL.NOUN : DL.NOUNS} with a picture (3 needed)` };
+            if (!m) return { ...base, need: true, why: 'never trained' };
+            if (m.version !== DL.MODEL_VERSION) return { ...base, need: true, why: 'the method was upgraded' };
+            if (m.dataSig ? m.dataSig !== dlDataSig(S) : (m.pos !== S.pos.length || m.neg !== neg)) {
+                const dp = S.pos.length - m.pos, dn = neg - m.neg;
+                const d = [dp ? `${dp > 0 ? '+' : ''}${dp} ${Math.abs(dp) === 1 ? DL.NOUN : DL.NOUNS}` : '', dn ? `${dn > 0 ? '+' : ''}${dn} not-${DL.NOUNS}` : ''].filter(Boolean).join(', ');
+                return { ...base, need: true, why: d ? `new data (${d})` : 'edited data' };
+            }
+            return { ...base, need: false, why: 'up to date' };
+        });
+    }
+    // The "Train all models with new data" button
+    async function dlTrainAllNew() {
+        if (tourTraining || tourBusy || dlBusy) { dlSetStatus('Wait for the current tour, scan or training to finish.'); return; }
+        dlSetStatus('Checking which models have new data...');
+        const res = {};
+        for (const k of Object.keys(DL_PROFILES)) res[k] = await dlTrainingNeed(k);
+        const need = Object.keys(res).filter(k => res[k].need);
+        const lines = Object.keys(res).map(k => `${DL_PROFILES[k].label}: ${res[k].why}`).join('; ');
+        if (!need.length) { dlSetStatus(`Nothing new to train. ${lines}.`); return; }
+        dlSetStatus(`Training ${need.length} model${need.length === 1 ? '' : 's'}: ${lines}.`);
+        if (document.getElementById('panelContent').style.display !== 'none') togglePanel();
+        await tourTrainAll(`<b>Train all models with new data</b> &middot; `, need);
+    }
     // The held-out check: whole ~2 km squares are held back until about a
     // fifth of the positives are in them, with all the negatives and
     // background in those squares, and anything within 100 m of a held-back
@@ -4460,7 +4500,7 @@
     function dlShuffle(a, rnd) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
     function dlSetBusy(on) {
         dlBusy = on; dlCancel = false;
-        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn', 'dlCheckBtn', 'dlTourBtn', 'dlProfile']) { const b = document.getElementById(id); if (b) b.disabled = on; }
+        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn', 'dlCheckBtn', 'dlTourBtn', 'dlTrainAllBtn', 'dlProfile']) { const b = document.getElementById(id); if (b) b.disabled = on; }
         const s = document.getElementById('dlStopBtn'); if (s) s.style.display = on ? 'block' : 'none';
     }
     async function dlTrain() {
@@ -4521,7 +4561,7 @@
             }
             await model.save(DL.MODEL_URL);
             dlModel = model;
-            dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val, version: DL.MODEL_VERSION };
+            dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val, version: DL.MODEL_VERSION, dataSig: dlDataSig(S) };
             const nRetired = tourAfterTrain(DL.key, dlPrefs().model.at) || 0;
             saveTrainingData();
             await updateDLSummary();
@@ -6232,10 +6272,10 @@
     // effigy & linear mounds, shell middens); each finished site then leaves
     // the list. The model you had selected is selected again afterwards.
     let tourTraining = false;
-    async function tourTrainAll(prefix) {
+    async function tourTrainAll(prefix, models) {
         if (tourTraining || tourBusy || dlBusy) { tourBar('Wait for the current tour, scan or training to finish.', false); return; }
         await tourLoadQueue();
-        const need = tourModelsToTrain();
+        const need = models || tourModelsToTrain();
         if (!need.length) { tourBar('No reviewed sites are waiting for training.', false); return; }
         const m = document.getElementById('tourModal'); if (m) m.remove();
         tourTraining = true;
@@ -6263,7 +6303,7 @@
         }
         const gone = sitesBefore - tourData().sites.length;
         tourBar(`${prefix || ''}<b>Training finished</b> (${Math.max(1, Math.round((Date.now() - t0) / 60000))} min): ${out.join('; ')}. ` +
-            (gone ? `${gone} site${gone === 1 ? '' : 's'} finished and left the tour list.` : 'No sites finished yet.') +
+            (gone ? `${gone} site${gone === 1 ? '' : 's'} finished and left the tour list.` : models ? '' : 'No sites finished yet.') +
             (out.some(x => x.startsWith('&#10007;')) ? ' A model that could not train keeps its sites on the list until it has enough examples.' : ''), false);
     }
     const dlPatchSaveTimers = {};

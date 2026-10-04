@@ -235,6 +235,15 @@ How it works:
 
 This changed what the networks see, so each model must be trained once more. Your terrain samples are kept, and the panel says when to retrain.
 
+**Train all models with new data.** This button in the Deep Learning section trains every model that has data it hasn't learned from yet, one after another, and leaves the rest alone. Each model remembers exactly what it was trained on: which items and labels, and how much background ground. Any of these counts as new data:
+
+- a new confirmation, "Not real" mark, outline or tour answer;
+- a removal, a relabel or a change of kind;
+- a newly taken terrain picture;
+- background from a newly loaded area.
+
+A model that has never been trained, or whose method was upgraded, is trained too. One with fewer than 3 examples with a picture is skipped. A bar shows progress, then each model's result. If nothing is new, the panel says why for each model ("up to date", "only 1 shell midden with a picture").
+
 **Three models.** The **Model** menu at the top of the Deep Learning section switches between *Mounds*, *Effigy & linear mounds* and *Shell middens & rings*. Each has its own samples, network, accuracy check and save file. The effigy model:
 
 - learns from your confirmed effigies (scan results answered Yes, or *This is an Effigy*) and your "Not real" marks in the effigy mode, plus random ground;
