@@ -5610,6 +5610,15 @@
                 <button onclick="const c = map.getCenter(); document.getElementById('tourAddWhere').value = c.lat.toFixed(5) + ', ' + c.lng.toFixed(5);" style="${btn}">Use map centre</button>
               </div>
               <div id="tourAddMsg" style="font-size:0.74rem;color:#64748b;margin-top:3px;">Only add places you know have mounds, preferably public sites.</div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px;">
+                <b style="font-size:0.85rem;">Many at once:</b>
+                <button onclick="document.getElementById('tourImportInput').click()" style="${btn}background:#dbeafe;color:#1e3a8a;">&#128196; Import sites (CSV or Excel)</button>
+                <span style="font-size:0.74rem;color:#475569;">rows with no kind:</span>
+                <select id="tourImportKind" style="width:auto;margin:0;padding:4px;">${Object.entries(TOUR_KIND_TEXT).map(([v, l]) => `<option value="${v}" ${v === 'mounds' ? 'selected' : ''}>${l}</option>`).join('')}</select>
+                <button onclick="tourExportCSV()" style="${btn}">&#11015; Download site list</button>
+                <input type="file" id="tourImportInput" accept=".csv,.tsv,.txt,.xlsx,.xls,.xlsm,.ods" style="display:none" onchange="tourImportFile(this)">
+              </div>
+              <div id="tourImportMsg" style="font-size:0.74rem;color:#64748b;margin-top:3px;line-height:1.4;">A header row, then one site per row. Columns are found by name: <i>Name</i>; <i>Latitude</i> and <i>Longitude</i> (or one <i>Coordinates</i> column, or an <i>Address</i> to look up); and optionally <i>Kind</i> (mounds, effigy, shell, both, mounds + shell). Sites already listed or finished are skipped. <b>Download site list</b> saves the list in the same format.</div>
             </div>
             ${t.sites.map(s => { const st = tourSiteStatus(s); return `<div style="padding:7px 12px;border-bottom:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;">
                 <div style="flex:1;min-width:0;"><b>${escapeHtml(s.name)}</b> <span style="font-size:0.72rem;color:#64748b;">${kindTxt[s.kind] || ''}</span><br>
@@ -5618,6 +5627,122 @@
                 <button style="${btn}" onclick="tourGoTo('${s.id}')" ${s.lat != null ? '' : 'disabled'}>Go to</button>
                 <button style="${btn}background:#fee2e2;color:#991b1b;" onclick="tourRemoveSite('${s.id}')">Remove</button></div>`; }).join('') || '<div style="padding:14px;color:#64748b;">No sites left. Add more above.</div>'}
           </div>`;
+    }
+    // ---- Bulk import / export of tour sites ----
+    // A CSV (comma, semicolon or tab) or an Excel / OpenDocument sheet with a
+    // header row. Columns are found by name, in any order:
+    //   name (name, site, title)       latitude (lat, latitude, y)
+    //   longitude (lon, lng, long, longitude, x)
+    //   or one coordinates column ("43.08, -91.18")
+    //   address (address, location, place, lookup, query; used when there
+    //            are no coordinates, looked up when the site is toured)
+    //   kind (kind, type, category): mound / effigy / shell, or both, or
+    //        "mounds + shell"; blank = the kind picked beside the button
+    // Rows within 200 m of a listed or finished site, or of each other, are
+    // skipped; so are rows with neither usable coordinates nor an address.
+    function tourParseCSV(text) {
+        text = text.replace(/^﻿/, '');
+        const first = text.split(/\r?\n/).find(l => l.trim()) || '';
+        const delim = [',', ';', '\t'].map(d => [d, first.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+        const rows = []; let row = [], cell = '', q = false;
+        for (let i = 0; i < text.length; i++) {
+            const ch = text[i];
+            if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+            else if (ch === '"') q = true;
+            else if (ch === delim) { row.push(cell); cell = ''; }
+            else if (ch === '\n' || ch === '\r') { if (ch === '\r' && text[i + 1] === '\n') i++; row.push(cell); rows.push(row); row = []; cell = ''; }
+            else cell += ch;
+        }
+        if (cell !== '' || row.length) { row.push(cell); rows.push(row); }
+        return rows.filter(r => r.some(c => String(c).trim() !== ''));
+    }
+    let xlsxLoading = null;
+    function loadXLSX() {
+        if (window.XLSX) return Promise.resolve(window.XLSX);
+        return xlsxLoading || (xlsxLoading = new Promise((res, rej) => {
+            const s = document.createElement('script'); s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+            s.onload = () => res(window.XLSX); s.onerror = () => { xlsxLoading = null; rej(new Error('the spreadsheet reader could not be loaded (needs an internet connection)')); };
+            document.head.appendChild(s);
+        }));
+    }
+    function tourKindFrom(text, fallback) {
+        const t = String(text || '').toLowerCase();
+        if (!t.trim()) return fallback;
+        const shell = /shell|midden/.test(t), eff = /effig|linear|bird|animal/.test(t), mound = /mound|conical|platform|burial/.test(t.replace(/effigy mound|linear mound|shell mound/g, ''));
+        if (/both/.test(t)) return shell ? 'mounds+shell' : 'both';
+        if (shell && mound) return 'mounds+shell';
+        if (eff && mound) return 'both';
+        if (shell) return 'shell';
+        if (eff) return 'effigy';
+        if (TOUR_KIND_TEXT[t.trim()]) return t.trim();
+        return /mound/.test(t) ? 'mounds' : fallback;
+    }
+    function tourRowsToSites(rows, fallbackKind) {
+        const head = rows[0].map(h => String(h).trim().toLowerCase());
+        const col = (...names) => head.findIndex(h => names.some(n => h === n || h.replace(/[^a-z]/g, '') === n.replace(/[^a-z]/g, '')));
+        const colLike = (re) => head.findIndex(h => re.test(h));
+        const iName = col('name', 'site', 'site name', 'title') >= 0 ? col('name', 'site', 'site name', 'title') : colLike(/name|site/);
+        let iLat = col('lat', 'latitude', 'y'), iLon = col('lon', 'lng', 'long', 'longitude', 'x');
+        if (iLat < 0) iLat = colLike(/^lat|latitude/); if (iLon < 0) iLon = colLike(/^lon|^lng|longitude/);
+        const iCoord = colLike(/coord|lat.*lon|position/);
+        const iAddr = iLat < 0 || iLon < 0 ? colLike(/address|location|place|lookup|query/) : colLike(/address|lookup|query/);
+        const iKind = colLike(/^kind|^type|categor/);
+        const out = [], bad = [];
+        if (iLat < 0 && iCoord < 0 && iAddr < 0) return { out, bad: ['No latitude/longitude, coordinates or address column was found in the header row.'], head };
+        for (let r = 1; r < rows.length; r++) {
+            const row = rows[r], get = (i) => i >= 0 && row[i] != null ? String(row[i]).trim() : '';
+            let lat = null, lon = null;
+            const la = parseFloat(get(iLat)), lo = parseFloat(get(iLon));
+            if (isFinite(la) && isFinite(lo)) { lat = la; lon = lo; }
+            else if (get(iCoord)) { const c = parseCoordinates(get(iCoord)); if (c) { lat = c.lat; lon = c.lon; } }
+            const address = get(iAddr);
+            if (lat != null && (Math.abs(lat) > 90 || Math.abs(lon) > 180)) { lat = lon = null; if (!address) { bad.push(`row ${r + 1}: coordinates out of range`); continue; } }
+            if (lat == null && !address) { bad.push(`row ${r + 1}: no coordinates or address`); continue; }
+            const name = get(iName) || address || `${lat.toFixed(4)}, ${lon.toFixed(4)}`;
+            out.push({ name, kind: tourKindFrom(get(iKind), fallbackKind), lat, lon, address: lat == null ? address : (iAddr >= 0 && iLat >= 0 ? address : '') });
+        }
+        return { out, bad, head };
+    }
+    async function tourImportFile(input) {
+        const file = input.files && input.files[0]; input.value = '';
+        const msg = document.getElementById('tourImportMsg'); if (!file) return;
+        const fallback = (document.getElementById('tourImportKind') || { value: 'mounds' }).value;
+        try {
+            msg.innerText = `Reading ${file.name}...`;
+            let rows;
+            if (/\.(xlsx|xlsm|xls|ods)$/i.test(file.name)) {
+                const X = await loadXLSX(), wb = X.read(await file.arrayBuffer(), { type: 'array' });
+                rows = X.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' }).filter(r => r.some(c => String(c).trim() !== ''));
+            } else rows = tourParseCSV(await file.text());
+            if (!rows || rows.length < 2) { msg.innerText = 'The file has no rows under a header row.'; return; }
+            const { out, bad } = tourRowsToSites(rows, fallback);
+            const t = tourData(), known = [...t.sites, ...t.done].filter(s => s.lat != null), names = new Set([...t.sites, ...t.done].map(s => s.name.toLowerCase()));
+            let added = 0, dup = 0;
+            for (const s of out) {
+                const near = s.lat != null ? known.some(k => approxMetersBetween(k.lat, k.lon, s.lat, s.lon) < 200) : names.has(s.name.toLowerCase());
+                if (near) { dup++; continue; }
+                const site = { id: 'ts' + Math.random().toString(36).slice(2, 10), name: s.name, kind: s.kind, lat: s.lat, lon: s.lon, address: s.address || '', status: 'waiting', added: Date.now(), userAdded: true, imported: file.name };
+                t.sites.push(site); added++;
+                if (site.lat != null) known.push(site); names.add(site.name.toLowerCase());
+            }
+            if (added) saveTrainingData();
+            renderTourManager();
+            const m2 = document.getElementById('tourImportMsg');
+            if (m2) m2.innerHTML = `<b style="color:#166534;">${added} site${added === 1 ? '' : 's'} added</b> from ${escapeHtml(file.name)}` +
+                (dup ? `; ${dup} skipped (already listed, finished, or within 650 ft of another)` : '') +
+                (bad.length ? `; ${bad.length} row${bad.length === 1 ? '' : 's'} skipped: ${escapeHtml(bad.slice(0, 3).join('; '))}${bad.length > 3 ? '...' : ''}` : '') + '.';
+        } catch (e) { console.error(e); msg.innerText = 'Could not read that file: ' + (e.message || e); }
+    }
+    // The whole list as a CSV (waiting, toured and finished), in the same
+    // format the import reads
+    function tourExportCSV() {
+        const t = tourData(), q = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+        const lines = ['Name,Kind,Latitude,Longitude,Address or lookup name,Status,Location'];
+        for (const s of t.sites) lines.push([s.name, TOUR_KIND_TEXT[s.kind] || s.kind, s.lat != null ? s.lat.toFixed(6) : '', s.lon != null ? s.lon.toFixed(6) : '', s.address || s.query || '', tourSiteStatus(s).text, s.approx ? 'approximate' : s.locatedBy ? 'from map lookup' : (s.lat != null ? 'as entered' : 'address')].map(q).join(','));
+        for (const d of t.done) lines.push([d.name, '', d.lat != null ? d.lat.toFixed(6) : '', d.lon != null ? d.lon.toFixed(6) : '', '', d.removed ? 'Removed from the list' : 'Finished (trained)', ''].map(q).join(','));
+        const blob = new Blob([lines.join('\r\n') + '\r\n'], { type: 'text/csv' }), a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = 'training-tour-sites-' + new Date().toISOString().slice(0, 10) + '.csv';
+        document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     }
     async function tourAddSite() {
         const name = document.getElementById('tourAddName').value.trim(), where = document.getElementById('tourAddWhere').value.trim(), kind = document.getElementById('tourAddKind').value;

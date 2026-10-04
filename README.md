@@ -259,6 +259,12 @@ Every DTM you load collects samples for each model once you have used it. Save f
 - **Training all three models automatically.** When you answer the last candidate, the app trains every model you gave answers for, one after another: Mounds, Effigy & linear mounds, then Shell middens & rings. A bar shows the progress, then each model's result. A model with fewer than 3 confirmed examples can't train yet, and its sites stay on the list. **🧠 Train all models** in the tour list does the same at any time, for example after pausing a review.
 - **Sites leave the list once trained.** A site is finished when it has been toured, all its candidates are answered, and the model for each kind you labelled there has been trained since. A site whose candidates were all mounds needs only the Mounds model. A site with effigies also needs the Effigy & linear mounds model. Finished sites are removed from the list, and the training message says how many left. Finished and removed default sites are remembered, so they never come back.
 - **Adding sites.** Enter coordinates or an address, or use the map centre, with an optional name and the kind of mounds there. Sites within 200 m of one already listed are refused. Add only places you know have mounds, preferably public ones. **Remove** takes a site off the list, along with its unanswered candidates.
+- **Adding many sites at once.** **Import sites (CSV or Excel)** reads a CSV (comma, semicolon or tab separated) or an Excel / OpenDocument sheet (.xlsx, .xls, .ods; the reader loads from a CDN on first use). It needs a header row, then one site per row. Columns are found by their names, in any order:
+  - *Name*;
+  - *Latitude* and *Longitude*, or one *Coordinates* column in any format the search box takes, or an *Address* to look up when the site is toured;
+  - optionally *Kind*: mounds, effigy, shell, both, or mounds + shell. Words like "effigy mounds" or "shell midden" work too, and blank rows use the kind picked beside the button.
+
+  Sites within 650 ft of one already listed or finished are skipped, and the result line says how many were added and why any rows were skipped. **Download site list** saves the whole list, waiting and finished, in the same format. `docs/all-training-sites.csv` (and `.xlsx`) lists all 156 suggested sites in that format.
 
 Expect rough results with fewer than about 20 confirmed mounds (or effigies). Random ground can occasionally contain an unrecorded mound, which slightly confuses the network. Mounds wider than about 35 m don't fit in its window.
 
