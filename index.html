@@ -3766,13 +3766,13 @@
     // effigy scan uses). DL is the one selected in the panel.
     const DL_PROFILES = {
         mounds: { key: 'mounds', label: 'Mounds', PATCH: 48, INPUT: 40, RES: 1.0, BORDER: 3, STRIDE: 4, BG_PER_AREA: 150, BG_MAX: 4000, MAX_POS_D: 35, MAX_SCAN_CELLS: 2.5e6,
-                  CH: 4, MODEL_VERSION: 3, MODEL_URL: 'indexeddb://lidar-dl-mounds-v3', EPOCHS: 40, IDB_KEY: 'dlPatches', PREFS_KEY: 'dl', TRAIN_MODE: 'mounds',
+                  CH: 6, MODEL_VERSION: 4, MODEL_URL: 'indexeddb://lidar-dl-mounds-v4', EPOCHS: 40, IDB_KEY: 'dlPatches', PREFS_KEY: 'dl', TRAIN_MODE: 'mounds',
                   RESULT_MODE: 'dlmounds', FEATURES: 'mound', PEAK_SEP: 15, AVOID_M: 35, NOUN: 'mound', NEG_NOUN: 'not-mound', NOUNS: 'mounds', NEG_NOUNS: 'not-mounds' },
         effigy: { key: 'effigy', label: 'Effigy & linear mounds', PATCH: 72, INPUT: 64, RES: 2.0, BORDER: 4, STRIDE: 8, BG_PER_AREA: 120, BG_MAX: 1500, MAX_POS_D: 1e9, MAX_SCAN_CELLS: 1.2e6,
-                  CH: 4, MODEL_VERSION: 2, MODEL_URL: 'indexeddb://lidar-dl-effigy-v2', EPOCHS: 40, IDB_KEY: 'dlPatchesEffigy', PREFS_KEY: 'dlEffigy', TRAIN_MODE: 'effigy',
+                  CH: 6, MODEL_VERSION: 3, MODEL_URL: 'indexeddb://lidar-dl-effigy-v3', EPOCHS: 40, IDB_KEY: 'dlPatchesEffigy', PREFS_KEY: 'dlEffigy', TRAIN_MODE: 'effigy',
                   RESULT_MODE: 'dleffigy', FEATURES: 'effigy', PEAK_SEP: 40, AVOID_M: 80, NOUN: 'effigy', NEG_NOUN: 'not-effigy', NOUNS: 'effigies', NEG_NOUNS: 'not-effigies' },
         shell: { key: 'shell', label: 'Shell middens & rings', PATCH: 72, INPUT: 64, RES: 3.0, BORDER: 4, STRIDE: 6, BG_PER_AREA: 100, BG_MAX: 1500, MAX_POS_D: 1e9, MAX_SCAN_CELLS: 1.5e6,
-                 CH: 4, MODEL_VERSION: 2, MODEL_URL: 'indexeddb://lidar-dl-shell-v2', EPOCHS: 40, IDB_KEY: 'dlPatchesShell', PREFS_KEY: 'dlShell', TRAIN_MODE: 'shell', CLIP: 15,
+                 CH: 6, MODEL_VERSION: 3, MODEL_URL: 'indexeddb://lidar-dl-shell-v3', EPOCHS: 40, IDB_KEY: 'dlPatchesShell', PREFS_KEY: 'dlShell', TRAIN_MODE: 'shell', CLIP: 15,
                  RESULT_MODE: 'dlshell', FEATURES: 'shell', PEAK_SEP: 60, AVOID_M: 100, NOUN: 'shell midden', NEG_NOUN: 'not-midden', NOUNS: 'shell middens', NEG_NOUNS: 'not-middens' }
     };
     let DL = DL_PROFILES.mounds;
@@ -3956,7 +3956,14 @@
     //     smooth rises like mounds;
     //  3. steepness of the relief (1 = 27 degrees, 2 = 45 or steeper).
     function dlScratch() { const N = DL.INPUT; return DL._s || (DL._s = { rel: new Float32Array(N * N), int: new Float64Array((N + 1) ** 2), raw: new Float32Array(N * N) }); }
-    function dlFeatures(w, woff, out, ooff) {
+    // Views 5 and 6, from openness maps of the same window (opP, opN; see
+    // dlOpenness), or 0 when none are given
+    function dlFeatures(w, woff, out, ooff, opP, opN) {
+        dlFeaturesBase(w, woff, out, ooff);
+        const N = DL.INPUT, C = DL.CH;
+        if (C >= 6) for (let i = 0; i < N * N; i++) { out[ooff + i * C + 4] = opP ? opP[i] : 0; out[ooff + i * C + 5] = opN ? opN[i] : 0; }
+    }
+    function dlFeaturesBase(w, woff, out, ooff) {
         if (DL.FEATURES === 'effigy') return dlFeaturesEffigy(w, woff, out, ooff);
         if (DL.FEATURES === 'shell') return dlFeaturesShell(w, woff, out, ooff);
         const N = DL.INPUT, M = N + 1, C = DL.CH, R = dlScratch().rel, dlInt = dlScratch().int;
@@ -4035,12 +4042,65 @@
             dst[r * N + c] = src[soff + rr * sStride + cc] * scale;
         }
     }
+    // Openness (Yokoyama et al.), the standard LiDAR-archaeology view that
+    // brings out low, broad features: for each cell, the highest (and
+    // lowest) angle to the ground in 8 directions out to R cells. Positive
+    // openness is 90 degrees minus the mean highest angle: above 90 on a rise
+    // (a mound top sees open sky all round), below in a hollow; negative
+    // openness (from the lowest angles) picks out ditches, pits and the
+    // foot of a feature. Unlike relief, neither depends on the window's edges
+    // or the ground's tilt removal. Returned as network inputs:
+    // (openness - 90) / 10 degrees, clipped to +-3.
+    function dlOpenness(z, W, H, res, R) {
+        const pos = new Float32Array(W * H), neg = new Float32Array(W * H);
+        const dirs = [[1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0], [-1, -1], [0, -1], [1, -1]];
+        for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) {
+            const z0 = z[r * W + c]; if (z0 !== z0) continue;
+            let sp = 0, sn = 0, nd = 0;
+            for (const [dc, dr] of dirs) {
+                const step = Math.hypot(dc, dr) * res;
+                let hiA = -Infinity, loA = Infinity;
+                for (let k = 1; k <= R; k++) {
+                    const rr = r + dr * k, cc = c + dc * k; if (rr < 0 || cc < 0 || rr >= H || cc >= W) break;
+                    const zz = z[rr * W + cc]; if (zz !== zz) continue;
+                    const a = Math.atan2(zz - z0, k * step);
+                    if (a > hiA) hiA = a; if (a < loA) loA = a;
+                }
+                if (hiA === -Infinity) continue;
+                sp += hiA; sn += loA; nd++;
+            }
+            if (!nd) continue;
+            const P = 90 - (sp / nd) * 180 / Math.PI, Nn = 90 + (sn / nd) * 180 / Math.PI;
+            pos[r * W + c] = Math.max(-3, Math.min(3, (P - 90) / 10));
+            neg[r * W + c] = Math.max(-3, Math.min(3, (Nn - 90) / 10));
+        }
+        return { pos, neg };
+    }
+    const DL_OPEN_R = 10;   // cells: 10 m for mounds, 20 m effigies, 30 m shell middens
+    // a stored patch's openness, worked out once per patch and model
+    const dlOpenCache = new WeakMap();
+    function dlPatchOpenness(cm) {
+        let c = dlOpenCache.get(cm);
+        if (c && c.key === DL.key) return c;
+        const P = DL.PATCH, z = new Float32Array(P * P);
+        for (let i = 0; i < P * P; i++) z[i] = cm[i] / 100;
+        c = { ...dlOpenness(z, P, P, DL.RES, DL_OPEN_R), key: DL.key };
+        dlOpenCache.set(cm, c);
+        return c;
+    }
     // One network input from a stored patch: crop at (dr, dc), one of the 8
-    // rotations/mirrors, height scaled, then the three views
+    // rotations/mirrors, height scaled, then the views
     function dlInputFromPatch(cm, out, off, dr, dc, t, hScale) {
-        const raw = dlScratch().raw;
+        const sc = dlScratch(), raw = sc.raw;
         dlOrient(cm, dr * DL.PATCH + dc, DL.PATCH, raw, t, 0.01 * hScale);
-        dlFeatures(raw, 0, out, off);
+        if (DL.CH >= 6) {
+            const op = dlPatchOpenness(cm), N = DL.INPUT;
+            if (!sc.opP) { sc.opP = new Float32Array(N * N); sc.opN = new Float32Array(N * N); }
+            // openness scales with height roughly as the angles do
+            const k = Math.atan(hScale) / Math.atan(1);
+            dlOrient(op.pos, dr * DL.PATCH + dc, DL.PATCH, sc.opP, t, k); dlOrient(op.neg, dr * DL.PATCH + dc, DL.PATCH, sc.opN, t, k);
+            dlFeatures(raw, 0, out, off, sc.opP, sc.opN);
+        } else dlFeatures(raw, 0, out, off);
     }
 
     // Training items that can teach the network, with labels as they are now
@@ -4152,7 +4212,7 @@
         el.innerHTML = `<b>Samples:</b> ${pl(s.pos.length, PN)}, ${pl(s.neg.length, NN)}, ${s.bg.length} background (${areas} area${areas === 1 ? '' : 's'})` +
             (s.tooBig.length ? `<br><span style="color:#475569;">${s.tooBig.length} mound${s.tooBig.length > 1 ? 's' : ''} wider than ${Math.round(DL.MAX_POS_D / FT_TO_M)} ft ${s.tooBig.length > 1 ? 'are' : 'is'} left to the regular scan (too big for the network's ${Math.round(DL.INPUT / FT_TO_M)} ft window).</span>` : '') +
             (s.missing.pos + s.missing.neg ? `<br><span style="color:#92400e;">${s.missing.pos ? pl(s.missing.pos, PN) : ''}${s.missing.pos && s.missing.neg ? ' and ' : ''}${s.missing.neg ? pl(s.missing.neg, NN) : ''} still need a sample: load a DTM that covers ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'}.</span> <a href="#" onclick="event.preventDefault(); dlShowMissing();" style="font-weight:bold;">Show ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'} on the map</a>` : '') +
-            `<br><b>Model:</b> ` + (m && dlModelOutdated() ? '<span style="color:#92400e;">the method was upgraded; press Train model again (samples are kept)</span>' : m ? `trained ${new Date(m.at).toLocaleString()} on ${pl(m.pos, PN)} and ${pl(m.neg, NN)}${m.val ? `; held-out check: found ${m.val.posHit} of ${pl(m.val.pos, PN)}, wrongly flagged ${m.val.negHit} of ${pl(m.val.neg, NN)}` : ` (too few ${DL.NOUNS} for a held-out check)`}` : 'not trained yet');
+            `<br><b>Model:</b> ` + (m && dlModelOutdated() ? '<span style="color:#92400e;">the method was upgraded; press Train model again (samples are kept)</span>' : m ? `trained ${new Date(m.at).toLocaleString()} on ${pl(m.pos, PN)} and ${pl(m.neg, NN)}${m.val ? `; ${dlValLabel(m.val).toLowerCase()}: found ${m.val.posHit} of ${pl(m.val.pos, PN)}, wrongly flagged ${m.val.negHit} of ${pl(m.val.neg, NN)}` : ` (too few ${DL.NOUNS} for a held-out check)`}` : 'not trained yet');
         tcUpdateBadge().catch(() => {});   // new samples can change the terrain check
     }
     // ---- Where the items without a sample are ----
@@ -4327,6 +4387,41 @@
         m.compile({ optimizer: tf.train.adam(0.001), loss: 'binaryCrossentropy', metrics: ['accuracy'] });
         return m;
     }
+    // The held-out check: whole ~2 km squares are held back until about a
+    // fifth of the positives are in them, with all the negatives and
+    // background in those squares, and anything within 100 m of a held-back
+    // positive is left out of training too. With all positives in one square
+    // it falls back to random items, and says so.
+    function dlAreaSplit(pos, neg, rnd) {
+        const none = { valPos: [], valNeg: [], trPos: pos, trNeg: neg, byArea: false, areas: 0 };
+        if (pos.length < 5) return none;
+        const cell = (s) => { const d = 0.018; return Math.floor(s.lat / d) + ':' + Math.floor(s.lon * Math.cos(s.lat * Math.PI / 180) / d); };
+        const byCell = new Map();
+        for (const s of pos) { const k = cell(s); if (!byCell.has(k)) byCell.set(k, []); byCell.get(k).push(s); }
+        const cells = dlShuffle([...byCell.keys()], rnd), want = Math.max(1, Math.round(pos.length / 5));
+        if (cells.length >= 2) {
+            const valCells = new Set(); let n = 0;
+            for (const k of cells) {
+                if (n >= want) break;
+                if (n + byCell.get(k).length > 0.4 * pos.length && n > 0) continue;   // keep most for training
+                valCells.add(k); n += byCell.get(k).length;
+            }
+            if (n > 0 && n < pos.length) {
+                const valPos = pos.filter(s => valCells.has(cell(s)));
+                const near = (s) => valPos.some(v => approxMetersBetween(v.lat, v.lon, s.lat, s.lon) < 100);
+                const valNeg = neg.filter(s => s.lat != null && valCells.has(cell(s)));
+                const trPos = pos.filter(s => !valCells.has(cell(s)) && !near(s));
+                const trNeg = neg.filter(s => !(s.lat != null && valCells.has(cell(s))) && !(s.lat != null && near(s)));
+                if (trPos.length >= 3) return { valPos, valNeg, trPos, trNeg, byArea: true, areas: valCells.size };
+            }
+        }
+        // all in one area: random items, as before
+        const nvn = Math.round(neg.length / 5);
+        return { valPos: pos.slice(0, want), valNeg: neg.slice(0, nvn), trPos: pos.slice(want), trNeg: neg.slice(nvn), byArea: false, areas: 0 };
+    }
+    function dlValLabel(val) {
+        return val.byArea ? `Held-out check on ${val.areas} area${val.areas === 1 ? '' : 's'} it never saw` : 'Held-out check (random items; all your examples are in one area, so this is optimistic)';
+    }
     function dlShuffle(a, rnd) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
     function dlSetBusy(on) {
         dlBusy = on; dlCancel = false;
@@ -4348,10 +4443,13 @@
             const tf = await loadTF();
             await dlUseBackend(tf, 'train');
             let seed = 12345; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
-            // held-out check: about 1 in 5 of each kind (only with 5+ mounds)
+            // held-out check (only with 5+ mounds): whole areas are held back,
+            // not random items, so the check is on places the network never
+            // saw (neighbouring mounds of one group are alike, and a random
+            // split would let it peek); see dlAreaSplit
             const pos = dlShuffle([...S.pos], rnd), neg = dlShuffle([...negAll], rnd);
-            const nvp = pos.length >= 5 ? Math.max(1, Math.round(pos.length / 5)) : 0, nvn = nvp ? Math.round(neg.length / 5) : 0;
-            const valPos = pos.slice(0, nvp), valNeg = neg.slice(0, nvn), trPos = pos.slice(nvp), trNeg = neg.slice(nvn);
+            const sp = dlAreaSplit(pos, neg, rnd);
+            const { valPos, valNeg, trPos, trNeg } = sp, nvp = valPos.length;
             const N = DL.INPUT, CH = DL.CH, sz = N * N * CH, c0 = (DL.PATCH - N) / 2;
             // mounds are rare: each epoch shows every mound several times
             // (shifted, turned, mirrored, a little taller or lower)
@@ -4384,7 +4482,7 @@
                 const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs, [vs.length * 8, N, N, CH])).dataSync());
                 const p = vs.map((_, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; return m / 8; });
                 const thr = dlThreshold();
-                val = { pos: valPos.length, neg: valNeg.length, posHit: vs.filter(([, y], i) => y && p[i] >= thr).length, negHit: vs.filter(([, y], i) => !y && p[i] >= thr).length };
+                val = { pos: valPos.length, neg: valNeg.length, posHit: vs.filter(([, y], i) => y && p[i] >= thr).length, negHit: vs.filter(([, y], i) => !y && p[i] >= thr).length, byArea: sp.byArea, areas: sp.areas };
             }
             await model.save(DL.MODEL_URL);
             dlModel = model;
@@ -4399,7 +4497,7 @@
             dlSetStatus(`Trained in ${Math.round((Date.now() - t0) / 1000)} s on ${S.pos.length} ${PN} and ${negAll.length} ${NN} samples` +
                 (S.tooBig.length ? ` (${S.tooBig.length} mounds too big for its window left to the regular scan)` : '') + '.' +
                 (nDoubt ? ` ${nDoubt} possible issue${nDoubt === 1 ? '' : 's'} in your training data: press Check training data.` : '') +
-                (val ? ` Held-out check (data it didn't train on): found ${val.posHit} of ${val.pos} ${PN}; wrongly flagged ${val.negHit} of ${val.neg} ${DL.NEG_NOUNS}.` : ` With fewer than 5 ${PN} there is no held-out check yet; treat results with extra caution.`) +
+                (val ? ` ${dlValLabel(val)}: found ${val.posHit} of ${val.pos} ${PN}; wrongly flagged ${val.negHit} of ${val.neg} ${DL.NEG_NOUNS}.` : ` With fewer than 5 ${PN} there is no held-out check yet; treat results with extra caution.`) +
                 (nRetired ? ` ${nRetired} training-tour site${nRetired === 1 ? ' is' : 's are'} now in the model and left the tour list.` : '') +
                 ' Now press Scan with deep learning.');
         } catch (e) {
@@ -4662,6 +4760,8 @@
             dlSetStatus('Preparing the terrain...'); await dlTick();
             const sample = dlSampler(g), R = new Float32Array(RW * RH);
             for (let r = 0; r < RH; r++) for (let c = 0; c < RW; c++) R[r * RW + c] = sample(area.n - (r + 0.5) * DL.RES * mLat, area.w + (c + 0.5) * DL.RES * mLon);
+            const OP = DL.CH >= 6 ? dlOpenness(R, RW, RH, DL.RES, DL_OPEN_R) : null;
+            const winP = new Float32Array(DL.INPUT * DL.INPUT), winN = new Float32Array(DL.INPUT * DL.INPUT);
             const st = DL.STRIDE, GW = Math.floor((RW - N) / st) + 1, GH = Math.floor((RH - N) / st) + 1, total = GW * GH;
             const prob = new Float32Array(total);
             const BATCH = 256, xs = new Float32Array(BATCH * sz), which = new Int32Array(BATCH), win = new Float32Array(N * N);
@@ -4679,10 +4779,10 @@
                     let bad = false;
                     for (let r = 0; r < N && !bad; r++) {
                         const src = (r0 + r) * RW + c0;
-                        for (let c = 0; c < N; c++) { const z = R[src + c]; if (z !== z) { bad = true; break; } win[r * N + c] = z; }
+                        for (let c = 0; c < N; c++) { const z = R[src + c]; if (z !== z) { bad = true; break; } win[r * N + c] = z; if (OP) { winP[r * N + c] = OP.pos[src + c]; winN[r * N + c] = OP.neg[src + c]; } }
                     }
                     if (bad) continue;
-                    dlFeatures(win, 0, xs, off);
+                    dlFeatures(win, 0, xs, off, OP ? winP : null, OP ? winN : null);
                     which[nb++] = k;
                     if (nb === BATCH) await flush();
                 }
@@ -4719,7 +4819,11 @@
                 const grp = peaks.slice(i0, i0 + per);
                 grp.forEach((pk, i) => {
                     const off0 = pk.gi * st * RW + pk.gj * st;
-                    for (let t = 0; t < 8; t++) { dlOrient(R, off0, RW, raw, t, 1); dlFeatures(raw, 0, xs, (i * 8 + t) * sz); }
+                    for (let t = 0; t < 8; t++) {
+                        dlOrient(R, off0, RW, raw, t, 1);
+                        if (OP) { dlOrient(OP.pos, off0, RW, winP, t, 1); dlOrient(OP.neg, off0, RW, winN, t, 1); }
+                        dlFeatures(raw, 0, xs, (i * 8 + t) * sz, OP ? winP : null, OP ? winN : null);
+                    }
                 });
                 const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, grp.length * 8 * sz), [grp.length * 8, N, N, CH])).dataSync());
                 grp.forEach((pk, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; pk.p = m / 8; });
