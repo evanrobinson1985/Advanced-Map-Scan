@@ -788,8 +788,13 @@
             <button id="dlSaveBtn" onclick="dlSaveToFile()" style="font-size:0.8rem;">&#128190; Save deep-learning model</button>
             <button id="dlLoadBtn" onclick="document.getElementById('dlLoadInput').click()" style="font-size:0.8rem;">&#128194; Load deep-learning model</button>
         </div>
-        <input type="file" id="dlLoadInput" accept=".gz,.json,application/gzip,application/json" style="display:none" onchange="dlLoadFromFile(this)">
-        <div style="font-size:0.72rem; color:#64748b; margin:4px 0; line-height:1.4;">Saves one file with the trained model, its terrain samples and your training data. Load it to restore everything here or on another device; loading adds to what is already here.</div>
+        <div style="display:flex; gap:6px;">
+            <button id="dlSaveAllBtn" onclick="dlSaveAllModels()" style="font-size:0.8rem;background:#dbeafe;color:#1e3a8a;">&#128190; Save all models</button>
+            <button id="tdOpenBtn" onclick="tdOpenFolder()" style="font-size:0.8rem;background:#dbeafe;color:#1e3a8a;">&#128193; Open training data folder</button>
+        </div>
+        <div id="tdFolderNote" style="font-size:0.72rem; color:#475569; margin:2px 0 4px; line-height:1.4;"></div>
+        <input type="file" id="dlLoadInput" multiple accept=".gz,.json,application/gzip,application/json" style="display:none" onchange="dlLoadFromFile(this)">
+        <div style="font-size:0.72rem; color:#64748b; margin:4px 0; line-height:1.4;">Save deep-learning model saves the selected model: one file with the trained network, its terrain samples and your training data. Save all models saves every model's file plus a training data backup in one go. Load (several files at once) restores everything here or on another device; loading adds to what is already here.</div>
         <button id="dlDeleteBtn" onclick="dlDeleteAll()" style="font-size:0.75rem;background:#f1f5f9;color:#64748b;">Delete model and samples</button>
     </div>
 
@@ -4542,7 +4547,7 @@
     function dlShuffle(a, rnd) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
     function dlSetBusy(on) {
         dlBusy = on; dlCancel = false;
-        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn', 'dlCheckBtn', 'dlTourBtn', 'dlTrainAllBtn', 'dlProfile']) { const b = document.getElementById(id); if (b) b.disabled = on; }
+        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn', 'dlCheckBtn', 'dlTourBtn', 'dlTrainAllBtn', 'dlSaveAllBtn', 'tdOpenBtn', 'dlProfile']) { const b = document.getElementById(id); if (b) b.disabled = on; }
         const s = document.getElementById('dlStopBtn'); if (s) s.style.display = on ? 'block' : 'none';
     }
     async function dlTrain() {
@@ -5275,6 +5280,17 @@
         if (dlBusy) return;
         dlSetBusy(true);
         try {
+            const r = await dlBuildModelFile();
+            await downloadBlob(r.blob, r.name);
+            dlSetStatus(`Saved ${r.name} (${(r.blob.size / 1e6).toFixed(1)} MB): ${r.hasModel ? 'the trained model, ' : 'no trained model yet, '}${r.nS} terrain samples and your training data. Use Load deep-learning model to restore it here or on another device.`);
+        } catch (e) {
+            console.error(e);
+            dlSetStatus('Could not save the model: ' + (e.message || e));
+        } finally { dlSetBusy(false); }
+    }
+    // The selected model's save file: { blob, name, nS, hasModel }
+    async function dlBuildModelFile() {
+        {
             await dlLoadPatches();
             const meta = dlPrefs().model || null;
             let model = null;
@@ -5301,20 +5317,30 @@
                 try { blob = await new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).blob(); blob = new Blob([blob], { type: 'application/gzip' }); name += '.gz'; }
                 catch (e) { console.warn('Compression unavailable; saving uncompressed', e); }
             }
-            await downloadBlob(blob, name);
-            const nS = Object.keys(items).length + file.samples.bg.length;
-            dlSetStatus(`Saved ${name} (${(blob.size / 1e6).toFixed(1)} MB): ${model ? 'the trained model, ' : 'no trained model yet, '}${nS} terrain samples and your training data. Use Load deep-learning model to restore it here or on another device.`);
-        } catch (e) {
-            console.error(e);
-            dlSetStatus('Could not save the model: ' + (e.message || e));
-        } finally { dlSetBusy(false); }
+            return { blob, name, nS: Object.keys(items).length + file.samples.bg.length, hasModel: !!model };
+        }
     }
     async function dlLoadFromFile(input) {
-        const f = input.files && input.files[0];
+        const files = [...(input.files || [])];
         input.value = '';
-        if (!f || dlBusy) return;
-        dlSetBusy(true);
-        try {
+        if (!files.length || dlBusy) return;
+        await dlLoadFiles(files);
+    }
+    // Loads model files (any of the models) and training data backups, one
+    // after another; returns the messages
+    async function dlLoadFiles(files) {
+        const msgs = [];
+        for (const f of files) {
+            dlSetBusy(true);
+            try { msgs.push(await dlLoadOneFile(f)); }
+            catch (e) { console.error(e); msgs.push(`Could not load ${f.name}: ${e.message || e}`); }
+            finally { dlSetBusy(false); }
+        }
+        dlSetStatus(msgs.join(' '));
+        return msgs;
+    }
+    async function dlLoadOneFile(f) {
+        {
             dlSetStatus('Reading ' + f.name + '...');
             let blob = f;
             const head = new Uint8Array(await f.slice(0, 2).arrayBuffer());
@@ -5323,6 +5349,11 @@
                 blob = await new Response(f.stream().pipeThrough(new DecompressionStream('gzip'))).blob();
             }
             const file = JSON.parse(await blob.text());
+            // a training data backup (the automatic backup file, or Export Training Data)
+            if (file && file.kind !== 'lidar-deep-learning-model' && file.mounds && file.mounds.examples) {
+                const n = mergeTrainingData(file); saveTrainingData(); updateTrainingSummary();
+                return `Loaded ${f.name}: ${n} new training item${n === 1 ? '' : 's'}.`;
+            }
             if (!file || file.kind !== 'lidar-deep-learning-model') throw new Error('this is not a deep-learning model file from this app');
             // a file for the other model selects that model
             const fileKey = DL_PROFILES[file.profile] ? file.profile : 'mounds';
@@ -5352,11 +5383,91 @@
             } else if (file.model) modelMsg = 'The model in the file was made by an older method; press Train model to rebuild it from the samples (they are loaded).';
             saveTrainingData();
             await updateDLSummary();
-            dlSetStatus(`Loaded ${f.name}: ${addedS} new terrain sample${addedS === 1 ? '' : 's'}, ${addedTD} new training item${addedTD === 1 ? '' : 's'}. ${modelMsg}`);
-        } catch (e) {
-            console.error(e);
-            dlSetStatus('Could not load the model: ' + (e.message || e));
-        } finally { dlSetBusy(false); }
+            return `Loaded ${f.name} (${DL.label}): ${addedS} new terrain sample${addedS === 1 ? '' : 's'}, ${addedTD} new training item${addedTD === 1 ? '' : 's'}. ${modelMsg}`;
+        }
+    }
+    // ---- The training data folder ----
+    // Desktop Chrome / Edge can be given one folder (the File System Access
+    // API): Save all models writes every model's file and a training data
+    // backup there, and Open training data folder opens the system file
+    // window in it to load files back. A web page can't open a folder in
+    // Explorer / Finder itself, and the browser shows the folder's name only.
+    // Elsewhere files go to Downloads and loading uses a file chooser.
+    let tdFolder = null;
+    idbGet('trainingFolder').then(h => { tdFolder = h || null; tdFolderNote(); }).catch(() => {});
+    function tdFolderNote() {
+        const el = document.getElementById('tdFolderNote'); if (!el) return;
+        el.innerHTML = !window.showDirectoryPicker
+            ? 'This browser saves files to your Downloads folder (desktop Chrome or Edge can use a folder of your choice).'
+            : tdFolder ? `Training data folder: <b>${escapeHtml(tdFolder.name)}</b> &middot; <a href="#" onclick="event.preventDefault(); tdChooseFolder();">Change</a>`
+                       : `No training data folder yet: <a href="#" onclick="event.preventDefault(); tdChooseFolder();">choose one</a> (or Save all models asks).`;
+    }
+    async function tdChooseFolder() {
+        try {
+            const h = await window.showDirectoryPicker({ id: 'lidar-training', mode: 'readwrite', startIn: tdFolder || 'documents' });
+            tdFolder = h; await idbPut('trainingFolder', h); tdFolderNote();
+            return h;
+        } catch (e) { if (e.name !== 'AbortError') dlSetStatus('Could not use that folder: ' + (e.message || e)); return null; }
+    }
+    // the folder with write permission, asking for it (or for a folder) if needed
+    async function tdFolderReady() {
+        if (!window.showDirectoryPicker) return null;
+        if (tdFolder) {
+            try {
+                let p = await tdFolder.queryPermission({ mode: 'readwrite' });
+                if (p !== 'granted') p = await tdFolder.requestPermission({ mode: 'readwrite' });
+                if (p === 'granted') return tdFolder;
+            } catch (e) { console.warn(e); }
+        }
+        return tdChooseFolder();
+    }
+    async function dlSaveAllModels() {
+        if (dlBusy || tourBusy || (typeof tourTraining !== 'undefined' && tourTraining)) { dlSetStatus('Wait for the current scan, tour or training to finish.'); return; }
+        const folder = await tdFolderReady();
+        if (window.showDirectoryPicker && !folder) { dlSetStatus('Save all models needs a folder: none was chosen.'); return; }
+        const keep = DL.key, saved = [], skipped = [];
+        dlSetBusy(true);
+        try {
+            for (const k of Object.keys(DL_PROFILES)) {
+                dlSelectProfile(k, false);
+                await dlLoadPatches();
+                if (!dlPrefs().model && !Object.keys(dlPatches.items).length && !dlPatches.bg.length) { skipped.push(DL_PROFILES[k].label); continue; }
+                dlSetStatus(`Saving ${DL_PROFILES[k].label} (${saved.length + 1} of ${Object.keys(DL_PROFILES).length})...`);
+                const r = await dlBuildModelFile();
+                if (folder) { const fh = await folder.getFileHandle(r.name, { create: true }), w = await fh.createWritable(); await w.write(r.blob); await w.close(); }
+                else { tdPlainDownload(r.blob, r.name); await new Promise(res => setTimeout(res, 800)); }
+                saved.push(`${r.name} (${(r.blob.size / 1e6).toFixed(1)} MB${r.hasModel ? '' : ', no trained model yet'})`);
+            }
+            // the training data on its own too (Import Training Data reads it)
+            const td = JSON.parse(JSON.stringify(trainingData)); delete td._undo;
+            const tdBlob = new Blob([JSON.stringify(td)], { type: 'application/json' }), tdName = 'lidar-training-data-' + new Date().toISOString().slice(0, 10) + '.json';
+            if (folder) { const fh = await folder.getFileHandle(tdName, { create: true }), w = await fh.createWritable(); await w.write(tdBlob); await w.close(); }
+            else tdPlainDownload(tdBlob, tdName);
+            saved.push(tdName);
+            trainingData._unbackedUp = 0; trainingData._lastBackupAt = Date.now(); saveTrainingData(); updateBackupNote();
+            dlSetStatus(`Saved ${saved.length} file${saved.length === 1 ? '' : 's'} ${folder ? `in the folder "${folder.name}"` : 'to your Downloads folder'}: ${saved.join('; ')}.` + (skipped.length ? ` Nothing to save yet for: ${skipped.join(', ')}.` : ''));
+        } catch (e) { console.error(e); dlSetStatus('Could not save all models: ' + (e.message || e)); }
+        finally { dlSelectProfile(keep, false); dlSetBusy(false); updateDLSummary().catch(() => {}); }
+    }
+    function tdPlainDownload(blob, name) {
+        const url = URL.createObjectURL(blob), a = document.createElement('a');
+        a.href = url; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+    }
+    // Opens the system file window in the training data folder; the files
+    // picked there are loaded (cancel just closes it)
+    async function tdOpenFolder() {
+        if (!window.showOpenFilePicker || !window.showDirectoryPicker) {
+            dlSetStatus('This browser cannot open folders: saved files are in your Downloads folder. Pick the files to load.');
+            document.getElementById('dlLoadInput').click();
+            return;
+        }
+        if (!tdFolder && !(await tdChooseFolder())) return;
+        try {
+            const hs = await window.showOpenFilePicker({ startIn: tdFolder, multiple: true, types: [{ description: 'Models and training data', accept: { 'application/gzip': ['.gz'], 'application/json': ['.json'] } }] });
+            const files = []; for (const fh of hs) files.push(await fh.getFile());
+            if (files.length) await dlLoadFiles(files);
+        } catch (e) { if (e.name !== 'AbortError') dlSetStatus('Could not open the folder: ' + (e.message || e)); }
     }
 
     async function dlDeleteAll() {

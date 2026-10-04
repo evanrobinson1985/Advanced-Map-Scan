@@ -256,6 +256,12 @@ In a synthetic test it found all 8 large mounds in two areas it never saw, with 
 
 **Re-measure.** In the training data map's **Edit** popup for a mound (or shell midden), **Re-measure** measures the feature under the point from the loaded terrain and fills in its height and width; **Save** keeps them. Mounds up to about 115 ft use the scan's mound measurer; bigger ones use the rise above the surrounding ground. In tests that was within about 10% of the true size for platform and conical mounds 120–440 ft across. Use it to fix records like a mound saved at the size of a whole site, then train again.
 
+**Save all models and the training data folder.** Next to *Save* / *Load deep-learning model*:
+
+- **💾 Save all models** saves every model's file (network, terrain samples and training data) and a plain training data backup (`lidar-training-data-DATE.json`) in one go. Models with nothing in them yet are skipped. On desktop Chrome and Edge, the files go into your **training data folder**, which you choose once; the app remembers it and asks for permission again after a restart. Other browsers, including phones, download them to your Downloads folder.
+- **📁 Open training data folder** opens your system's file window inside that folder. You see the saved files and their dates there, and any you pick (one or several) are loaded: model files and training data backups alike. Cancel just closes it. A web page can't open a folder in Explorer or Finder itself, so this is the closest it can get; the page shows the folder's name only, not its full path. Where folders aren't supported, it opens a file chooser for your Downloads instead.
+- **Load deep-learning model** now takes several files at once, of any of the models; each selects its own model.
+
 **Three models.** The **Model** menu at the top of the Deep Learning section switches between *Mounds*, *Effigy & linear mounds* and *Shell middens & rings*. Each has its own samples, network, accuracy check and save file. The effigy model:
 
 - learns from your confirmed effigies (scan results answered Yes, or *This is an Effigy*) and your "Not real" marks in the effigy mode, plus random ground;
