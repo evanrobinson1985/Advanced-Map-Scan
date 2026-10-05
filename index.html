@@ -1115,7 +1115,8 @@
     // A whole-view download can be far larger than the browser can scan in
     // one go: every scan allocates several full-size working rasters. Scans
     // therefore run on a "grid", either the whole DTM or, for downloads over
-    // SCAN_MAX_PX, the part currently in view. They run with the global
+    // SCAN_MAX_PX, the part currently in view (in sections when that is over
+    // SCAN_MAX_PX too; see scanSections). They run with the global
     // DTM variables temporarily pointed at that grid, and every result
     // (markers, exports, click-to-inspect rasters, 3D overlays) remembers the
     // grid it came from.
@@ -1147,14 +1148,79 @@
         const r0 = Math.max(0, Math.floor((b.n - mb.getNorth()) / (b.n - b.s) * g.h)), r1 = Math.min(g.h, Math.ceil((b.n - mb.getSouth()) / (b.n - b.s) * g.h));
         return (c1 - c0 < 8 || r1 - r0 < 8) ? null : { r0, r1, c0, c1 };
     }
-    function pickScanGrid() {
+
+    // ---- Big areas: scanned in sections ----
+    // A scan keeps several copies of the area it works on in memory, so one
+    // pass covers at most SCAN_MAX_PX cells. A bigger area in view is cut
+    // into sections that overlap by SECTION_OVERLAP_M; each is scanned in
+    // turn with the same settings, and a result is kept only from the section
+    // whose core (its own share of the area, without the overlap) holds it,
+    // so a feature on a seam is found once and whole.
+    const SECTION_OVERLAP_M = 300;
+    // null: view outside the download; otherwise the sections (one = no split)
+    function scanSections() {
         const g = fullDemGrid;
-        if (g.w * g.h <= SCAN_MAX_PX) return { grid: g, cropped: false };
-        const v = visibleWindow(g);
-        if (!v) return { error: 'The map view is outside the downloaded area.' };
-        const px = (v.r1 - v.r0) * (v.c1 - v.c0);
-        if (px > SCAN_MAX_PX) return { error: `The part of this download in view is ${(px / 1e6).toFixed(0)} Mpx, and scans are limited to ${SCAN_MAX_PX / 1e6} Mpx at a time to stay within browser memory. Zoom in to scan a smaller part - the download stays loaded, no need to download again.` };
-        return { grid: cropGrid(g, v.r0, v.c0, v.r1, v.c1), cropped: true };
+        const v = g.w * g.h <= SCAN_MAX_PX ? { r0: 0, r1: g.h, c0: 0, c1: g.w } : visibleWindow(g);
+        if (!v) return null;
+        const W = v.c1 - v.c0, H = v.r1 - v.r0;
+        if (W * H <= SCAN_MAX_PX) return [{ ...v, core: null }];
+        const ov = Math.ceil(SECTION_OVERLAP_M / (g.res || effRes || 1)), side = Math.floor(Math.sqrt(SCAN_MAX_PX)), coreMax = Math.max(256, side - 2 * ov);
+        const nx = Math.ceil(W / coreMax), ny = Math.ceil(H / coreMax), out = [];
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+            const c0 = v.c0 + Math.round(i * W / nx), c1 = v.c0 + Math.round((i + 1) * W / nx), r0 = v.r0 + Math.round(j * H / ny), r1 = v.r0 + Math.round((j + 1) * H / ny);
+            out.push({ r0: Math.max(0, r0 - ov), r1: Math.min(g.h, r1 + ov), c0: Math.max(0, c0 - ov), c1: Math.min(g.w, c1 + ov), core: { r0, r1, c0, c1 } });
+        }
+        return out;
+    }
+    function sectionsAreaKm2(secs) {
+        const g = fullDemGrid, res = g.res || effRes || 1;
+        return secs.reduce((a, s) => { const c = s.core || s; return a + (c.r1 - c.r0) * (c.c1 - c.c0); }, 0) * res * res / 1e6;
+    }
+    // Everything a scan writes to the status line gets a prefix meanwhile
+    async function withStatusPrefix(prefix, fn) {
+        const el = document.getElementById('status'), d = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'innerText');
+        Object.defineProperty(el, 'innerText', { configurable: true, get() { return d.get.call(this); }, set(v) { v = String(v); d.set.call(this, v.startsWith(prefix) ? v : prefix + v); } });
+        try { return await fn(); } finally { delete el.innerText; }
+    }
+    // Runs fn (a scan of the current grid) on each section, keeping the
+    // results described above; returns the number of sections scanned
+    async function runInSections(secs, fn, stop) {
+        const g = fullDemGrid, b = g.bounds;
+        if (secs.length === 1) {
+            const s0 = secs[0], whole = s0.r0 === 0 && s0.c0 === 0 && s0.r1 === g.h && s0.c1 === g.w;
+            await withGrid(whole ? g : cropGrid(g, s0.r0, s0.c0, s0.r1, s0.c1), fn); return { done: 1, ours: null };
+        }
+        const ours = new Set(), oursOv = new Set(), km2 = sectionsAreaKm2(secs);
+        const inCore = (c, f) => {
+            const r = (b.n - f.lat) / (b.n - b.s) * g.h, cc = (f.lon - b.w) / (b.e - b.w) * g.w;
+            return r >= c.r0 && r < c.r1 && cc >= c.c0 && cc < c.c1;
+        };
+        let done = 0;
+        for (let i = 0; i < secs.length && !(stop && stop()); i++) {
+            const sec = secs[i], before = new Set(detectedFeatures), beforeOv = new Set(last3DOverlays);
+            await withStatusPrefix(`Section ${i + 1} of ${secs.length} (${km2.toFixed(1)} km² in all): `, () => withGrid(cropGrid(g, sec.r0, sec.c0, sec.r1, sec.c1), fn));
+            done++;
+            // earlier sections' results that this section's scan cleared come back
+            const now = new Set(detectedFeatures), nowOv = new Set(last3DOverlays);
+            for (const f of ours) if (!now.has(f)) { detectedFeatures.push(f); for (const l of f._layers || []) modeLayer(f.mode).addLayer(l); }
+            for (const o of oursOv) if (!nowOv.has(o)) last3DOverlays.push(o);
+            // this section's own results: only those in its core
+            const drop = new Set();
+            for (const f of detectedFeatures) {
+                if (before.has(f) || ours.has(f)) continue;
+                if (f.lat == null || inCore(sec.core, f)) ours.add(f); else { removeFeatureLayers(f); drop.add(f); }
+            }
+            if (drop.size) detectedFeatures = detectedFeatures.filter(f => !drop.has(f));
+            for (const o of last3DOverlays) if (!beforeOv.has(o)) oursOv.add(o);
+            await new Promise(r => setTimeout(r, 0));
+        }
+        updateDetectionLegend();
+        if (typeof updateExportButtons === 'function') updateExportButtons();
+        return { done, ours };
+    }
+    function sectionsNote(secs, done) {
+        if (secs.length < 2) return '';
+        return ` Scanned the ${sectionsAreaKm2(secs).toFixed(1)} km² in view in ${done === secs.length ? '' : done + ' of '}${secs.length} overlapping sections and combined the results (up to Max results per mode in each section; a feature on a seam is counted once).`;
     }
 
     // Hint when zoomed well past the loaded DTM's resolution and a finer
@@ -1217,7 +1283,7 @@
         } else {
             msg += ' Full LiDAR resolution.';
         }
-        if (p.px > SCAN_MAX_PX && !p.overBudget) msg += ` Scans on downloads this large run on the area you're viewing (up to ${SCAN_MAX_PX / 1e6} Mpx at a time).`;
+        if (p.px > SCAN_MAX_PX && !p.overBudget) msg += ` Scans on downloads this large run on the area you're viewing, in sections of up to ${SCAN_MAX_PX / 1e6} Mpx combined into one result.`;
         el.innerHTML = msg;
         el.style.color = color;
     }
@@ -4967,6 +5033,107 @@
     // scores a 40 m window every 4 m; peaks above the confidence setting
     // become candidates, and each is measured with the same mound measurer
     // as "This is a Mound".
+    // The network's part of a scan for one area (lat/lon box inside grid g):
+    // every window scored, peaks found and each scored again 8 ways; the
+    // peaks at or above the confidence setting, or null when stopped
+    async function dlScanArea(tf, model, g, area, label, mLonIn) {
+        const lat0 = (area.n + area.s) / 2, mLat = 1 / 111320, mLon = mLonIn || 1 / (111320 * Math.cos(lat0 * Math.PI / 180));
+        const rnd = mLonIn ? Math.round : Math.floor, RW = rnd((area.e - area.w) / mLon / DL.RES), RH = rnd((area.n - area.s) / mLat / DL.RES);
+        const N = DL.INPUT, CH = DL.CH, sz = N * N * CH;
+        if (RW < N || RH < N) return [];
+        dlSetStatus(label + 'Preparing the terrain...'); await dlTick();
+        const sample = dlSampler(g), R = new Float32Array(RW * RH);
+        for (let r = 0; r < RH; r++) for (let c = 0; c < RW; c++) R[r * RW + c] = sample(area.n - (r + 0.5) * DL.RES * mLat, area.w + (c + 0.5) * DL.RES * mLon);
+        const OP = DL.CH >= 6 ? dlOpenness(R, RW, RH, DL.RES, DL_OPEN_R) : null;
+        const winP = new Float32Array(DL.INPUT * DL.INPUT), winN = new Float32Array(DL.INPUT * DL.INPUT);
+        const st = DL.STRIDE, GW = Math.floor((RW - N) / st) + 1, GH = Math.floor((RH - N) / st) + 1, total = GW * GH;
+        const prob = new Float32Array(total);
+        const BATCH = 256, xs = new Float32Array(BATCH * sz), which = new Int32Array(BATCH), win = new Float32Array(N * N);
+        const t0 = Date.now();
+        let k = 0, nb = 0;
+        const flush = async () => {
+            if (!nb) return;
+            const p = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, nb * sz), [nb, N, N, CH])).dataSync());
+            for (let i = 0; i < nb; i++) prob[which[i]] = p[i];
+            nb = 0;
+        };
+        for (let gi = 0; gi < GH && !dlCancel; gi++) {
+            for (let gj = 0; gj < GW; gj++, k++) {
+                const r0 = gi * st, c0 = gj * st, off = nb * sz;
+                let bad = false;
+                for (let r = 0; r < N && !bad; r++) {
+                    const src = (r0 + r) * RW + c0;
+                    for (let c = 0; c < N; c++) { const z = R[src + c]; if (z !== z) { bad = true; break; } win[r * N + c] = z; if (OP) { winP[r * N + c] = OP.pos[src + c]; winN[r * N + c] = OP.neg[src + c]; } }
+                }
+                if (bad) continue;
+                dlFeatures(win, 0, xs, off, OP ? winP : null, OP ? winN : null);
+                which[nb++] = k;
+                if (nb === BATCH) await flush();
+            }
+            if (gi % 4 === 3) { dlSetStatus(label + `Scanning: ${Math.round(100 * (gi + 1) / GH)}% (${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}...`); await dlTick(); }
+        }
+        await flush();
+        if (dlCancel) return null;
+        // peaks: highest in their 3 x 3 neighbourhood, then at least 15 m
+        // apart. Near-misses are included here because every peak is then
+        // scored again all 8 ways (turned and mirrored) and the average
+        // decides, so a lucky angle can't make a false alarm and an
+        // unlucky one can't hide a mound.
+        const thr = dlThreshold(), pre = Math.max(0.3, thr - 0.2), peaks = [];
+        for (let gi = 0; gi < GH; gi++) for (let gj = 0; gj < GW; gj++) {
+            const p = prob[gi * GW + gj]; if (p < pre) continue;
+            let top = true;
+            for (let a = -1; a <= 1 && top; a++) for (let bq = -1; bq <= 1; bq++) {
+                if (!a && !bq) continue;
+                const y = gi + a, x = gj + bq;
+                if (y >= 0 && y < GH && x >= 0 && x < GW && prob[y * GW + x] > p) { top = false; break; }
+            }
+            if (!top) continue;
+            // probability-weighted centre of the 3 x 3 for a finer position
+            let sw = 0, sy = 0, sx = 0;
+            for (let a = -1; a <= 1; a++) for (let bq = -1; bq <= 1; bq++) { const y = gi + a, x = gj + bq; if (y < 0 || y >= GH || x < 0 || x >= GW) continue; const w = prob[y * GW + x]; sw += w; sy += w * y; sx += w * x; }
+            const cy = (sy / sw) * st + (N - 1) / 2 + 0.5, cx = (sx / sw) * st + (N - 1) / 2 + 0.5;
+            peaks.push({ p, gi, gj, lat: area.n - cy * DL.RES * mLat, lon: area.w + cx * DL.RES * mLon });
+        }
+        peaks.sort((a, b2) => b2.p - a.p);
+        peaks.length = Math.min(peaks.length, 800);
+        dlSetStatus(label + `Double-checking ${peaks.length} possible candidates 8 ways...`); await dlTick();
+        const raw = new Float32Array(N * N), per = Math.floor(BATCH / 8);
+        for (let i0 = 0; i0 < peaks.length && !dlCancel; i0 += per) {
+            const grp = peaks.slice(i0, i0 + per);
+            grp.forEach((pk, i) => {
+                const off0 = pk.gi * st * RW + pk.gj * st;
+                for (let t = 0; t < 8; t++) {
+                    dlOrient(R, off0, RW, raw, t, 1);
+                    if (OP) { dlOrient(OP.pos, off0, RW, winP, t, 1); dlOrient(OP.neg, off0, RW, winN, t, 1); }
+                    dlFeatures(raw, 0, xs, (i * 8 + t) * sz, OP ? winP : null, OP ? winN : null);
+                }
+            });
+            const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, grp.length * 8 * sz), [grp.length * 8, N, N, CH])).dataSync());
+            grp.forEach((pk, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; pk.p = m / 8; });
+            await dlTick();
+        }
+        if (dlCancel) return null;
+        return peaks.filter(pk => pk.p >= thr);
+    }
+    // An area too big for one deep-learning pass is cut into sections that
+    // overlap by a window and a bit, so every window lies whole inside one
+    // section; each section keeps only the peaks in its own core, so a
+    // feature on a seam is found once, with full context around it
+    function dlSections(area, RW, RH, mLon) {
+        // section edges on the scan's stride, so its windows sit exactly where a single pass would put them
+        const st = DL.STRIDE, snap = (x) => Math.round(x / st) * st;
+        const side = Math.floor(Math.sqrt(DL.MAX_SCAN_CELLS)), ov = Math.ceil((DL.INPUT + 2 * st) / st) * st, coreMax = Math.max(DL.INPUT, side - 2 * ov);
+        const nx = RW * RH <= DL.MAX_SCAN_CELLS ? 1 : Math.ceil(RW / coreMax), ny = RW * RH <= DL.MAX_SCAN_CELLS ? 1 : Math.ceil(RH / coreMax);
+        const fy = DL.RES / 111320, fx = DL.RES * mLon, out = [];
+        for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+            const x0 = i ? snap(i * RW / nx) : 0, x1 = i === nx - 1 ? RW : snap((i + 1) * RW / nx), y0 = j ? snap(j * RH / ny) : 0, y1 = j === ny - 1 ? RH : snap((j + 1) * RH / ny);
+            const a0 = Math.max(0, x0 - (nx > 1 ? ov : 0)), a1 = Math.min(RW, x1 + (nx > 1 ? ov : 0)), b0 = Math.max(0, y0 - (ny > 1 ? ov : 0)), b1 = Math.min(RH, y1 + (ny > 1 ? ov : 0));
+            out.push({ area: { n: area.n - b0 * fy, s: area.n - b1 * fy, w: area.w + a0 * fx, e: area.w + a1 * fx },
+                       core: { n: area.n - y0 * fy, s: area.n - y1 * fy, w: area.w + x0 * fx, e: area.w + x1 * fx } });
+        }
+        return out;
+    }
     async function dlScan() {
         if (dlBusy) return;
         if (tourBusy) { dlSetStatus('The training-site tour is running; scan when it has finished.'); return; }
@@ -4984,85 +5151,21 @@
             if (!v) { dlSetStatus('The map view is outside the loaded DTM.'); return; }
             const b = g.bounds, dLat = (b.n - b.s) / g.h, dLon = (b.e - b.w) / g.w;
             const area = { n: b.n - v.r0 * dLat, s: b.n - v.r1 * dLat, w: b.w + v.c0 * dLon, e: b.w + v.c1 * dLon };
+            const t0 = Date.now(), thr = dlThreshold();
             const lat0 = (area.n + area.s) / 2, mLat = 1 / 111320, mLon = 1 / (111320 * Math.cos(lat0 * Math.PI / 180));
             const RW = Math.floor((area.e - area.w) / mLon / DL.RES), RH = Math.floor((area.n - area.s) / mLat / DL.RES);
-            if (RW * RH > DL.MAX_SCAN_CELLS) { dlSetStatus(`The area in view is ${(RW * RH / 1e6).toFixed(1)} km²; the deep-learning scan handles up to ${DL.MAX_SCAN_CELLS / 1e6} km² at a time. Zoom in and scan again.`); return; }
-            const N = DL.INPUT, CH = DL.CH, sz = N * N * CH;
-            if (RW < N || RH < N) { dlSetStatus(`Zoom out a little: the view must be at least ${Math.round(N * DL.RES)} m across.`); return; }
-            dlSetStatus('Preparing the terrain...'); await dlTick();
-            const sample = dlSampler(g), R = new Float32Array(RW * RH);
-            for (let r = 0; r < RH; r++) for (let c = 0; c < RW; c++) R[r * RW + c] = sample(area.n - (r + 0.5) * DL.RES * mLat, area.w + (c + 0.5) * DL.RES * mLon);
-            const OP = DL.CH >= 6 ? dlOpenness(R, RW, RH, DL.RES, DL_OPEN_R) : null;
-            const winP = new Float32Array(DL.INPUT * DL.INPUT), winN = new Float32Array(DL.INPUT * DL.INPUT);
-            const st = DL.STRIDE, GW = Math.floor((RW - N) / st) + 1, GH = Math.floor((RH - N) / st) + 1, total = GW * GH;
-            const prob = new Float32Array(total);
-            const BATCH = 256, xs = new Float32Array(BATCH * sz), which = new Int32Array(BATCH), win = new Float32Array(N * N);
-            const t0 = Date.now();
-            let k = 0, nb = 0;
-            const flush = async () => {
-                if (!nb) return;
-                const p = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, nb * sz), [nb, N, N, CH])).dataSync());
-                for (let i = 0; i < nb; i++) prob[which[i]] = p[i];
-                nb = 0;
-            };
-            for (let gi = 0; gi < GH && !dlCancel; gi++) {
-                for (let gj = 0; gj < GW; gj++, k++) {
-                    const r0 = gi * st, c0 = gj * st, off = nb * sz;
-                    let bad = false;
-                    for (let r = 0; r < N && !bad; r++) {
-                        const src = (r0 + r) * RW + c0;
-                        for (let c = 0; c < N; c++) { const z = R[src + c]; if (z !== z) { bad = true; break; } win[r * N + c] = z; if (OP) { winP[r * N + c] = OP.pos[src + c]; winN[r * N + c] = OP.neg[src + c]; } }
-                    }
-                    if (bad) continue;
-                    dlFeatures(win, 0, xs, off, OP ? winP : null, OP ? winN : null);
-                    which[nb++] = k;
-                    if (nb === BATCH) await flush();
-                }
-                if (gi % 4 === 3) { dlSetStatus(`Scanning: ${Math.round(100 * (gi + 1) / GH)}% (${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}...`); await dlTick(); }
+            if (RW < DL.INPUT || RH < DL.INPUT) { dlSetStatus(`Zoom out a little: the view must be at least ${Math.round(DL.INPUT * DL.RES)} m across.`); return; }
+            // too big for one pass: scanned in sections, results combined
+            const sections = dlSections(area, RW, RH, mLon), km2 = (RW * RH * DL.RES * DL.RES / 1e6);
+            const sure = [];
+            for (let si = 0; si < sections.length; si++) {
+                const sec = sections[si], c = sec.core;
+                const label = sections.length > 1 ? `Section ${si + 1} of ${sections.length} (${km2.toFixed(1)} km² in all): ` : '';
+                const got = await dlScanArea(tf, model, g, sec.area, label, sections.length > 1 ? mLon : null);
+                if (got === null || dlCancel) { dlSetStatus('Scan stopped.'); return; }
+                for (const pk of got) if (pk.lat <= c.n && pk.lat > c.s && pk.lon >= c.w && pk.lon < c.e) sure.push(pk);
             }
-            await flush();
-            if (dlCancel) { dlSetStatus('Scan stopped.'); return; }
-            // peaks: highest in their 3 x 3 neighbourhood, then at least 15 m
-            // apart. Near-misses are included here because every peak is then
-            // scored again all 8 ways (turned and mirrored) and the average
-            // decides, so a lucky angle can't make a false alarm and an
-            // unlucky one can't hide a mound.
-            const thr = dlThreshold(), pre = Math.max(0.3, thr - 0.2), peaks = [];
-            for (let gi = 0; gi < GH; gi++) for (let gj = 0; gj < GW; gj++) {
-                const p = prob[gi * GW + gj]; if (p < pre) continue;
-                let top = true;
-                for (let a = -1; a <= 1 && top; a++) for (let bq = -1; bq <= 1; bq++) {
-                    if (!a && !bq) continue;
-                    const y = gi + a, x = gj + bq;
-                    if (y >= 0 && y < GH && x >= 0 && x < GW && prob[y * GW + x] > p) { top = false; break; }
-                }
-                if (!top) continue;
-                // probability-weighted centre of the 3 x 3 for a finer position
-                let sw = 0, sy = 0, sx = 0;
-                for (let a = -1; a <= 1; a++) for (let bq = -1; bq <= 1; bq++) { const y = gi + a, x = gj + bq; if (y < 0 || y >= GH || x < 0 || x >= GW) continue; const w = prob[y * GW + x]; sw += w; sy += w * y; sx += w * x; }
-                const cy = (sy / sw) * st + (N - 1) / 2 + 0.5, cx = (sx / sw) * st + (N - 1) / 2 + 0.5;
-                peaks.push({ p, gi, gj, lat: area.n - cy * DL.RES * mLat, lon: area.w + cx * DL.RES * mLon });
-            }
-            peaks.sort((a, b2) => b2.p - a.p);
-            peaks.length = Math.min(peaks.length, 800);
-            dlSetStatus(`Double-checking ${peaks.length} possible candidates 8 ways...`); await dlTick();
-            const raw = new Float32Array(N * N), per = Math.floor(BATCH / 8);
-            for (let i0 = 0; i0 < peaks.length && !dlCancel; i0 += per) {
-                const grp = peaks.slice(i0, i0 + per);
-                grp.forEach((pk, i) => {
-                    const off0 = pk.gi * st * RW + pk.gj * st;
-                    for (let t = 0; t < 8; t++) {
-                        dlOrient(R, off0, RW, raw, t, 1);
-                        if (OP) { dlOrient(OP.pos, off0, RW, winP, t, 1); dlOrient(OP.neg, off0, RW, winN, t, 1); }
-                        dlFeatures(raw, 0, xs, (i * 8 + t) * sz, OP ? winP : null, OP ? winN : null);
-                    }
-                });
-                const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, grp.length * 8 * sz), [grp.length * 8, N, N, CH])).dataSync());
-                grp.forEach((pk, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; pk.p = m / 8; });
-                await dlTick();
-            }
-            if (dlCancel) { dlSetStatus('Scan stopped.'); return; }
-            const sure = peaks.filter(pk => pk.p >= thr).sort((a, b2) => b2.p - a.p);
+            sure.sort((a, b2) => b2.p - a.p);
             const kept = [];
             for (const pk of sure) if (!kept.some(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < DL.PEAK_SEP)) kept.push(pk);
             const effigyModel = DL.TRAIN_MODE !== 'mounds', shellModel = DL.TRAIN_MODE === 'shell';   // effigyModel: either traced (non-mound) model
@@ -5179,6 +5282,7 @@
             const known = window.__dlFeats.filter(f => f.dlKnown).length, agreed = results.filter(r2 => r2.agree).length;
             const scanName = shellModel ? 'shell midden scan' : effigyModel ? 'effigy & linear mound scan' : 'mound scan';
             const msg = `Deep-learning scan: ${results.length} candidate${results.length === 1 ? '' : 's'} at ${Math.round(thr * 100)}%+ confidence` +
+                (sections.length > 1 ? ` across the ${km2.toFixed(1)} km² in view, scanned in ${sections.length} overlapping sections and combined` : '') +
                 (known ? ` (${known} of them your confirmed ${DL.NOUNS})` : '') +
                 (regular.length ? `; the regular ${scanName} agrees on ${agreed}` : `; run the regular ${scanName} too, then this one again, to see where both agree`) +
                 (skippedRejected ? `; ${skippedRejected} skipped at spots you marked not real` : '') +
@@ -10253,7 +10357,11 @@
                 }
             }
         }
-        const gauss = makeGauss(peakIdx * 2654435761 + 97);
+        // seeded by the peak's place on the ground (to about a metre), not its
+        // index in this grid, so a mound gets the same test whichever area or
+        // section it is scanned in
+        const pLat = demBounds.n - (((peakIdx / W) | 0) + 0.5) / H * (demBounds.n - demBounds.s), pLon = demBounds.w + ((peakIdx % W) + 0.5) / W * (demBounds.e - demBounds.w);
+        const gauss = makeGauss((Math.round(pLat * 111320) * 2654435761 + Math.round(pLon * 111320 * Math.cos(pLat * Math.PI / 180)) * 40503 + 97) >>> 0);
         let hits = 0;
         const noise = new Float32Array(n), pert = new Float32Array(n);
         for (let it = 0; it < runs; it++) {
@@ -10909,13 +11017,24 @@
         if (autoTuneRunning) await autoTuneRunning; // use the settings detected for this area
         if (!currentDEM || scanInProgress || downloadAbort) return;
         if (!checkDTMResolution()) return;
-        const pick = pickScanGrid();
-        if (pick.error) { document.getElementById('status').innerText = pick.error; return; }
+        const secs = scanSections();
+        if (!secs) { document.getElementById('status').innerText = 'The map view is outside the downloaded area.'; return; }
+        if (secs.length > 1 && document.getElementById('scanMode').value === 'settlement') {
+            document.getElementById('status').innerText = `Settlement likelihood is a heat map ranked within one scan, so it isn't split into sections: zoom in to an area up to ${SCAN_MAX_PX / 1e6} Mpx (the download stays loaded).`; return;
+        }
         scanInProgress = true;
         document.getElementById('downloadBtn').disabled = true;
         try {
-            await withGrid(pick.grid, runScannerOnGrid);
-            if (pick.cropped) document.getElementById('status').innerText += ` (Scanned the ${pick.grid.w.toLocaleString()} x ${pick.grid.h.toLocaleString()} px area in view; pan and scan again for other parts of the download.)`;
+            const mode = document.getElementById('scanMode').value;
+            const { done, ours } = await runInSections(secs, runScannerOnGrid);
+            const fullView = fullDemGrid.w * fullDemGrid.h > SCAN_MAX_PX;
+            if (secs.length > 1) {
+                const n = [...ours].filter(f => f.mode === mode && !f.known).length, nk = [...ours].filter(f => f.mode === mode && f.known).length;
+                document.getElementById('status').innerText = `Scan complete: ${n} candidate(s) from the ${(MODE_STYLE[mode] ? MODE_STYLE[mode].label : mode).toLowerCase()} scan` +
+                    (nk ? ` plus ${nk} mound(s) you confirmed` : '') + '.' + sectionsNote(secs, done) +
+                    (detectedFeatures.some(f => f.mode !== mode) ? ' Results from your other scans are still shown (see the legend, top left).' : '');
+            }
+            else if (fullView) document.getElementById('status').innerText += ` (Scanned the area in view; pan and scan again for other parts of the download.)`;
         } finally {
             scanInProgress = false;
             document.getElementById('downloadBtn').disabled = false;
@@ -10929,8 +11048,9 @@
         if (autoTuneRunning) await autoTuneRunning;
         if (!currentDEM || scanInProgress || downloadAbort) return;
         if (!checkDTMResolution()) return;
-        const pick = pickScanGrid();
-        if (pick.error) { document.getElementById('status').innerText = pick.error; return; }
+        const secs = scanSections();
+        if (!secs) { document.getElementById('status').innerText = 'The map view is outside the downloaded area.'; return; }
+        const order = secs.length > 1 ? SCAN_ALL_ORDER.filter(m => m !== 'settlement') : SCAN_ALL_ORDER;   // the heat map isn't split
         const status = document.getElementById('status');
         const btns = ['downloadBtn', 'scanBtn', 'scanAllBtn', 'autoTuneBtn'].map(id => document.getElementById(id));
         const wrap = document.getElementById('scanAllWrap'), bar = document.getElementById('scanAllBar'), ptext = document.getElementById('scanAllProgressText');
@@ -10942,19 +11062,22 @@
         wrap.style.display = 'block'; bar.style.width = '0%';
         const counts = [];
         const t0 = Date.now();
+        let secNo = 0, secsDone = 0;
+        const before0 = new Set(detectedFeatures);
         try {
-            await withGrid(pick.grid, async () => {
-                for (let idx = 0; idx < SCAN_ALL_ORDER.length && !scanAllCancel; idx++) {
-                    const m = SCAN_ALL_ORDER[idx];
-                    ptext.innerText = `Scan All: ${idx + 1} of ${SCAN_ALL_ORDER.length} - ${MODE_STYLE[m].label}...`;
+            // each section runs every mode in turn (one copy of the section in memory)
+            secsDone = (await runInSections(secs, async () => {
+                secNo++;
+                for (let idx = 0; idx < order.length && !scanAllCancel; idx++) {
+                    const m = order[idx];
+                    ptext.innerText = `Scan All: ${secs.length > 1 ? `section ${secNo} of ${secs.length}, ` : ''}${idx + 1} of ${order.length} - ${MODE_STYLE[m].label}...`;
                     scanModeEl.value = m;
                     onScanModeChange(); // loads this mode's thresholds into the sliders
-                    const before = detectedFeatures.length;
                     await runScannerOnGrid();
-                    counts.push([m, detectedFeatures.length - before]);
-                    bar.style.width = (100 * (idx + 1) / SCAN_ALL_ORDER.length).toFixed(0) + '%';
+                    bar.style.width = (100 * ((secNo - 1) * order.length + idx + 1) / (secs.length * order.length)).toFixed(0) + '%';
                 }
-            });
+            }, () => scanAllCancel)).done;
+            for (const m of order) counts.push([m, detectedFeatures.filter(f => f.mode === m && !before0.has(f)).length]);
         } catch (err) {
             console.error(err);
             status.innerText = `Scan All stopped by an error during ${MODE_STYLE[scanModeEl.value] ? MODE_STYLE[scanModeEl.value].label : 'a scan'}: ${err.message || err}`;
@@ -10969,10 +11092,10 @@
         }
         const found = counts.filter(([, n]) => n > 0);
         const total = counts.reduce((a, [, n]) => a + n, 0);
-        status.innerText = `${scanAllCancel ? 'Scan All stopped' : 'Scan All complete'} (${counts.length} of ${SCAN_ALL_ORDER.length} modes, ${Math.round((Date.now() - t0) / 1000)} s): ` +
+        status.innerText = `${scanAllCancel ? 'Scan All stopped' : 'Scan All complete'} (${order.length} modes, ${Math.round((Date.now() - t0) / 1000)} s): ` +
             (total ? `${total} feature(s) - ` + found.map(([m, n]) => `${n} ${MODE_STYLE[m].label.toLowerCase()}`).join(', ') + '. Toggle each type in the legend at the top left; all of them also show in the 3D view.'
                    : 'nothing detected with the current settings.') +
-            (pick.cropped ? ` (Scanned the ${pick.grid.w.toLocaleString()} x ${pick.grid.h.toLocaleString()} px area in view.)` : '');
+            (secs.length > 1 ? sectionsNote(secs, secsDone) + ' Settlement likelihood (a heat map ranked within one scan) was left out: zoom in to scan it.' : fullDemGrid.w * fullDemGrid.h > SCAN_MAX_PX ? ' (Scanned the area in view.)' : '');
     }
 
     async function runScannerOnGrid() {
