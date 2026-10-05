@@ -776,8 +776,8 @@
             </select>
         </div>
         <div id="dlDoubtOpts">
-            <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem;" title="Hits that fail the mound rules: on ground steeper than the Flat-ground slope setting, no closed rise, smaller than a mound, or a ridge. 97% of real mounds stand on gentler ground."><input type="checkbox" id="dlShowDoubtful"> Show doubtful hits (on hillsides, no closed rise, too small)</label>
-            <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem; margin-bottom:6px;" title="The scan's clear false alarms are saved as look-alike samples; Train model then teaches the network not to flag them"><input type="checkbox" id="dlLearnFalse" checked> Learn from clear false alarms (kept as look-alikes for the next training)</label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem;" title="Hits that fail the mound rules: a knob without a clean mound shape above the Flat-ground slope setting, anything on ground steeper than 12 degrees, no closed rise, smaller than a mound, or a ridge. Your confirmed mounds are always shown."><input type="checkbox" id="dlShowDoubtful"> Show doubtful hits (on hillsides, no closed rise, too small)</label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem; margin-bottom:6px;" title="The scan's clear false alarms (on ground over 20 degrees, irregular bumps on slopes, no closed rise on a slope, ridges, far too small) are saved as look-alike samples; Train model then teaches the network not to flag them. Clean mound shapes are never used, nor anything near a confirmed mound."><input type="checkbox" id="dlLearnFalse" checked> Learn from clear false alarms (kept as look-alikes for the next training)</label>
         </div>
         <button id="dlCollectBtn" onclick="dlCollectNow()" style="font-size:0.8rem;">Collect samples from this DTM</button>
         <button id="dlTrainBtn" onclick="dlTrain()" style="background:#f3e8ff;color:#6b21a8;">&#129504; Train model</button>
@@ -3941,6 +3941,8 @@
         if (!v || !v.items) v = { items: {}, bg: [], areas: [], look: [] };
         if (!v.areas) v.areas = [];
         if (!v.look) v.look = [];
+        // look-alikes made under the first rules taught clean hillside mound shapes as "not a mound": dropped, re-collected under the current ones
+        if (v.look.some(x => x.v !== DL_LOOK_VERSION)) v.look = v.look.filter(x => x.v === DL_LOOK_VERSION);
         return (dlPatchCache[key] = v);
     }
     async function dlSavePatchesFor(key) {
@@ -4331,9 +4333,9 @@
             const avoid = [...dlTrainingItems().filter(i => i.label === 1), ...knownMounds(), ...(window.__dlExtraAvoid || [])];
             for (const la of dlFindLookalikes(g, DL.LOOK_PER_AREA, avoid)) {
                 const cm = dlExtractPatch(sample, la.lat, la.lon);
-                if (cm) { dlPatches.look.push({ lat: la.lat, lon: la.lon, cm, area: areaKey, why: la.why }); nLook++; }
+                if (cm) { dlPatches.look.push({ lat: la.lat, lon: la.lon, cm, area: areaKey, why: la.why, v: DL_LOOK_VERSION }); nLook++; }
             }
-            if (!nLook) dlPatches.look.push({ lat: null, lon: null, cm: null, area: areaKey, why: 'none' });   // area done, nothing found
+            if (!nLook) dlPatches.look.push({ lat: null, lon: null, cm: null, area: areaKey, why: 'none', v: DL_LOOK_VERSION });   // area done, nothing found
             dlTrimLook();
         }
         return { items: nItems, bg: nBg, look: nLook, lookTried };
@@ -4348,8 +4350,13 @@
     // mound you haven't confirmed yet isn't taught as "not a mound".
     // degrees of ground slope (25 m around): 98% of confirmed mounds in real
     // training data sit on gentler ground, while knobs, ridge noses and
-    // boulders on hillsides are the commonest false alarms in rugged country
-    const DL_LOOK_SLOPE = 12;
+    // boulders on hillsides are the commonest false alarms in rugged country.
+    // A clean mound shape is never taught as "not a mound" below the 20
+    // degree hard limit, though: real hillside mounds exist (Cottonpatch
+    // Mound at Russell Cave sits on 11.5 degrees), and a network taught
+    // that round bumps on slopes aren't mounds stops finding them
+    const DL_LOOK_SLOPE = 12, DL_LOOK_VERSION = 2;
+    const dlCleanShape = (meas) => !!meas && meas.template != null && meas.template >= 0.85 && meas.elong <= 1.5 && meas.circ >= 0.45;
     function dlLookMinD() {
         if (DL.MIN_POS_D) return DL.MIN_POS_D;
         const pd = moundShapePresetDefs();
@@ -4357,7 +4364,8 @@
     }
     // why a measured candidate is clearly not a mound, or null when it could be one
     function dlClearlyNotMound(meas, groundSlope, minD) {
-        if (groundSlope != null && groundSlope > DL_LOOK_SLOPE) return 'a bump on steep ground';
+        if (groundSlope != null && groundSlope > MOUND_SLOPE_HARD_MAX) return 'a bump on ground steeper than 20 degrees';
+        if (groundSlope != null && groundSlope > DL_LOOK_SLOPE && !dlCleanShape(meas)) return 'an irregular bump on steep ground';
         // on gentle ground a worn, low mound can fail to measure: never taught as "not a mound"
         if (!meas) return groundSlope != null && groundSlope > 8 ? 'no closed rise, on a slope' : null;
         if (meas.d < 0.6 * minD) return 'far smaller than a mound';
@@ -5199,7 +5207,7 @@
                     // clean mound shape counts (others are listed last, flagged)
                     pk.groundSlope = dlGroundSlopeAt(g, la, lo, effigyModel ? 60 : DL.key === 'large' ? Math.max(60, 0.8 * (meas ? meas.d : 60)) : 25);
                     if (!effigyModel && pk.groundSlope != null) {
-                        if (pk.groundSlope > MOUND_SLOPE_HARD_MAX) { skippedSteep++; if (DL.LOOK_PER_AREA) mine(la, lo, 'a bump on steep ground'); continue; }
+                        if (pk.groundSlope > MOUND_SLOPE_HARD_MAX) { skippedSteep++; if (DL.LOOK_PER_AREA) mine(la, lo, 'a bump on ground steeper than 20 degrees'); continue; }
                         const flatMax = parseFloat((document.getElementById('moundMaxGroundSlope') || { value: 8 }).value);
                         pk.hillside = pk.groundSlope > flatMax && !(meas && meas.template != null && meas.template >= 0.85 && meas.elong <= 1.5 && meas.circ >= 0.45);
                     }
@@ -5248,14 +5256,14 @@
                     res.known = knownMounds().some(k2 => approxMetersBetween(k2.lat, k2.lon, la, lo) < Math.max(10, 0.6 * k2.d));
                 }
             }
-            // no closed rise, smaller than a mound, or on ground steeper than the Flat-ground
-            // slope setting (97% of confirmed mounds are on gentler ground;
-            // a small round knob on a hillside passes the shape test, so
-            // shape doesn't excuse it here): hidden too, unless the regular
-            // scan agrees or it's one of your mounds
+            // no closed rise, smaller than a mound, a knob without a clean
+            // mound shape above the Flat-ground slope setting, or anything on
+            // ground steeper than 12 degrees (97% of confirmed mounds are on
+            // ground of 8 degrees or less): hidden too, unless the regular
+            // scan agrees or it's one of your mounds. A clean shape on 8-12
+            // degrees (like Cottonpatch Mound) stays, flagged and listed last
             if (hideDoubt) {
-                const flatMax = parseFloat((document.getElementById('moundMaxGroundSlope') || { value: 8 }).value);
-                const keep = results.filter(r2 => r2.agree || r2.known || !(!r2.meas || r2.small || r2.hillside || (r2.groundSlope != null && r2.groundSlope > flatMax)));
+                const keep = results.filter(r2 => r2.agree || r2.known || !(!r2.meas || r2.small || r2.hillside || (r2.groundSlope != null && r2.groundSlope > DL_LOOK_SLOPE)));
                 hiddenDoubt += results.length - keep.length; results.length = 0; results.push(...keep);
             }
             // the network's clear false alarms become look-alike samples
@@ -5266,7 +5274,7 @@
                 for (const m2 of mined) {
                     if (dlPatches.look.some(x => x.cm && approxMetersBetween(x.lat, x.lon, m2.lat, m2.lon) < 5)) continue;
                     const cm = dlExtractPatch(smp, m2.lat, m2.lon);
-                    if (cm) { dlPatches.look.push({ lat: m2.lat, lon: m2.lon, cm, area: areaKey, why: m2.why }); nMined++; }
+                    if (cm) { dlPatches.look.push({ lat: m2.lat, lon: m2.lon, cm, area: areaKey, why: m2.why, v: DL_LOOK_VERSION }); nMined++; }
                 }
                 if (nMined) { dlTrimLook(); await dlSavePatches(); updateDLSummary(); }
             }
@@ -5289,7 +5297,7 @@
                 (skippedBuilt ? `; ${skippedBuilt} skipped as house pads, building foundations or mapped buildings` : '') +
                 (skippedSteep ? `; ${skippedSteep} skipped on ground steeper than ${MOUND_SLOPE_HARD_MAX}&deg;`.replace('&deg;', '°') : '') +
                 (mergedDup ? `; ${mergedDup} more hit${mergedDup === 1 ? '' : 's'} on the same ${DL.NOUNS} merged, so each is listed once` : '') +
-                (hiddenDoubt ? `; ${hiddenDoubt} doubtful hit${hiddenDoubt === 1 ? '' : 's'} hidden (on ground steeper than the Flat-ground slope setting, no closed rise, smaller than a mound, or a ridge; tick Show doubtful hits to see them)` : '') +
+                (hiddenDoubt ? `; ${hiddenDoubt} doubtful hit${hiddenDoubt === 1 ? '' : 's'} hidden (a knob without a clean mound shape on a hillside, anything on ground steeper than 12°, no closed rise, smaller than a mound, or a ridge; tick Show doubtful hits to see them)` : '') +
                 (nMined ? `; ${nMined} clear false alarm${nMined === 1 ? '' : 's'} kept as look-alike examples, so train again to teach the network not to flag ${nMined === 1 ? 'it' : 'them'}` : '') +
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
                 ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : DL.key === 'large' ? 'violet "P" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
@@ -5560,7 +5568,7 @@
                 kind: 'lidar-deep-learning-model', format: 1, profile: DL.key, methodVersion: DL.MODEL_VERSION, savedAt: Date.now(),
                 patch: { size: DL.PATCH, res: DL.RES }, model, modelInfo: model ? meta : null,
                 samples: { items, bg: dlPatches.bg.map(b => ({ lat: b.lat, lon: b.lon, area: b.area, cm: dlCm64(b.cm) })), areas: dlPatches.areas,
-                           look: (dlPatches.look || []).map(x => ({ lat: x.lat, lon: x.lon, area: x.area, why: x.why, cm: x.cm ? dlCm64(x.cm) : null })) },
+                           look: (dlPatches.look || []).map(x => ({ lat: x.lat, lon: x.lon, area: x.area, why: x.why, v: x.v, cm: x.cm ? dlCm64(x.cm) : null })) },
                 trainingData: JSON.parse(JSON.stringify(trainingData))
             };
             delete file.trainingData._undo;
@@ -5621,8 +5629,9 @@
             dlTrimBackground();
             if (!dlPatches.look) dlPatches.look = [];
             for (const x of file.samples.look || []) {
+                if (x.v !== DL_LOOK_VERSION) continue;   // made under the first look-alike rules
                 if (x.cm ? dlPatches.look.some(y => y.cm && Math.abs(y.lat - x.lat) < 1e-7 && Math.abs(y.lon - x.lon) < 1e-7) : dlPatches.look.some(y => y.area === x.area)) continue;
-                dlPatches.look.push({ lat: x.lat, lon: x.lon, area: x.area, why: x.why, cm: x.cm ? dlCmFrom64(x.cm) : null }); if (x.cm) addedS++;
+                dlPatches.look.push({ lat: x.lat, lon: x.lon, area: x.area, why: x.why, v: x.v, cm: x.cm ? dlCmFrom64(x.cm) : null }); if (x.cm) addedS++;
             }
             dlTrimLook();
             for (const a of file.samples.areas || []) if (!dlPatches.areas.includes(a)) dlPatches.areas.push(a);
