@@ -1,0 +1,8 @@
+Name,Kind,Latitude,Longitude,Address or lookup name,Location accuracy,Source,Notes
+"Pueblo Grande platform mound, Phoenix (AZ)",Mounds,33.44560,-111.98403,,USGS place-names (GNIS) position,USGS GNIS 9800,"Hohokam platform mound, Pueblo Grande Museum Archaeological Park (National Historic Landmark)"
+"Mesa Grande platform mound, Mesa (AZ)",Mounds,,,"Mesa Grande Cultural Park, Mesa, Arizona",found by name lookup when toured,name lookup,"Hohokam platform mound, city cultural park"
+Casa Grande Ruins (AZ),Mounds,32.99703,-111.53254,,USGS place-names (GNIS) position,USGS GNIS 44811,Hohokam Great House compound with platform mound and ballcourt (National Monument); the Great House itself is a standing building
+"Gatlin Site platform mounds, Gila Bend (AZ)",Mounds,32.98639,-112.70194,,USGS place-names (GNIS) position,USGS GNIS 2500177,"Hohokam platform mounds and ballcourts (National Historic Landmark, public)"
+"Snaketown, Hohokam Pima NM (AZ)",Mounds,33.18714,-111.91927,,USGS place-names (GNIS) position,USGS GNIS 25440,Hohokam village with trash mounds and a platform mound; closed to the public (scanning LiDAR is fine)
+Double Ditch village midden mounds (ND),Mounds,46.93521,-100.89683,,historical marker position (site in view; use the 1000 m size),HMdb marker 154930,Mandan village; low midden mounds ring the village inside two fortification ditches (State Historic Site)
+Knife River Indian Villages (ND),Mounds,47.35390,-101.38572,"Big Hidatsa Village Site, Knife River Indian Villages, North Dakota",USGS place-names (GNIS) position,USGS GNIS 1888938,Hidatsa villages with midden mounds and earthlodge depressions (National Historic Site); use the 1000 m size
