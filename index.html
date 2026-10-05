@@ -775,6 +775,10 @@
                 <option value="0.97">97%+ (fewest)</option>
             </select>
         </div>
+        <div id="dlDoubtOpts">
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem;" title="Hits that fail the mound rules: on ground steeper than the Flat-ground slope setting, no closed rise, smaller than a mound, or a ridge. 97% of real mounds stand on gentler ground."><input type="checkbox" id="dlShowDoubtful"> Show doubtful hits (on hillsides, no closed rise, too small)</label>
+            <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem; margin-bottom:6px;" title="The scan's clear false alarms are saved as look-alike samples; Train model then teaches the network not to flag them"><input type="checkbox" id="dlLearnFalse" checked> Learn from clear false alarms (kept as look-alikes for the next training)</label>
+        </div>
         <button id="dlCollectBtn" onclick="dlCollectNow()" style="font-size:0.8rem;">Collect samples from this DTM</button>
         <button id="dlTrainBtn" onclick="dlTrain()" style="background:#f3e8ff;color:#6b21a8;">&#129504; Train model</button>
         <button id="dlTrainAllBtn" onclick="dlTrainAllNew()" style="font-size:0.8rem;background:#ede9fe;color:#5b21b6;">&#129504; Train all models with new data (mounds, effigies, shell middens)</button>
@@ -3831,7 +3835,7 @@
     // so a whole bird fits, seen through the same narrow-relief view the
     // effigy scan uses). DL is the one selected in the panel.
     const DL_PROFILES = {
-        mounds: { key: 'mounds', label: 'Mounds', PATCH: 48, INPUT: 40, RES: 1.0, BORDER: 3, STRIDE: 4, BG_PER_AREA: 150, BG_MAX: 4000, MAX_POS_D: 35, MAX_SCAN_CELLS: 2.5e6,
+        mounds: { key: 'mounds', label: 'Mounds', PATCH: 48, INPUT: 40, RES: 1.0, BORDER: 3, STRIDE: 4, BG_PER_AREA: 150, BG_MAX: 4000, LOOK_PER_AREA: 60, LOOK_MAX: 4000, MAX_POS_D: 35, MAX_SCAN_CELLS: 2.5e6,
                   CH: 6, MODEL_VERSION: 4, MODEL_URL: 'indexeddb://lidar-dl-mounds-v4', EPOCHS: 40, IDB_KEY: 'dlPatches', PREFS_KEY: 'dl', TRAIN_MODE: 'mounds',
                   RESULT_MODE: 'dlmounds', FEATURES: 'mound', PEAK_SEP: 15, AVOID_M: 35, NOUN: 'mound', NEG_NOUN: 'not-mound', NOUNS: 'mounds', NEG_NOUNS: 'not-mounds' },
         effigy: { key: 'effigy', label: 'Effigy & linear mounds', PATCH: 72, INPUT: 64, RES: 2.0, BORDER: 4, STRIDE: 8, BG_PER_AREA: 120, BG_MAX: 1500, MAX_POS_D: 1e9, MAX_SCAN_CELLS: 1.2e6,
@@ -3843,7 +3847,7 @@
         // Mounds too big for the mound model's 40 m window (platform mounds
         // and big conical ones, 30-180 m across): 200 m squares at 2.5 m,
         // learning from the same mound training data, only the big ones
-        large: { key: 'large', label: 'Large & platform mounds', PATCH: 96, INPUT: 80, RES: 2.5, BORDER: 4, STRIDE: 6, BG_PER_AREA: 80, BG_MAX: 2000, MIN_POS_D: 30, MAX_POS_D: 180, MAX_SCAN_CELLS: 1.5e6,
+        large: { key: 'large', label: 'Large & platform mounds', PATCH: 96, INPUT: 80, RES: 2.5, BORDER: 4, STRIDE: 6, BG_PER_AREA: 80, BG_MAX: 2000, LOOK_PER_AREA: 25, LOOK_MAX: 1500, MIN_POS_D: 30, MAX_POS_D: 180, MAX_SCAN_CELLS: 1.5e6,
                  CH: 6, MODEL_VERSION: 1, MODEL_URL: 'indexeddb://lidar-dl-large-v1', EPOCHS: 40, IDB_KEY: 'dlPatchesLarge', PREFS_KEY: 'dlLarge', TRAIN_MODE: 'mounds', CLIP: 15,
                  RESULT_MODE: 'dlbigmounds', FEATURES: 'mound', PEAK_SEP: 60, AVOID_M: 120, NOUN: 'large mound', NEG_NOUN: 'not-mound', NOUNS: 'large mounds', NEG_NOUNS: 'not-mounds' }
     };
@@ -3868,8 +3872,9 @@
         if (dlPatchCache[key]) return dlPatchCache[key];
         let v = null;
         try { v = await idbGet(DL_PROFILES[key].IDB_KEY); } catch (e) { console.warn('Could not read deep-learning samples', e); }
-        if (!v || !v.items) v = { items: {}, bg: [], areas: [] };
+        if (!v || !v.items) v = { items: {}, bg: [], areas: [], look: [] };
         if (!v.areas) v.areas = [];
+        if (!v.look) v.look = [];
         return (dlPatchCache[key] = v);
     }
     async function dlSavePatchesFor(key) {
@@ -4218,7 +4223,7 @@
         if (!g || !g.data) return { items: 0, bg: 0 };
         await dlLoadPatchesFor(key);
         const r = dlWithProfile(key, () => dlHarvestSync(g, withBackground));
-        if (r.items || r.bg) await dlSavePatchesFor(key);
+        if (r.items || r.bg || r.lookTried) await dlSavePatchesFor(key);
         return r;
     }
     function dlHarvestSync(g, withBackground) {
@@ -4252,7 +4257,100 @@
                 if (dlPatches.areas.length > 200) dlPatches.areas.splice(0, dlPatches.areas.length - 200);
             }
         }
-        return { items: nItems, bg: nBg };
+        // look-alikes: once per area, also for areas whose background was
+        // collected before look-alikes existed
+        let nLook = 0, lookTried = false;
+        if (withBackground && DL.LOOK_PER_AREA && !dlPatches.look.some(x => x.area === areaKey)) {
+            lookTried = true;
+            const avoid = [...dlTrainingItems().filter(i => i.label === 1), ...knownMounds(), ...(window.__dlExtraAvoid || [])];
+            for (const la of dlFindLookalikes(g, DL.LOOK_PER_AREA, avoid)) {
+                const cm = dlExtractPatch(sample, la.lat, la.lon);
+                if (cm) { dlPatches.look.push({ lat: la.lat, lon: la.lon, cm, area: areaKey, why: la.why }); nLook++; }
+            }
+            if (!nLook) dlPatches.look.push({ lat: null, lon: null, cm: null, area: areaKey, why: 'none' });   // area done, nothing found
+            dlTrimLook();
+        }
+        return { items: nItems, bg: nBg, look: nLook, lookTried };
+    }
+    // ---- Look-alikes ----
+    // Random background is nearly always plain ground, so it never shows the
+    // network the bumps that fool it: knobs and ridge noses on hillsides,
+    // boulders, tree throws, banks and sinkhole rims. Look-alike samples are
+    // raised spots that clearly fail the mound rules, both ones found when an
+    // area's terrain is collected and the network's own clear false alarms in
+    // a scan. A spot that could be an unrecorded mound is never used, so a
+    // mound you haven't confirmed yet isn't taught as "not a mound".
+    // degrees of ground slope (25 m around): 98% of confirmed mounds in real
+    // training data sit on gentler ground, while knobs, ridge noses and
+    // boulders on hillsides are the commonest false alarms in rugged country
+    const DL_LOOK_SLOPE = 12;
+    function dlLookMinD() {
+        if (DL.MIN_POS_D) return DL.MIN_POS_D;
+        const pd = moundShapePresetDefs();
+        return feetToMeters(Math.min(pd.conical.minDiameter, pd.platform.minDiameter, parseFloat(document.getElementById('minDiameter').value) || Infinity));
+    }
+    // why a measured candidate is clearly not a mound, or null when it could be one
+    function dlClearlyNotMound(meas, groundSlope, minD) {
+        if (groundSlope != null && groundSlope > DL_LOOK_SLOPE) return 'a bump on steep ground';
+        // on gentle ground a worn, low mound can fail to measure: never taught as "not a mound"
+        if (!meas) return groundSlope != null && groundSlope > 8 ? 'no closed rise, on a slope' : null;
+        if (meas.d < 0.6 * minD) return 'far smaller than a mound';
+        if (meas.elong > 2.5) return 'a ridge, not a mound';
+        return null;
+    }
+    // raised spots in grid g that clearly aren't mounds, up to want, away from avoid
+    function dlFindLookalikes(g, want, avoid) {
+        const b = g.bounds, lat0 = (b.n + b.s) / 2, mLat = 1 / 111320, mLon = 1 / (111320 * Math.cos(lat0 * Math.PI / 180));
+        const wM = (b.e - b.w) / mLon, hM = (b.n - b.s) / mLat, res = Math.max(DL.RES, Math.sqrt(wM * hM / 3e6));
+        const W = Math.floor(wM / res), H = Math.floor(hM / res), span = DL.PATCH * DL.RES;
+        if (W < 30 || H < 30) return [];
+        const sample = dlSampler(g), z = new Float64Array(W * H), ok = new Uint8Array(W * H);
+        for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) { const v = sample(b.n - (r + 0.5) * res * mLat, b.w + (c + 0.5) * res * mLon); if (v === v) { z[r * W + c] = v; ok[r * W + c] = 1; } }
+        // height above the surrounding average (a box a quarter of the window wide)
+        const S = new Float64Array((W + 1) * (H + 1)), C = new Float64Array((W + 1) * (H + 1));
+        for (let r = 0; r < H; r++) for (let c = 0; c < W; c++) { const i = (r + 1) * (W + 1) + c + 1; S[i] = S[i - 1] + S[i - W - 1] - S[i - W - 2] + (ok[r * W + c] ? z[r * W + c] : 0); C[i] = C[i - 1] + C[i - W - 1] - C[i - W - 2] + ok[r * W + c]; }
+        const R = Math.max(2, Math.round(0.25 * span / res)), pk = Math.max(1, Math.round(0.1 * span / res)), minRise = DL.key === 'large' ? 1 : 0.3;
+        const box = (A, r0, c0, r1, c1) => A[(r1 + 1) * (W + 1) + c1 + 1] - A[r0 * (W + 1) + c1 + 1] - A[(r1 + 1) * (W + 1) + c0] + A[r0 * (W + 1) + c0];
+        const rise = new Float32Array(W * H).fill(-1e9);
+        for (let r = R; r < H - R; r++) for (let c = R; c < W - R; c++) {
+            if (!ok[r * W + c]) continue;
+            const n = box(C, r - R, c - R, r + R, c + R); if (n < 0.9 * (2 * R + 1) ** 2) continue;
+            rise[r * W + c] = z[r * W + c] - box(S, r - R, c - R, r + R, c + R) / n;
+        }
+        const edge = Math.ceil((span / 2 + 2) / res), peaks = [];
+        for (let r = edge; r < H - edge; r++) for (let c = edge; c < W - edge; c++) {
+            const v = rise[r * W + c]; if (v < minRise) continue;
+            let top = true;
+            for (let a = -pk; a <= pk && top; a++) for (let q = -pk; q <= pk; q++) if ((a || q) && rise[(r + a) * W + c + q] > v) { top = false; break; }
+            if (top) peaks.push({ lat: b.n - (r + 0.5) * res * mLat, lon: b.w + (c + 0.5) * res * mLon });
+        }
+        let seed = (peaks.length * 7919 + W * 31 + H) >>> 0; const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+        dlShuffle(peaks, rnd);
+        const out = [], minD = dlLookMinD();
+        for (let i = 0; i < peaks.length && out.length < want && i < want * 8; i++) {
+            const p = peaks[i];
+            if (avoid.some(a => approxMetersBetween(a.lat, a.lon, p.lat, p.lon) < DL.AVOID_M)) continue;
+            if (out.some(o => approxMetersBetween(o.lat, o.lon, p.lat, p.lon) < 0.3 * span)) continue;
+            const meas = dlMeasure(g, p.lat, p.lon), gs = dlGroundSlopeAt(g, p.lat, p.lon, DL.key === 'large' ? 60 : 25);
+            const why = dlClearlyNotMound(meas, gs, minD);
+            if (why) out.push({ lat: p.lat, lon: p.lon, why });
+        }
+        return out;
+    }
+    // Over the cap, look-alikes are trimmed from whichever area has the most
+    function dlTrimLook() {
+        if (!DL.LOOK_MAX || !dlPatches.look) return;
+        const look = dlPatches.look, over = look.filter(x => x.cm).length - DL.LOOK_MAX;
+        if (over <= 0) return;
+        const count = new Map();
+        for (const x of look) if (x.cm) count.set(x.area, (count.get(x.area) || 0) + 1);
+        const drop = new Map();
+        for (let k = 0; k < over; k++) {
+            let best = null, n = -1;
+            for (const [a, c] of count) if (c > n) { n = c; best = a; }
+            count.set(best, n - 1); drop.set(best, (drop.get(best) || 0) + 1);
+        }
+        dlPatches.look = look.filter(x => { if (!x.cm) return true; const d = drop.get(x.area); if (d) { drop.set(x.area, d - 1); return false; } return true; });
     }
     // Over the cap, background is trimmed from whichever area has the most,
     // so every area you've loaded keeps a share
@@ -4282,7 +4380,8 @@
             if (it.label && it.d > DL.MAX_POS_D) tooBig.push(smp);
             else (it.label ? pos : neg).push(smp);
         }
-        return { pos, neg, tooBig, bg: (dlPatches ? dlPatches.bg : []).map(b => ({ cm: b.cm, lat: b.lat, lon: b.lon })), missing };
+        return { pos, neg, tooBig, bg: (dlPatches ? dlPatches.bg : []).map(b => ({ cm: b.cm, lat: b.lat, lon: b.lon })),
+                 look: (dlPatches && dlPatches.look ? dlPatches.look : []).filter(x => x.cm).map(x => ({ cm: x.cm, lat: x.lat, lon: x.lon, look: true })), missing };
     }
     async function updateDLSummary() {
         const el = document.getElementById('dlSummary'); if (!el) return;
@@ -4291,6 +4390,7 @@
         const areas = new Set(dlPatches.bg.map(b => b.area)).size;
         const pl = (n, w) => `${n} ${n === 1 ? w : (w === DL.NOUN ? DL.NOUNS : DL.NEG_NOUNS)}`, PN = DL.NOUN, NN = DL.NEG_NOUN;
         el.innerHTML = `<b>Samples:</b> ${pl(s.pos.length, PN)}, ${pl(s.neg.length, NN)}, ${s.bg.length} background (${areas} area${areas === 1 ? '' : 's'})` +
+            (DL.LOOK_PER_AREA ? `, ${s.look.length} look-alike${s.look.length === 1 ? '' : 's'} (bumps that clearly aren't ${DL.NOUNS})` : '') +
             (s.tooBig.length ? `<br><span style="color:#475569;">${s.tooBig.length} mound${s.tooBig.length > 1 ? 's' : ''} wider than ${Math.round(DL.MAX_POS_D / FT_TO_M)} ft ${s.tooBig.length > 1 ? 'are' : 'is'} left to the regular scan (too big for the network's ${Math.round(DL.INPUT / FT_TO_M)} ft window).</span>` : '') +
             (s.missing.pos + s.missing.neg ? `<br><span style="color:#92400e;">${s.missing.pos ? pl(s.missing.pos, PN) : ''}${s.missing.pos && s.missing.neg ? ' and ' : ''}${s.missing.neg ? pl(s.missing.neg, NN) : ''} still need a sample: load a DTM that covers ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'}.</span> <a href="#" onclick="event.preventDefault(); dlShowMissing();" style="font-weight:bold;">Show ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'} on the map</a>` : '') +
             `<br><b>Model:</b> ` + (m && dlModelOutdated() ? '<span style="color:#92400e;">the method was upgraded; press Train model again (samples are kept)</span>' : m ? `trained ${new Date(m.at).toLocaleString()} on ${pl(m.pos, PN)} and ${pl(m.neg, NN)}${m.val ? `; ${dlValLabel(m.val).toLowerCase()}: found ${m.val.posHit} of ${pl(m.val.pos, PN)}, wrongly flagged ${m.val.negHit} of ${pl(m.val.neg, NN)}` : ` (too few ${DL.NOUNS} for a held-out check)`}` : 'not trained yet');
@@ -4413,6 +4513,7 @@
         DL = DL_PROFILES[key];
         if (save) { (trainingData.prefs || (trainingData.prefs = {})).dlProfile = key; saveTrainingData(); }
         const sel = document.getElementById('dlProfile'); if (sel) sel.value = key;
+        const dop = document.getElementById('dlDoubtOpts'); if (dop) dop.style.display = DL.LOOK_PER_AREA ? '' : 'none';
         const help = document.getElementById('dlProfileHelp');
         if (help) help.innerHTML = key === 'large'
             ? 'Learns large and platform mounds, 100 to 590 ft across, from your confirmed mounds of that size (the Mounds model can only use mounds under 115 ft). It looks at 650 ft squares at 8 ft, so a whole platform mound fits. Smaller mounds are left to the Mounds model. Results are violet "P" diamonds.'
@@ -4436,7 +4537,7 @@
         dlPrefs().enabled = true; saveTrainingData();
         const r = await dlHarvest(fullDemGrid, true);
         await updateDLSummary();
-        dlSetStatus(`Collected ${r.items} training-item sample${r.items === 1 ? '' : 's'} and ${r.bg} background sample${r.bg === 1 ? '' : 's'} from this DTM.` +
+        dlSetStatus(`Collected ${r.items} training-item sample${r.items === 1 ? '' : 's'}, ${r.bg} background sample${r.bg === 1 ? '' : 's'} and ${r.look || 0} look-alike${r.look === 1 ? '' : 's'} (knobs, ridge noses, boulders and other bumps that clearly aren't mounds) from this DTM.` +
             (r.bg === 0 && dlPatches.areas.length ? ' (Background for this area was already collected.)' : ''));
     }
     // Every DTM loaded after you start using this section adds its samples
@@ -4474,7 +4575,7 @@
     // which labels, which are too big to use, and how much background. Any
     // new, removed, relabelled or re-kinded item, or new background, changes it.
     function dlDataSig(S) {
-        const parts = [S.pos.map(s => s.key).sort().join(','), S.neg.map(s => s.key).sort().join(','), S.tooBig.map(s => s.key).sort().join(','), S.bg.length];
+        const parts = [S.pos.map(s => s.key).sort().join(','), S.neg.map(s => s.key).sort().join(','), S.tooBig.map(s => s.key).sort().join(','), S.bg.length + (S.look && S.look.length ? '+' + S.look.length : '')];
         let h = 2166136261; const str = parts.join('|');
         for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
         return h.toString(36) + ':' + str.length;
@@ -4483,7 +4584,7 @@
     async function dlTrainingNeed(key) {
         await dlLoadPatchesFor(key);
         return dlWithProfile(key, () => {
-            const S = dlUsableSamples(), m = dlPrefs().model, neg = S.neg.length + S.bg.length;
+            const S = dlUsableSamples(), m = dlPrefs().model, neg = S.neg.length + S.bg.length + S.look.length;
             const base = { pos: S.pos.length, neg, bg: S.bg.length };
             if (S.pos.length < 3) return { ...base, need: false, why: `only ${S.pos.length} ${S.pos.length === 1 ? DL.NOUN : DL.NOUNS} with a picture (3 needed)` };
             if (!m) return { ...base, need: true, why: 'never trained' };
@@ -4558,7 +4659,7 @@
             dlPrefs().enabled = true; saveTrainingData();
             if (fullDemGrid) await dlHarvest(fullDemGrid, true);
             const S = dlUsableSamples();
-            const negAll = [...S.neg, ...S.bg];
+            const negAll = [...S.neg, ...S.bg, ...S.look];
             if (S.pos.length < 3) { dlSetStatus(`The network needs terrain samples of at least 3 ${DL.NOUNS}; it has ${S.pos.length}. ${DL.TRAIN_MODE === 'effigy' ? 'Confirm more effigy or linear mounds (scan results, or tap one and choose This is an Effigy)' : DL.TRAIN_MODE === 'shell' ? 'Confirm more shell middens (scan results, or tap one and choose This is a Shell Midden)' : 'Confirm or outline more mounds'}, and load the DTM around ones that have no sample yet.`); return; }
             if (negAll.length < 20) { dlSetStatus('Load a DTM (and press Collect samples) so the network has ordinary ground to compare with.'); return; }
             dlSetStatus('Loading TensorFlow.js...');
@@ -4582,16 +4683,23 @@
             for (let ep = 0; ep < DL.EPOCHS && !dlCancel; ep++) {
                 const set = [...trNeg.map(s => [s, 0]), ...Array.from({ length: reps }, () => trPos.map(s => [s, 1])).flat()];
                 dlShuffle(set, rnd);
-                const xs = new Float32Array(set.length * sz), ys = new Float32Array(set.length);
-                set.forEach(([s, y], i) => {
-                    const dr = c0 + Math.round((rnd() * 2 - 1) * 3), dc = c0 + Math.round((rnd() * 2 - 1) * 3);
-                    dlInputFromPatch(s.cm, xs, i * sz, dr, dc, Math.floor(rnd() * 8), y ? 0.8 + rnd() * 0.45 : 0.9 + rnd() * 0.2);
-                    ys[i] = y;
-                });
-                const X = tf.tensor4d(xs, [set.length, N, N, CH]), Y = tf.tensor2d(ys, [set.length, 1]);
-                const h = await model.fit(X, Y, { epochs: 1, batchSize: 32, shuffle: false, verbose: 0 });
-                X.dispose(); Y.dispose();
-                dlSetStatus(`Training: round ${ep + 1} of ${DL.EPOCHS} (accuracy ${Math.round(100 * h.history.acc[0])}%, ${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}...`);
+                // in chunks, so a large sample set doesn't need all its inputs in memory at once
+                const CHUNK = 2048; let accN = 0, accS = 0;
+                for (let k0 = 0; k0 < set.length && !dlCancel; k0 += CHUNK) {
+                    const part = set.slice(k0, k0 + CHUNK);
+                    const xs = new Float32Array(part.length * sz), ys = new Float32Array(part.length);
+                    part.forEach(([s, y], i) => {
+                        const dr = c0 + Math.round((rnd() * 2 - 1) * 3), dc = c0 + Math.round((rnd() * 2 - 1) * 3);
+                        dlInputFromPatch(s.cm, xs, i * sz, dr, dc, Math.floor(rnd() * 8), y ? 0.8 + rnd() * 0.45 : 0.9 + rnd() * 0.2);
+                        ys[i] = y;
+                    });
+                    const X = tf.tensor4d(xs, [part.length, N, N, CH]), Y = tf.tensor2d(ys, [part.length, 1]);
+                    const h = await model.fit(X, Y, { epochs: 1, batchSize: 32, shuffle: false, verbose: 0 });
+                    X.dispose(); Y.dispose();
+                    accS += h.history.acc[0] * part.length; accN += part.length;
+                    await dlTick();
+                }
+                dlSetStatus(`Training: round ${ep + 1} of ${DL.EPOCHS} (accuracy ${Math.round(100 * accS / Math.max(1, accN))}%, ${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}...`);
                 await dlTick();
             }
             if (dlCancel) { model.dispose(); dlSetStatus('Training stopped; the previous model (if any) is kept.'); return; }
@@ -4604,7 +4712,8 @@
                 const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs, [vs.length * 8, N, N, CH])).dataSync());
                 const p = vs.map((_, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; return m / 8; });
                 const thr = dlThreshold();
-                val = { pos: valPos.length, neg: valNeg.length, posHit: vs.filter(([, y], i) => y && p[i] >= thr).length, negHit: vs.filter(([, y], i) => !y && p[i] >= thr).length, byArea: sp.byArea, areas: sp.areas };
+                val = { pos: valPos.length, neg: valNeg.length, posHit: vs.filter(([, y], i) => y && p[i] >= thr).length, negHit: vs.filter(([, y], i) => !y && p[i] >= thr).length, byArea: sp.byArea, areas: sp.areas,
+                        look: vs.filter(([s, y]) => !y && s.look).length, lookHit: vs.filter(([s, y], i) => !y && s.look && p[i] >= thr).length };
             }
             await model.save(DL.MODEL_URL);
             dlModel = model;
@@ -4619,7 +4728,8 @@
             dlSetStatus(`Trained in ${Math.round((Date.now() - t0) / 1000)} s on ${S.pos.length} ${PN} and ${negAll.length} ${NN} samples` +
                 (S.tooBig.length ? ` (${S.tooBig.length} mounds too big for its window left to the regular scan)` : '') + '.' +
                 (nDoubt ? ` ${nDoubt} possible issue${nDoubt === 1 ? '' : 's'} in your training data: press Check training data.` : '') +
-                (val ? ` ${dlValLabel(val)}: found ${val.posHit} of ${val.pos} ${PN}; wrongly flagged ${val.negHit} of ${val.neg} ${DL.NEG_NOUNS}.` : ` With fewer than 5 ${PN} there is no held-out check yet; treat results with extra caution.`) +
+                (val ? ` ${dlValLabel(val)}: found ${val.posHit} of ${val.pos} ${PN}; wrongly flagged ${val.negHit} of ${val.neg} ${DL.NEG_NOUNS}${val.look ? ` (${val.lookHit} of the ${val.look} look-alikes among them)` : ''}.` : ` With fewer than 5 ${PN} there is no held-out check yet; treat results with extra caution.`) +
+                (DL.LOOK_PER_AREA && !S.look.length ? ' It has no look-alike samples yet (knobs, ridge noses, boulders), so expect false alarms on rugged ground: load a few areas again or scan, then train again.' : '') +
                 (nRetired ? ` ${nRetired} training-tour site${nRetired === 1 ? ' is' : 's are'} now in the model and left the tour list.` : '') +
                 ' Now press Scan with deep learning.');
         } catch (e) {
@@ -4957,9 +5067,18 @@
             for (const pk of sure) if (!kept.some(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < DL.PEAK_SEP)) kept.push(pk);
             const effigyModel = DL.TRAIN_MODE !== 'mounds', shellModel = DL.TRAIN_MODE === 'shell';   // effigyModel: either traced (non-mound) model
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
-            let skippedRejected = 0, skippedBuilt = 0, skippedSteep = 0;
+            let skippedRejected = 0, skippedBuilt = 0, skippedSteep = 0, hiddenDoubt = 0;
             const results = [];
             const dlBuildings = await builtBuildingsForScan(g);
+            // clear false alarms (a bump on steep ground, no closed rise, far
+            // too small, a ridge) are hidden, and kept as look-alikes for the
+            // next training so the network stops making the same mistake
+            const hideDoubt = !!DL.LOOK_PER_AREA && !(document.getElementById('dlShowDoubtful') || {}).checked;
+            const learnFalse = !!DL.LOOK_PER_AREA && !!(document.getElementById('dlLearnFalse') || { checked: true }).checked;
+            const lookMinD = DL.LOOK_PER_AREA ? dlLookMinD() : 0, mined = [];
+            const lookAvoid = DL.LOOK_PER_AREA ? [...dlTrainingItems().filter(i => i.label === 1), ...knownMounds()] : [];
+            const nearKnown = (la, lo) => lookAvoid.some(a => approxMetersBetween(a.lat, a.lon, la, lo) < DL.AVOID_M);
+            const mine = (la, lo, why) => { if (learnFalse && !nearKnown(la, lo)) mined.push({ lat: la, lon: lo, why }); };
             for (const pk of kept) {
                 if (results.length >= 2 * maxResults) break;
                 // your "Not real" marks and look-alike outlines always win
@@ -4977,9 +5096,13 @@
                     // clean mound shape counts (others are listed last, flagged)
                     pk.groundSlope = dlGroundSlopeAt(g, la, lo, effigyModel ? 60 : DL.key === 'large' ? Math.max(60, 0.8 * (meas ? meas.d : 60)) : 25);
                     if (!effigyModel && pk.groundSlope != null) {
-                        if (pk.groundSlope > MOUND_SLOPE_HARD_MAX) { skippedSteep++; continue; }
+                        if (pk.groundSlope > MOUND_SLOPE_HARD_MAX) { skippedSteep++; if (DL.LOOK_PER_AREA) mine(la, lo, 'a bump on steep ground'); continue; }
                         const flatMax = parseFloat((document.getElementById('moundMaxGroundSlope') || { value: 8 }).value);
                         pk.hillside = pk.groundSlope > flatMax && !(meas && meas.template != null && meas.template >= 0.85 && meas.elong <= 1.5 && meas.circ >= 0.45);
+                    }
+                    if (DL.LOOK_PER_AREA) {
+                        const why = dlClearlyNotMound(meas, pk.groundSlope, lookMinD);
+                        if (why && !nearKnown(la, lo)) { mine(la, lo, why); if (hideDoubt) { hiddenDoubt++; continue; } pk.doubt = why; }
                     }
                 }
                 results.push({ ...pk, meas });
@@ -5022,8 +5145,30 @@
                     res.known = knownMounds().some(k2 => approxMetersBetween(k2.lat, k2.lon, la, lo) < Math.max(10, 0.6 * k2.d));
                 }
             }
+            // no closed rise, smaller than a mound, or on ground steeper than the Flat-ground
+            // slope setting (97% of confirmed mounds are on gentler ground;
+            // a small round knob on a hillside passes the shape test, so
+            // shape doesn't excuse it here): hidden too, unless the regular
+            // scan agrees or it's one of your mounds
+            if (hideDoubt) {
+                const flatMax = parseFloat((document.getElementById('moundMaxGroundSlope') || { value: 8 }).value);
+                const keep = results.filter(r2 => r2.agree || r2.known || !(!r2.meas || r2.small || r2.hillside || (r2.groundSlope != null && r2.groundSlope > flatMax)));
+                hiddenDoubt += results.length - keep.length; results.length = 0; results.push(...keep);
+            }
+            // the network's clear false alarms become look-alike samples
+            let nMined = 0;
+            if (mined.length) {
+                await dlLoadPatches();
+                const smp = dlSampler(g), bb = g.bounds, areaKey = 'scan:' + [bb.n, bb.s, bb.e, bb.w].map(v => v.toFixed(4)).join(',');
+                for (const m2 of mined) {
+                    if (dlPatches.look.some(x => x.cm && approxMetersBetween(x.lat, x.lon, m2.lat, m2.lon) < 5)) continue;
+                    const cm = dlExtractPatch(smp, m2.lat, m2.lon);
+                    if (cm) { dlPatches.look.push({ lat: m2.lat, lon: m2.lon, cm, area: areaKey, why: m2.why }); nMined++; }
+                }
+                if (nMined) { dlTrimLook(); await dlSavePatches(); updateDLSummary(); }
+            }
             results.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!a.hillside - !!b2.hillside) || (!!b2.meas - !!a.meas) || b2.p - a.p);
-            const heldBack = Math.max(0, kept.length - skippedRejected - skippedBuilt - skippedSteep - maxResults);
+            const heldBack = Math.max(0, kept.length - skippedRejected - skippedBuilt - skippedSteep - hiddenDoubt - mergedDup - maxResults);
             results.length = Math.min(results.length, maxResults);
             clearModeDetections(DL.RESULT_MODE);
             window.__dlFeats = [];
@@ -5040,6 +5185,8 @@
                 (skippedBuilt ? `; ${skippedBuilt} skipped as house pads, building foundations or mapped buildings` : '') +
                 (skippedSteep ? `; ${skippedSteep} skipped on ground steeper than ${MOUND_SLOPE_HARD_MAX}&deg;`.replace('&deg;', '°') : '') +
                 (mergedDup ? `; ${mergedDup} more hit${mergedDup === 1 ? '' : 's'} on the same ${DL.NOUNS} merged, so each is listed once` : '') +
+                (hiddenDoubt ? `; ${hiddenDoubt} doubtful hit${hiddenDoubt === 1 ? '' : 's'} hidden (on ground steeper than the Flat-ground slope setting, no closed rise, smaller than a mound, or a ridge; tick Show doubtful hits to see them)` : '') +
+                (nMined ? `; ${nMined} clear false alarm${nMined === 1 ? '' : 's'} kept as look-alike examples, so train again to teach the network not to flag ${nMined === 1 ? 'it' : 'them'}` : '') +
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
                 ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : DL.key === 'large' ? 'violet "P" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
             dlSetStatus(msg); status.innerText = msg;
@@ -5308,7 +5455,8 @@
             const file = {
                 kind: 'lidar-deep-learning-model', format: 1, profile: DL.key, methodVersion: DL.MODEL_VERSION, savedAt: Date.now(),
                 patch: { size: DL.PATCH, res: DL.RES }, model, modelInfo: model ? meta : null,
-                samples: { items, bg: dlPatches.bg.map(b => ({ lat: b.lat, lon: b.lon, area: b.area, cm: dlCm64(b.cm) })), areas: dlPatches.areas },
+                samples: { items, bg: dlPatches.bg.map(b => ({ lat: b.lat, lon: b.lon, area: b.area, cm: dlCm64(b.cm) })), areas: dlPatches.areas,
+                           look: (dlPatches.look || []).map(x => ({ lat: x.lat, lon: x.lon, area: x.area, why: x.why, cm: x.cm ? dlCm64(x.cm) : null })) },
                 trainingData: JSON.parse(JSON.stringify(trainingData))
             };
             delete file.trainingData._undo;
@@ -5317,7 +5465,7 @@
                 try { blob = await new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).blob(); blob = new Blob([blob], { type: 'application/gzip' }); name += '.gz'; }
                 catch (e) { console.warn('Compression unavailable; saving uncompressed', e); }
             }
-            return { blob, name, nS: Object.keys(items).length + file.samples.bg.length, hasModel: !!model };
+            return { blob, name, nS: Object.keys(items).length + file.samples.bg.length + file.samples.look.filter(x => x.cm).length, hasModel: !!model };
         }
     }
     async function dlLoadFromFile(input) {
@@ -5367,6 +5515,12 @@
             for (const [k, v] of Object.entries(file.samples.items || {})) if (!dlPatches.items[k]) { dlPatches.items[k] = { lat: v.lat, lon: v.lon, cm: dlCmFrom64(v.cm) }; addedS++; }
             for (const b of file.samples.bg || []) if (!dlPatches.bg.some(x => Math.abs(x.lat - b.lat) < 1e-7 && Math.abs(x.lon - b.lon) < 1e-7)) { dlPatches.bg.push({ lat: b.lat, lon: b.lon, area: b.area, cm: dlCmFrom64(b.cm) }); addedS++; }
             dlTrimBackground();
+            if (!dlPatches.look) dlPatches.look = [];
+            for (const x of file.samples.look || []) {
+                if (x.cm ? dlPatches.look.some(y => y.cm && Math.abs(y.lat - x.lat) < 1e-7 && Math.abs(y.lon - x.lon) < 1e-7) : dlPatches.look.some(y => y.area === x.area)) continue;
+                dlPatches.look.push({ lat: x.lat, lon: x.lon, area: x.area, why: x.why, cm: x.cm ? dlCmFrom64(x.cm) : null }); if (x.cm) addedS++;
+            }
+            dlTrimLook();
             for (const a of file.samples.areas || []) if (!dlPatches.areas.includes(a)) dlPatches.areas.push(a);
             await dlSavePatches();
             dlPrefs().enabled = true;
@@ -5473,7 +5627,7 @@
     async function dlDeleteAll() {
         if (dlBusy) return;
         if (!confirm(`Delete the ${DL.label} deep-learning model and all its terrain samples? Your training data (confirmations, Not real marks, outlines) is not touched.`)) return;
-        dlPatches = { items: {}, bg: [], areas: [] };
+        dlPatches = { items: {}, bg: [], areas: [], look: [] };
         await dlSavePatches();
         if (dlModel) { dlModel.dispose(); dlModel = null; }
         if (dlPrefs().model) { try { const tf = await loadTF(); await tf.io.removeModel(DL.MODEL_URL); } catch (e) { /* none saved, or offline */ } }
