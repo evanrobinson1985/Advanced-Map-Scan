@@ -1115,8 +1115,7 @@
     // A whole-view download can be far larger than the browser can scan in
     // one go: every scan allocates several full-size working rasters. Scans
     // therefore run on a "grid", either the whole DTM or, for downloads over
-    // SCAN_MAX_PX, the part currently in view (in sections when that is over
-    // SCAN_MAX_PX too; see scanSections). They run with the global
+    // SCAN_MAX_PX, sections of it (see scanSections). They run with the global
     // DTM variables temporarily pointed at that grid, and every result
     // (markers, exports, click-to-inspect rasters, 3D overlays) remembers the
     // grid it came from.
@@ -1157,10 +1156,12 @@
     // whose core (its own share of the area, without the overlap) holds it,
     // so a feature on a seam is found once and whole.
     const SECTION_OVERLAP_M = 300;
-    // null: view outside the download; otherwise the sections (one = no split)
-    function scanSections() {
+    // The whole loaded DTM, however far you've zoomed in; inView: only the
+    // part in view (settlement likelihood, which isn't split). null: view
+    // outside the download; otherwise the sections (one = no split)
+    function scanSections(inView) {
         const g = fullDemGrid;
-        const v = g.w * g.h <= SCAN_MAX_PX ? { r0: 0, r1: g.h, c0: 0, c1: g.w } : visibleWindow(g);
+        const v = g.w * g.h <= SCAN_MAX_PX || !inView ? { r0: 0, r1: g.h, c0: 0, c1: g.w } : visibleWindow(g);
         if (!v) return null;
         const W = v.c1 - v.c0, H = v.r1 - v.r0;
         if (W * H <= SCAN_MAX_PX) return [{ ...v, core: null }];
@@ -1220,7 +1221,7 @@
     }
     function sectionsNote(secs, done) {
         if (secs.length < 2) return '';
-        return ` Scanned the ${sectionsAreaKm2(secs).toFixed(1)} km² in view in ${done === secs.length ? '' : done + ' of '}${secs.length} overlapping sections and combined the results (up to Max results per mode in each section; a feature on a seam is counted once).`;
+        return ` Scanned the whole ${sectionsAreaKm2(secs).toFixed(1)} km² download in ${done === secs.length ? '' : done + ' of '}${secs.length} overlapping sections and combined the results (up to Max results per mode in each section; a feature on a seam is counted once).`;
     }
 
     // Hint when zoomed well past the loaded DTM's resolution and a finer
@@ -1283,7 +1284,7 @@
         } else {
             msg += ' Full LiDAR resolution.';
         }
-        if (p.px > SCAN_MAX_PX && !p.overBudget) msg += ` Scans on downloads this large run on the area you're viewing, in sections of up to ${SCAN_MAX_PX / 1e6} Mpx combined into one result.`;
+        if (p.px > SCAN_MAX_PX && !p.overBudget) msg += ` Scans on downloads this large cover the whole download in sections of up to ${SCAN_MAX_PX / 1e6} Mpx, combined into one result.`;
         el.innerHTML = msg;
         el.style.color = color;
     }
@@ -2567,7 +2568,7 @@
             ${rows.length ? rows.map((r, i) => `<div style="padding:7px 12px;border-bottom:1px solid #f1f5f9;display:flex;gap:8px;align-items:center;">
               <div style="flex:1;min-width:0;"><b>${escapeHtml(r.title)}</b> <span style="color:#64748b;font-size:0.75rem;">${dt(r.ts)}</span><br>
               <span style="font-size:0.78rem;color:#475569;">${escapeHtml(r.detail)}</span><br><span style="font-size:0.72rem;color:#94a3b8;">${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</span></div>
-              <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;" onclick="const r = window.__reviewRows[${i}]; document.getElementById('trainingReview').remove(); map.setView([r.lat, r.lon], 18);">Go to</button>
+              <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;" onclick="const r = window.__reviewRows[${i}]; document.getElementById('trainingReview').remove(); goToWithTerrain(r.lat, r.lon, 18);">Go to</button>
               <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fee2e2;color:#991b1b;" onclick="removeTrainingItem(window.__reviewRows[${i}].key)">Remove</button></div>`).join('')
               : '<div style="padding:14px;color:#64748b;">Nothing yet: confirmations, "Not a real feature" marks, outlines and settlement sites will be listed here.</div>'}</div>`;
     }
@@ -2615,7 +2616,7 @@
                 <span style="font-size:0.72rem;color:#94a3b8;">${r.lat.toFixed(5)}, ${r.lon.toFixed(5)}</span>
                 <div style="display:flex;gap:6px;margin-top:6px;">
                 <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fef3c7;color:#92400e;" onclick="event.stopPropagation(); setTimeout(() => openTrainingEdit(${i}), 0)">&#9998; Edit</button>
-                <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;" onclick="const r = window.__trainingMapRows[${i}]; map.setView([r.lat, r.lon], 18);">Zoom in</button>
+                <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;" onclick="const r = window.__trainingMapRows[${i}]; map.closePopup(); goToWithTerrain(r.lat, r.lon, 18);">Zoom in</button>
                 <button style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;background:#fee2e2;color:#991b1b;" onclick="map.closePopup(); removeTrainingItem(window.__trainingMapRows[${i}].key)">Remove</button></div></div>`;
             if (r.polygon && r.polygon.length >= 3) {
                 const good = r.kind === 'outline';
@@ -4992,9 +4993,10 @@
     }
     // To the item on the training-data map with its editor open, and a bar
     // with the issue, "It's accurate" and the way back to the list
-    function tcGo(i) {
+    async function tcGo(i) {
         const x = (window.__tcIssues || [])[i]; if (!x) return;
         const m = document.getElementById('tcModal'); if (m) m.style.display = 'none';
+        await goToWithTerrain(x.it.lat, x.it.lon, 19);
         showTrainingOnMap(false);
         map.setView([x.it.lat, x.it.lon], 19, { animate: false });
         const rk = JSON.stringify(x.it.rk);
@@ -5885,6 +5887,27 @@
         if (sel.length) return { items: sel, selected: true };
         return { items: gal.filter === 'noimg' ? (gal.vis || []).filter(x => !x.cm) : [], selected: false };
     }
+    // Going to a training item from the reviews and the gallery also loads
+    // its terrain: unless the loaded DTM already covers the spot at 1 m, a
+    // 700 m square of 1 m LiDAR around it is downloaded (and any training
+    // item in it without a picture gets one), then the map returns to it
+    const GOTO_TERRAIN_HALF_M = 350;
+    let goToSeq = 0;
+    async function goToWithTerrain(lat, lon, zoom, quiet) {
+        const my = ++goToSeq;
+        map.setView([lat, lon], zoom, { animate: false });
+        const status = document.getElementById('status');
+        if (fullDemGrid && effRes <= 1.05 && dlInGrid(fullDemGrid, lat, lon, 120)) return true;
+        if (downloadAbort) return false;   // one already on its way (reviewing quickly through one area)
+        if (scanInProgress || tourBusy || dlBusy) { if (!quiet) status.innerText = 'The terrain here is not loaded: wait for the current scan, tour or training to finish, then press Download.'; return false; }
+        const dLat = GOTO_TERRAIN_HALF_M / 111320, dLon = GOTO_TERRAIN_HALF_M / (111320 * Math.cos(lat * Math.PI / 180));
+        const before = fullDemGrid;
+        status.innerText = 'Downloading the terrain around this training item...';
+        window.__dlBoundsOverride = { n: lat + dLat, s: lat - dLat, e: lon + dLon, w: lon - dLon };
+        try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
+        if (my === goToSeq) map.setView([lat, lon], zoom, { animate: false });   // unless you've moved on to another item meanwhile
+        return !!fullDemGrid && fullDemGrid !== before;
+    }
     // Downloads each area holding items without a picture (the grouping the
     // "Show them on the map" tool uses, about a mile square at most), takes
     // the pictures for this model, and moves on; Stop ends after the area
@@ -5968,7 +5991,7 @@
             sel2.onchange = () => { if (sel2.value) { galMoveKind([x], sel2.value); } };
             setTimeout(() => card.appendChild(sel2), 0);
         }
-        mk('Go to', 'flex:0 0 46px;', () => { closeTrainingGallery(); map.setView([x.lat, x.lon], gal.model === 'mounds' ? 19 : 18); }, 'Show it on the map');
+        mk('Go to', 'flex:0 0 46px;', () => { closeTrainingGallery(); goToWithTerrain(x.lat, x.lon, gal.model === 'mounds' ? 19 : 18); }, 'Show it on the map (its terrain is downloaded if not loaded)');
         card.appendChild(row);
         paint();
         return card;
@@ -6662,7 +6685,7 @@
             <div style="font-size:0.7rem;color:#94a3b8;margin-top:6px;">Keys: Y = yes, N = not real, S = skip, B = back. Only say Yes when you can see a mound.</div>`;
         const shade = card.querySelector('#tourShade');
         for (const k of tourShadeKeys(c)) { const cm = tourCm(c, k); if (cm) shade.appendChild(tourHillshade(cm, DL_PROFILES[k].RES, 140)); }
-        map.setView([c.lat, c.lon], c.mode === 'shell' ? 17 : c.mode === 'effigy' ? 18 : 19, { animate: false });
+        goToWithTerrain(c.lat, c.lon, c.mode === 'shell' ? 17 : c.mode === 'effigy' ? 18 : 19, true);   // its terrain loads behind the card
         if (tourReview.marker) map.removeLayer(tourReview.marker);
         tourReview.marker = L.circleMarker([c.lat, c.lon], { radius: 10, color: '#f59e0b', weight: 3, fill: false }).addTo(map);
     }
@@ -11026,9 +11049,10 @@
         if (autoTuneRunning) await autoTuneRunning; // use the settings detected for this area
         if (!currentDEM || scanInProgress || downloadAbort) return;
         if (!checkDTMResolution()) return;
-        const secs = scanSections();
+        const settle = document.getElementById('scanMode').value === 'settlement';
+        const secs = scanSections(settle);
         if (!secs) { document.getElementById('status').innerText = 'The map view is outside the downloaded area.'; return; }
-        if (secs.length > 1 && document.getElementById('scanMode').value === 'settlement') {
+        if (secs.length > 1 && settle) {
             document.getElementById('status').innerText = `Settlement likelihood is a heat map ranked within one scan, so it isn't split into sections: zoom in to an area up to ${SCAN_MAX_PX / 1e6} Mpx (the download stays loaded).`; return;
         }
         scanInProgress = true;
@@ -11043,7 +11067,7 @@
                     (nk ? ` plus ${nk} mound(s) you confirmed` : '') + '.' + sectionsNote(secs, done) +
                     (detectedFeatures.some(f => f.mode !== mode) ? ' Results from your other scans are still shown (see the legend, top left).' : '');
             }
-            else if (fullView) document.getElementById('status').innerText += ` (Scanned the area in view; pan and scan again for other parts of the download.)`;
+            else if (fullView && settle) document.getElementById('status').innerText += ` (Scanned the area in view; pan and scan again for other parts of the download.)`;
         } finally {
             scanInProgress = false;
             document.getElementById('downloadBtn').disabled = false;
@@ -11104,7 +11128,7 @@
         status.innerText = `${scanAllCancel ? 'Scan All stopped' : 'Scan All complete'} (${order.length} modes, ${Math.round((Date.now() - t0) / 1000)} s): ` +
             (total ? `${total} feature(s) - ` + found.map(([m, n]) => `${n} ${MODE_STYLE[m].label.toLowerCase()}`).join(', ') + '. Toggle each type in the legend at the top left; all of them also show in the 3D view.'
                    : 'nothing detected with the current settings.') +
-            (secs.length > 1 ? sectionsNote(secs, secsDone) + ' Settlement likelihood (a heat map ranked within one scan) was left out: zoom in to scan it.' : fullDemGrid.w * fullDemGrid.h > SCAN_MAX_PX ? ' (Scanned the area in view.)' : '');
+            (secs.length > 1 ? sectionsNote(secs, secsDone) + ' Settlement likelihood (a heat map ranked within one scan) was left out: select it, zoom in to 16 Mpx or less and press Scan.' : '');
     }
 
     async function runScannerOnGrid() {
