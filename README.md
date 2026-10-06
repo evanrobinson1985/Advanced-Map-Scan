@@ -230,6 +230,14 @@ How it works:
 - **Save deep-learning model / Load deep-learning model.** Saving writes one file (`lidar-deep-learning-model-DATE.json.gz`). It holds the trained network, all its terrain samples, its accuracy check and a copy of your training data, which says which samples are mounds. Load it to restore everything after clearing the browser, or to use the model on another device. Loading adds to what is already there: samples and training data are merged without duplicates, and the network in the file replaces the one in the browser. If the file's network was made by an older method, its samples are still loaded and you press Train model.
 - **Answering.** **Yes** / **Not real** on a candidate saves to the same training data as the regular scan and takes its terrain sample at once. Train again to update the network.
 
+**Outlines follow the detected feature.** Each result's outline is traced around the cells the scan actually found, along their outer edge. Stair-steps are simplified and corners softened by at most half a cell, so a platform mound keeps its corners and an effigy its limbs. Exports and the scan history use the same outline. What each kind of result follows:
+- **Regular mound results:** the closed contour the scan found, or on a hillside the footprint the mound was measured by above the slope.
+- **Other regular modes:** the candidate's own region.
+- **Deep-learning results:** the footprint the measurer found. A circle is drawn only when nothing could be measured.
+- **Effigies and shell middens:** their traced shape. They used to get a convex hull, which wrapped a bird effigy in a blob about four times its size.
+
+In tests, the traced outline reproduced a rectangle, an L shape and a bird-shaped effigy to within one cell of their true area. On synthetic mounds it overlapped the true footprint 91–96%, against 82–93% for the old ellipse. The biggest gain was on a kidney-shaped mound (96% against 82%). At Russell Cave, every deep-learning hit's outline matched its measured width to within 0.2 m. Results already in the scan history keep the shape they were saved with.
+
 **Scan history.** Every regular scan, Scan All and deep-learning scan is saved in this browser: the newest 60, with their date, area, resolution, status line and every result's position, size, height, shape and score. **🕘 Scan history (previous results)**, under the scan buttons and in the Deep Learning section, lists them:
 - **Show results** puts a scan's results back on the map and zooms to its area. They replace current results of the same kind, and they show in the legend and exports like any result.
 - **Yes / Not real** still work on them and go into your training data.

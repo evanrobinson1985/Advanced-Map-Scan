@@ -3405,11 +3405,108 @@
     function effigyKind(d) {
         return d.bird ? `Bird effigy? (wingspan ${metersToFeetInches(d.bird.wingspan)})` : d.kind === 'effigy' ? `Effigy mound (${d.limbs} limbs)` : 'Linear mound';
     }
+    // ---- Outlines that follow the detected feature ----
+    // The cells a scan found for a feature (grid indices in a W x H grid
+    // with lat/lon bounds b) -> the outline of their outer edge as [lat, lon]
+    // pairs: the largest 4-connected part, its boundary traced along the
+    // cell edges (so it encloses exactly those cells), stair-steps
+    // simplified (within 0.75 cell) and corners softened once. Holes inside
+    // are ignored. null when there are too few cells.
+    function cellsToOutline(cells, W, H, b) {
+        const n0 = cells ? cells.length : 0;
+        if (n0 < 3) return null;
+        let r0 = Infinity, r1 = -1, c0 = Infinity, c1 = -1;
+        for (let k = 0; k < n0; k++) { const i = cells[k], r = (i / W) | 0, c = i % W; if (r < r0) r0 = r; if (r > r1) r1 = r; if (c < c0) c0 = c; if (c > c1) c1 = c; }
+        const bw = c1 - c0 + 3, bh = r1 - r0 + 3;   // one empty cell of padding all round
+        if (bw * bh > 4e6) return null;
+        const m = new Uint8Array(bw * bh);
+        for (let k = 0; k < n0; k++) { const i = cells[k]; m[((i / W | 0) - r0 + 1) * bw + (i % W) - c0 + 1] = 1; }
+        // largest 4-connected part
+        const lab = new Int32Array(bw * bh); let best = 0, bestN = 0, cur = 0; const st = [];
+        for (let i = 0; i < bw * bh; i++) {
+            if (!m[i] || lab[i]) continue;
+            cur++; let cnt = 0; st.push(i); lab[i] = cur;
+            while (st.length) { const j = st.pop(); cnt++; for (const q of [j - 1, j + 1, j - bw, j + bw]) if (m[q] && !lab[q]) { lab[q] = cur; st.push(q); } }
+            if (cnt > bestN) { bestN = cnt; best = cur; }
+        }
+        const inC = (r, c) => r >= 0 && c >= 0 && r < bh && c < bw && lab[r * bw + c] === best;
+        // boundary edges, clockwise with the feature on the right: start corner -> list of [end corner, direction]
+        const out = new Map(), key = (x, y) => y * (bw + 1) + x;
+        const add = (x0, y0, x1, y1, d) => { const kk = key(x0, y0); (out.get(kk) || out.set(kk, []).get(kk)).push([x1, y1, d]); };
+        let sx = -1, sy = -1;
+        for (let r = 0; r < bh; r++) for (let c = 0; c < bw; c++) {
+            if (!inC(r, c)) continue;
+            if (sx < 0) { sx = c; sy = r; }
+            if (!inC(r - 1, c)) add(c, r, c + 1, r, 0);          // top, heading east
+            if (!inC(r, c + 1)) add(c + 1, r, c + 1, r + 1, 1);  // right, heading south
+            if (!inC(r + 1, c)) add(c + 1, r + 1, c, r + 1, 2);  // bottom, heading west
+            if (!inC(r, c - 1)) add(c, r + 1, c, r, 3);          // left, heading north
+        }
+        if (sx < 0) return null;
+        // follow from the top edge of the first cell (always on the outer
+        // boundary); where two edges leave one corner (cells touching only
+        // diagonally) take the left turn, so the whole outer edge is walked
+        const pts = [[sx, sy]]; let x = sx + 1, y = sy, dir = 0, steps = 0;
+        const used = new Set([key(sx, sy) * 4]);
+        while (!(x === sx && y === sy) && steps++ < 4 * bw * bh) {
+            const opts = out.get(key(x, y)); if (!opts) break;
+            let pick = opts[0];
+            if (opts.length > 1) pick = opts.find(o => o[2] === (dir + 3) % 4 && !used.has(key(x, y) * 4 + o[2])) || opts.find(o => !used.has(key(x, y) * 4 + o[2])) || opts[0];
+            used.add(key(x, y) * 4 + pick[2]);
+            if (pick[2] !== dir) pts.push([x, y]);
+            dir = pick[2]; x = pick[0]; y = pick[1];
+        }
+        if (pts.length < 3) return null;
+        // simplify the stair-steps (Douglas-Peucker on the closed ring)
+        const dp = (P, tol) => {
+            if (P.length < 4) return P;
+            const keep = new Uint8Array(P.length); keep[0] = keep[P.length - 1] = 1;
+            const stack = [[0, P.length - 1]];
+            while (stack.length) {
+                const [a, z] = stack.pop(); let md = 0, mi = -1;
+                const [ax, ay] = P[a], [zx, zy] = P[z], L = Math.hypot(zx - ax, zy - ay) || 1;
+                for (let i = a + 1; i < z; i++) { const d = Math.abs((zx - ax) * (ay - P[i][1]) - (ax - P[i][0]) * (zy - ay)) / L; if (d > md) { md = d; mi = i; } }
+                if (md > tol) { keep[mi] = 1; stack.push([a, mi], [mi, z]); }
+            }
+            return P.filter((_, i) => keep[i]);
+        };
+        let far = 0; for (let i = 1; i < pts.length; i++) if (Math.hypot(pts[i][0] - pts[0][0], pts[i][1] - pts[0][1]) > Math.hypot(pts[far][0] - pts[0][0], pts[far][1] - pts[0][1])) far = i;
+        let ring = [...dp(pts.slice(0, far + 1), 0.75).slice(0, -1), ...dp([...pts.slice(far), pts[0]], 0.75).slice(0, -1)];
+        if (ring.length < 3) ring = pts;
+        // soften the corners once (Chaikin, cutting at most one cell into each
+        // side), so a round mound doesn't look square but a platform mound's
+        // corners and an effigy's limbs keep their true shape
+        if (ring.length >= 4 && ring.length < 2000) {
+            const sm = [];
+            for (let i = 0; i < ring.length; i++) {
+                const [ax, ay] = ring[i], [bx2, by2] = ring[(i + 1) % ring.length], t = Math.min(0.25, 0.5 / (Math.hypot(bx2 - ax, by2 - ay) || 1));
+                sm.push([ax + t * (bx2 - ax), ay + t * (by2 - ay)], [bx2 - t * (bx2 - ax), by2 - t * (by2 - ay)]);
+            }
+            ring = sm;
+        }
+        return ring.map(([cx, cy]) => [b.n - ((cy + r0 - 1) / H) * (b.n - b.s), b.w + ((cx + c0 - 1) / W) * (b.e - b.w)]);
+    }
+    // the cells of the 4-connected region of mask holding cell start
+    function maskRegionCells(mask, W, H, start, cap = 4e6) {
+        if (start == null || start < 0 || !mask[start]) return null;
+        const seen = new Uint8Array(W * H), out = [start], st = [start]; seen[start] = 1;
+        while (st.length && out.length < cap) {
+            const i = st.pop(), r = (i / W) | 0, c = i % W;
+            if (r > 0 && mask[i - W] && !seen[i - W]) { seen[i - W] = 1; st.push(i - W); out.push(i - W); }
+            if (r < H - 1 && mask[i + W] && !seen[i + W]) { seen[i + W] = 1; st.push(i + W); out.push(i + W); }
+            if (c > 0 && mask[i - 1] && !seen[i - 1]) { seen[i - 1] = 1; st.push(i - 1); out.push(i - 1); }
+            if (c < W - 1 && mask[i + 1] && !seen[i + 1]) { seen[i + 1] = 1; st.push(i + 1); out.push(i + 1); }
+        }
+        return out;
+    }
     function effigyLatLon(i) {
         const r = (i / demWidth) | 0, c = i % demWidth;
         return [demBounds.n - ((r + 0.5) / demHeight) * (demBounds.n - demBounds.s), demBounds.w + ((c + 0.5) / demWidth) * (demBounds.e - demBounds.w)];
     }
-    // convex hull of the feature's cells, as [lat, lon] (for exports)
+    // the traced outline of an effigy's or shell midden's cells (the
+    // convex hull when tracing fails)
+    function effigyOutline(pix) { return cellsToOutline(pix, demWidth, demHeight, demBounds) || effigyHull(pix); }
+    // convex hull of the feature's cells, as [lat, lon] (for merging hits on one feature)
     function effigyHull(pix) {
         const pts = [];
         const step = Math.max(1, Math.floor(pix.length / 4000));
@@ -3425,7 +3522,7 @@
         const [lat, lon] = effigyLatLon(d.anchor);
         const k = { centroidR: d.cr, centroidC: d.cc, area: d.pix.length, count: d.pix.length, maxMetric: d.maxH, sumMetric: d.volume / (effRes * effRes),
                     circularity: d.circ, elongation: Math.max(1, d.L / Math.max(0.5, d.meanW)), orientation: d.orientation, fillRatio: 1, maxFlankSlope: d.flank, _sizeD: d.L, _template: effigyShapeCode(d) };
-        return { mode: 'effigy', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon: effigyHull(d.pix), effigy: d };
+        return { mode: 'effigy', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon: effigyOutline(d.pix), effigy: d };
     }
     function effigyPopup(f, extraHtml, confirmHtml) {
         const d = f.effigy, ft = metersToFeetInches;
@@ -3749,7 +3846,7 @@
         const [lat, lon] = effigyLatLon(d.anchor);
         const k = { centroidR: d.cr, centroidC: d.cc, area: d.pix.length, count: d.pix.length, maxMetric: d.maxH, sumMetric: d.volume / (effRes * effRes),
                     circularity: d.circ, elongation: d.elong, orientation: d.orientation, fillRatio: d.solidity, maxFlankSlope: d.flank, _sizeD: d.L, _template: shellShapeCode(d) };
-        return { mode: 'shell', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon: effigyHull(d.pix), shell: d };
+        return { mode: 'shell', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon: effigyOutline(d.pix), shell: d };
     }
     function shellPopup(f, extraHtml, confirmHtml) {
         const d = f.shell, ft = metersToFeetInches;
@@ -5354,7 +5451,8 @@
             }
             if (touches && tries < 2) continue;
             const cr = sr / q.length, cc2 = sc / q.length;
-            return { h: peak, d: 2 * Math.sqrt(q.length * res * res / Math.PI), lat: b.n - ((cr + 0.5) / H) * (b.n - b.s), lon: b.w + ((cc2 + 0.5) / W) * (b.e - b.w), circ: 0.7, elong: 1.2, template: null, gs: null, rugged: touches, open: touches };
+            return { h: peak, d: 2 * Math.sqrt(q.length * res * res / Math.PI), lat: b.n - ((cr + 0.5) / H) * (b.n - b.s), lon: b.w + ((cc2 + 0.5) / W) * (b.e - b.w), circ: 0.7, elong: 1.2, template: null, gs: null, rugged: touches, open: touches,
+                     outline: cellsToOutline(q.map(([r2, c2]) => r2 * W + c2), W, H, b) };
         }
         return null;
     }
@@ -5373,6 +5471,7 @@
                 const mlat = crop.bounds.n - (kr / crop.h) * (crop.bounds.n - crop.bounds.s), mlon = crop.bounds.w + (kc / crop.w) * (crop.bounds.e - crop.bounds.w);
                 if (approxMetersBetween(mlat, mlon, lat, lon) > 12) return null;   // measuring something else nearby
                 return { h: best.hM, d: best.dM, circ: k.circularity, elong: k.elongation, lat: mlat, lon: mlon, template: best.tm ? best.tm.score : null,
+                         outline: cellsToOutline(best.cells, crop.w, crop.h, crop.bounds),
                          gs: best.groundSlope ? best.groundSlope[Math.round(k.centroidR) * crop.w + Math.round(k.centroidC)] : null, rugged: best.rugged };
             });
         } catch (e) { console.warn('Measuring a deep-learning candidate failed', e); return null; }
@@ -5397,7 +5496,7 @@
                 if (!best || bd > 40) return null;
                 const [la, lo] = effigyLatLon(best.anchor);
                 return { d: best, L: best.L, h: best.maxH, lat: la, lon: lo, circ: best.circ, elong: Math.max(1, best.L / Math.max(0.5, best.meanW)),
-                         paths: best.paths.map(p => p.map(effigyLatLon)), hull: effigyHull(best.pix), why: best.why };
+                         paths: best.paths.map(p => p.map(effigyLatLon)), hull: effigyHull(best.pix), outline: effigyOutline(best.pix), why: best.why };
             });
         } catch (e) { console.warn('Tracing a deep-learning effigy candidate failed', e); return null; }
     }
@@ -5407,7 +5506,7 @@
         const f = knownMoundFeature({ id: 'dle' + Math.random().toString(36).slice(2), lat, lon, d: m ? m.L : 50, h: m ? m.h : 0, circ: m ? m.circ : 0.3, elong: m ? m.elong : 5 }, Math.round(res.p * 100));
         delete f.known;
         f.mode = 'dleffigy'; f.dlProb = res.p; f.dlKnown = !!ex; f.matchScore = Math.round(res.p * 100);
-        if (m) { f.polygon = m.hull; f.effigy = d; }
+        if (m) { f.polygon = m.outline || m.hull; f.effigy = d; }
         const i = window.__dlFeats.push(f) - 1;
         const ft = metersToFeetInches;
         const answer = ex ? `<div style="margin-top:8px;color:#166534;"><b>&#10003; This is your confirmed effigy / linear mound</b>: the network recognised it.</div>`
@@ -5442,7 +5541,7 @@
                 const best = shellNearest({ ...S, minSize: Math.min(S.minSize, 10) }, r - r0, c - c0, 40);
                 if (!best) return null;
                 const [la, lo] = effigyLatLon(best.anchor);
-                return { d: best, L: best.L, h: best.maxH, lat: la, lon: lo, circ: best.circ, elong: best.elong, hull: effigyHull(best.pix), why: best.why };
+                return { d: best, L: best.L, h: best.maxH, lat: la, lon: lo, circ: best.circ, elong: best.elong, hull: effigyHull(best.pix), outline: effigyOutline(best.pix), why: best.why };
             });
         } catch (e) { console.warn('Measuring a deep-learning shell candidate failed', e); return null; }
     }
@@ -5452,7 +5551,7 @@
         const f = knownMoundFeature({ id: 'dls' + Math.random().toString(36).slice(2), lat, lon, d: m ? m.L : 50, h: m ? m.h : 0, circ: m ? m.circ : 0.5, elong: m ? m.elong : 1.5 }, Math.round(res.p * 100));
         delete f.known;
         f.mode = 'dlshell'; f.dlProb = res.p; f.dlKnown = !!ex; f.matchScore = Math.round(res.p * 100);
-        if (m) { f.polygon = m.hull; f.shell = d; }
+        if (m) { f.polygon = m.outline || m.hull; f.shell = d; }
         const i = window.__dlFeats.push(f) - 1;
         const ft = metersToFeetInches;
         const answer = ex ? `<div style="margin-top:8px;color:#166534;"><b>&#10003; This is your confirmed shell midden</b>: the network recognised it.</div>`
@@ -5505,8 +5604,11 @@
         const st = MODE_STYLE[DL.RESULT_MODE], layer = modeLayer(DL.RESULT_MODE);
         const icon = L.divIcon({ className: 'det-icon', iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12],
             html: `<div style="background:${st.color};color:#fff;width:20px;height:20px;border-radius:4px;transform:rotate(45deg);border:2px solid ${km ? '#16a34a' : '#fff'};box-shadow:0 1px 4px rgba(0,0,0,0.5);"><div style="transform:rotate(-45deg);font:bold 11px/20px sans-serif;text-align:center;">${st.letter}</div></div>` });
+        // outlined by the footprint it was measured by; a circle only when nothing could be measured
+        if (m && m.outline) f.polygon = m.outline;
         f._layers = [L.marker([lat, lon], { icon }).bindPopup(html, { maxWidth: 320 }).addTo(layer),
-                     L.circle([lat, lon], { radius: d / 2, color: st.color, weight: 2, dashArray: '4,3', fillOpacity: 0.08, interactive: false }).addTo(layer)];
+                     m && m.outline ? L.polygon(m.outline, { color: st.color, weight: 2, dashArray: '4,3', fillOpacity: 0.08, interactive: false }).addTo(layer)
+                                    : L.circle([lat, lon], { radius: d / 2, color: st.color, weight: 2, dashArray: '4,3', fillOpacity: 0.08, interactive: false }).addTo(layer)];
         detectedFeatures.push(f);
     }
     // Yes / Not real on a deep-learning candidate: saved like the same
@@ -8129,7 +8231,8 @@
                 const plane = meas ? meas.plane : moundRingPlane(denoised, W, H, k, effRes, nd);
                 const hM = meas ? meas.h : k.maxMetric, dM = meas ? meas.d : 2 * Math.sqrt(k.area / Math.PI);
                 if (meas && meas.circ != null) { k.circularity = meas.circ; k.elongation = meas.elong; }
-                found.push({ k, diam, hM, plane, rugged: !meas || meas.rugged, hardReject: !meas, height: hh, resid: rs, groundSlope: fineSlope, pass, scaleM, start: sr * W + sc,
+                const cells = (meas && meas.plane && !meas.rugged && meas.d > diam && meas.plane.cells) || maskRegionCells(mask, W, H, sr * W + sc);
+                found.push({ k, diam, hM, plane, rugged: !meas || meas.rugged, hardReject: !meas, height: hh, resid: rs, groundSlope: fineSlope, pass, scaleM, start: sr * W + sc, cells,
                              hostDiam: host[rcIndex(k)], fits: sizeFits(k, hM, dM), dM, tm: moundTemplateMatch(hh, W, H, k),
                              plausible: presets.some(p => diam <= feetToMeters(p.maxDiameter) && k.circularity >= p.minCircularity && k.elongation <= p.maxElongation * 1.3) });
             }
@@ -8842,6 +8945,7 @@
             circularity, elongation: Math.sqrt(lambda1/lambda2), orientation, fillRatio,
             waterwayFraction: waterwayMask ? waterwayCount / count : 0,
             maxFlankSlope, extraMax,
+            start: i0,
             incomplete: (minR === 0 || maxR === height-1 || minC === 0 || maxC === width-1 || gapFraction > 0.25)
         };
     }
@@ -9982,7 +10086,7 @@
             const vrr = srr / foot - mr * mr, vcc = scc / foot - mc * mc, vrc = src / foot - mr * mc;
             const tr = vrr + vcc, dt = Math.sqrt(Math.max(0, (vrr - vcc) ** 2 / 4 + vrc * vrc));
             const l1 = tr / 2 + dt, l2 = Math.max(1e-9, tr / 2 - dt);
-            return { foot, sr, sc, eqR: Math.sqrt(foot / Math.PI), maxD,
+            return { foot, sr, sc, eqR: Math.sqrt(foot / Math.PI), maxD, cells: [...seen],
                      circularity: Math.min(1, 4 * Math.PI * foot / (exposed * exposed)), elongation: Math.sqrt(l1 / l2) };
         };
         // Start with a ring just outside the detected top; then keep moving
@@ -10034,7 +10138,7 @@
         // unlike the footprint's centroid it isn't pulled sideways where the
         // ground around a spur or slope foot fits the surface less well
         return { relief: best.relief, rough: best.rough, diameter: 2 * fp.eqR * cellM,
-                 centroidR: pr, centroidC: pc, circularity: fp.circularity, elongation: fp.elongation };
+                 centroidR: pr, centroidC: pc, circularity: fp.circularity, elongation: fp.elongation, cells: fp.cells };
     }
     const MOUND_MAX_ROUGH = 0.35;  // ring scatter may be at most this share of the mound's height (real LiDAR ground is never perfectly smooth)
     const MOUND_TILT_MIN = 2;      // degrees: below this the ground is level and iMound measures the whole mound
@@ -11416,7 +11520,7 @@
                     const hM = meas.h;
                     diameter = meas.d;
                     if (meas.circ != null) { k.circularity = meas.circ; k.elongation = meas.elong; }
-                    if (meas.plane && !meas.rugged && meas.d > dTop && meas.plane.centroidR != null) { k._footR = meas.plane.centroidR; k._footC = meas.plane.centroidC; }
+                    if (meas.plane && !meas.rugged && meas.d > dTop && meas.plane.centroidR != null) { k._footR = meas.plane.centroidR; k._footC = meas.plane.centroidC; k._footCells = meas.plane.cells; }
                     if (hM < feetToMeters(preset.minHeight) || diameter < feetToMeters(preset.minDiameter) ||
                         diameter > feetToMeters(preset.maxDiameter) || k.circularity < preset.minCircularity) continue;
                     if (k.elongation > preset.maxElongation * 1.3) continue;   // levee / ridge / merged bumps: too stretched for this class
@@ -11468,8 +11572,10 @@
                 persistChecked++;
                 if (persist < minPersist) continue;
                 const preset = c.preset;
+                // its outline: the hillside footprint it was measured by, else its closed contour
+                const outline = cellsToOutline(k._footCells || maskRegionCells(c.mask, W, H, k.start != null && c.mask[k.start] ? k.start : peak), W, H, demBounds);
                 comps.push({
-                    ...k,
+                    ...k, _footCells: null, _outline: outline,
                     _presetName: preset.name,
                     _presetMaxCircularity: preset.maxCircularity,
                     _presetMaxFlankSlope: preset.maxFlankSlope,
@@ -11735,9 +11841,12 @@
             // [lat,lng] pairs; ellipseRingLatLon returns [lon,lat] (GIS/shapefile
             // convention), so each point gets swapped going in. Non-interactive so
             // it's purely visual and doesn't steal clicks from the marker/map.
-            const ring = ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
+            // the outline of the cells it found (its closed contour, or its
+            // footprint above the hillside); the size ellipse only if those are missing
+            const outline = k._outline || (lastMask && k.start != null ? cellsToOutline(maskRegionCells(lastMask, demWidth, demHeight, k.start), demWidth, demHeight, demBounds) : null);
+            const ring = outline || ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
             fLayers.push(L.polygon(ring, { color: modeColor, weight: 2, fillColor: modeColor, fillOpacity: 0.15, interactive: false }).addTo(modeLayer(mode)));
-            detectedFeatures.push({ mode, k, lat, lon, diameter, matchScore, grid: gridInfo(), _layers: fLayers });
+            detectedFeatures.push({ mode, k, lat, lon, diameter, matchScore, grid: gridInfo(), _layers: fLayers, polygon: outline || null });
         }
         for (const km of knownHere) {
             const f = knownMoundFeature(km, knownScore.has(km.id) ? knownScore.get(km.id) : null);
