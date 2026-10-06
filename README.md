@@ -230,6 +230,13 @@ How it works:
 - **Save deep-learning model / Load deep-learning model.** Saving writes one file (`lidar-deep-learning-model-DATE.json.gz`). It holds the trained network, all its terrain samples, its accuracy check and a copy of your training data, which says which samples are mounds. Load it to restore everything after clearing the browser, or to use the model on another device. Loading adds to what is already there: samples and training data are merged without duplicates, and the network in the file replaces the one in the browser. If the file's network was made by an older method, its samples are still loaded and you press Train model.
 - **Answering.** **Yes** / **Not real** on a candidate saves to the same training data as the regular scan and takes its terrain sample at once. Train again to update the network.
 
+**Scan history.** Every regular scan, Scan All and deep-learning scan is saved in this browser: the newest 60, with their date, area, resolution, status line and every result's position, size, height, shape and score. **🕘 Scan history (previous results)**, under the scan buttons and in the Deep Learning section, lists them:
+- **Show results** puts a scan's results back on the map and zooms to its area. They replace current results of the same kind, and they show in the legend and exports like any result.
+- **Yes / Not real** still work on them and go into your training data.
+- **Go to area** zooms to the area, and **Delete** or **Clear all** removes entries.
+
+The terrain isn't kept, so download it again to rescan or inspect a spot. In a test, a regular and a deep-learning scan of Russell Cave came back after a page reload with the same 10 and 7 results at the same places.
+
 **Going to a training item loads its terrain.** These buttons now also load the terrain around the item:
 - **Go to** in the training image gallery and in the training data list;
 - **Zoom in** on a training item on the map;

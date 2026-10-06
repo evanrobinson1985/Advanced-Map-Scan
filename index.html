@@ -688,6 +688,7 @@
         <div style="font-size:0.68rem; color:#94a3b8; margin-bottom:6px; line-height:1.35;">Applies to the mound, effigy and shell midden scans and the deep-learning scans. A removed building leaves a flat, straight-sided patch in bare-earth LiDAR, and a raised house pad looks like a low mound. Flat-topped rectangles over 150 ft across or 6.5 ft tall are only flagged, never skipped, so platform mounds stay. The OpenStreetMap check sends the area's bounds to the Overpass service once per area; without a connection it is skipped.</div>
         <button id="scanBtn" onclick="runScanner()">Scan Downloaded DEM</button>
         <button id="scanAllBtn" onclick="runScanAll()" style="display:none; background:#7c3aed; color:white; border:none; cursor:pointer;">Scan All (every mode)</button>
+        <button id="scanHistoryBtn" onclick="openScanHistory()" style="font-size:0.8rem; background:#e2e8f0; color:#0f172a;">&#128339; Scan history (previous results)</button>
         <div id="scanAllWrap" style="display:none; margin-top:6px;">
             <div id="scanAllProgressText" style="font-size:0.75rem; color:#334155; margin-bottom:4px;"></div>
             <div style="height:8px; background:#e2e8f0; border-radius:4px; overflow:hidden;"><div id="scanAllBar" style="height:100%; width:0%; background:#7c3aed; transition:width 0.2s;"></div></div>
@@ -786,6 +787,7 @@
         <button id="dlGalleryBtn" onclick="openTrainingGallery(DL.key)" style="font-size:0.8rem;background:#e0e7ff;color:#3730a3;">&#128444; Review training images</button>
         <button id="dlTourBtn" onclick="openTourManager()" style="font-size:0.8rem;background:#ccfbf1;color:#115e59;">&#128506; Training-site tour (public mound sites)</button>
         <button id="dlScanBtn" onclick="dlScan()" style="background:#9333ea;color:#fff;">Scan with deep learning (area in view)</button>
+        <button onclick="openScanHistory()" style="font-size:0.8rem;background:#e2e8f0;color:#0f172a;">&#128339; Scan history (previous results)</button>
         <button id="dlStopBtn" onclick="dlCancel = true;" style="display:none;background:#fee2e2;color:#991b1b;">Stop</button>
         <div id="dlStatus" style="font-size:0.78rem; text-align:center; margin:6px 0; color:#334155;"></div>
         <div style="display:flex; gap:6px;">
@@ -5304,6 +5306,7 @@
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
                 ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : DL.key === 'large' ? 'violet "P" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
             dlSetStatus(msg); status.innerText = msg;
+            await scanHistoryAdd('dl', [DL.RESULT_MODE], { n: area.n, s: area.s, e: area.e, w: area.w }, `Deep-learning scan (${DL.label}, ${Math.round(thr * 100)}%+)`);
         } catch (e) {
             console.error(e);
             dlSetStatus('Deep-learning scan failed: ' + (e.message || e));
@@ -11045,6 +11048,149 @@
         return false;
     }
 
+    // ==== SCAN HISTORY ====
+    // Every regular scan, Scan All and deep-learning scan is kept (in this
+    // browser, the newest SCAN_HISTORY_MAX) with its area, resolution,
+    // status line and each result's position, size, height, shape and
+    // score, so its results can be put back on the map later, with Yes /
+    // Not real still working. The terrain itself isn't kept.
+    const SCAN_HISTORY_KEY = 'scanHistory', SCAN_HISTORY_MAX = 60, SCAN_HISTORY_RESULTS_MAX = 3000;
+    let scanHistoryCache = null;
+    async function scanHistoryLoad() {
+        if (scanHistoryCache) return scanHistoryCache;
+        try { scanHistoryCache = (await idbGet(SCAN_HISTORY_KEY)) || []; } catch (e) { console.warn('Could not read the scan history', e); scanHistoryCache = []; }
+        return scanHistoryCache;
+    }
+    async function scanHistorySave() { try { await idbPut(SCAN_HISTORY_KEY, scanHistoryCache || []); } catch (e) { console.warn('Could not save the scan history', e); } }
+    // the lat/lon box covered by a set of scan sections (rows/cols of the loaded DTM)
+    function sectionsBounds(secs) {
+        const g = fullDemGrid, b = g.bounds, fy = (b.n - b.s) / g.h, fx = (b.e - b.w) / g.w;
+        let r0 = Infinity, r1 = -Infinity, c0 = Infinity, c1 = -Infinity;
+        for (const sc of secs) { const c = sc.core || sc; r0 = Math.min(r0, c.r0); r1 = Math.max(r1, c.r1); c0 = Math.min(c0, c.c0); c1 = Math.max(c1, c.c1); }
+        return { n: b.n - r0 * fy, s: b.n - r1 * fy, w: b.w + c0 * fx, e: b.w + c1 * fx };
+    }
+    function histResultOf(f) {
+        const k = f.k || {}, r = { m: f.mode, la: +f.lat.toFixed(7), lo: +f.lon.toFixed(7), d: f.diameter != null ? +(+f.diameter).toFixed(2) : null,
+            h: k.maxMetric != null ? +(+k.maxMetric).toFixed(3) : null, c: k.circularity != null ? +(+k.circularity).toFixed(3) : null,
+            e: k.elongation != null ? +(+k.elongation).toFixed(3) : null, o: k.orientation != null ? +(+k.orientation).toFixed(4) : null,
+            s: f.matchScore != null ? Math.round(f.matchScore) : null };
+        if (f.known) r.kn = 1;
+        if (f.confirmed) r.cf = 1;
+        if (f.d && f.d.L) r.L = +(+f.d.L).toFixed(1);
+        if (Array.isArray(f.polygon) && f.polygon.length >= 3 && f.polygon.length <= 400) r.pg = f.polygon.map(([a, b2]) => [+(+a).toFixed(6), +(+b2).toFixed(6)]);
+        return r;
+    }
+    // kind: 'scan' | 'all' | 'dl'; modes: the result modes this scan wrote; area: {n,s,e,w}
+    async function scanHistoryAdd(kind, modes, area, label) {
+        try {
+            const res = detectedFeatures.filter(f => modes.includes(f.mode) && f.lat != null && f.lon != null && !f.fromHistory).slice(0, SCAN_HISTORY_RESULTS_MAX).map(histResultOf);
+            const counts = {}; for (const r of res) counts[r.m] = (counts[r.m] || 0) + 1;
+            const lat0 = (area.n + area.s) / 2, km2 = (area.n - area.s) * 111.32 * (area.e - area.w) * 111.32 * Math.cos(lat0 * Math.PI / 180);
+            const rec = { id: 'sh' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), at: Date.now(), kind, label, modes, area, km2: +km2.toFixed(2),
+                          res: +(+effRes || 0).toFixed(2), status: (document.getElementById(kind === 'dl' ? 'dlStatus' : 'status') || {}).innerText || '', counts, results: res };
+            const h = await scanHistoryLoad();
+            h.unshift(rec); if (h.length > SCAN_HISTORY_MAX) h.length = SCAN_HISTORY_MAX;
+            await scanHistorySave();
+        } catch (e) { console.warn('Could not add to the scan history', e); }
+    }
+    const histTrainMode = (m) => m === 'dlmounds' || m === 'dlbigmounds' ? 'mounds' : m === 'dleffigy' ? 'effigy' : m === 'dlshell' ? 'shell' : m;
+    // a result from the history as a map feature (exports, legend and the 3D
+    // view treat it like any result; its shape is the recorded size and stretch)
+    function histFeature(r, rec) {
+        const dLat = 1 / 111320, dLon = 1 / (111320 * Math.cos(r.la * Math.PI / 180)), d = r.d || 10;
+        const grid = { bounds: { n: r.la + dLat / 2, s: r.la - dLat / 2, w: r.lo - dLon / 2, e: r.lo + dLon / 2 }, w: 1, h: 1, res: 1 };
+        const k = { centroidR: 0.5, centroidC: 0.5, area: Math.PI * (d / 2) ** 2 / Math.max(1, r.e || 1), count: 1, maxMetric: r.h || 0, sumMetric: 0,
+                    circularity: r.c ?? 0.6, elongation: Math.max(1, r.e || 1), orientation: r.o || 0, fillRatio: 1, maxFlankSlope: 0, _sizeD: d };
+        return { mode: r.m, k, lat: r.la, lon: r.lo, diameter: d, matchScore: r.s ?? 0, grid, polygon: r.pg || null, fromHistory: rec.id, confirmed: !!r.cf };
+    }
+    function histPopup(r, rec, i) {
+        const ft = metersToFeetInches, st = MODE_STYLE[r.m] || { label: r.m }, tm = histTrainMode(r.m);
+        const already = trainingData[tm] && trainingData[tm].examples && trainingData[tm].examples.find(ex => approxMetersBetween(ex.lat, ex.lon, r.la, r.lo) < 20);
+        const buttons = r.kn ? '<div style="margin-top:8px;color:#166534;"><b>&#10003; Your confirmed mound</b></div>'
+            : already ? `<label style="display:block;margin-top:8px;"><input type="checkbox" checked disabled> Confirmed real (${new Date(already.ts).toLocaleDateString()})</label>`
+            : (trainingData[tm] && trainingData[tm].examples && tm !== 'settlement') ? `<div style="display:flex;gap:28px;margin-top:12px;">
+                 <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#dcfce7;color:#166534;border:2px solid #22c55e;border-radius:8px;" onclick="confirmFeature('${tm}', ${r.d || 10}, ${r.c ?? 0.6}, ${r.e || 1}, ${r.h || 0}, ${r.la}, ${r.lo}, event, this, null, null)">&#10003; Yes, it's real</button>
+                 <button style="flex:1;margin:0;min-height:40px;padding:6px 8px;font-size:0.85rem;font-weight:bold;background:#fee2e2;color:#991b1b;border:2px solid #ef4444;border-radius:8px;" onclick="markNotReal('${tm}', ${r.la}, ${r.lo}, event); histTakeOff('${r.m}', ${r.la}, ${r.lo});">&#10007; Not real</button>
+               </div>` : '';
+        return `<b>${escapeHtml(st.label)}</b> <span style="background:#e2e8f0;border-radius:4px;padding:0 4px;font-size:0.7rem;">from scan history</span><br>
+            <i style="color:#64748b">${escapeHtml(rec.label)}, ${new Date(rec.at).toLocaleString()}</i><br>
+            ${r.s != null ? `<b>Score:</b> ${r.s}%<br>` : ''}${r.h != null ? `<b>Height:</b> ${ft(r.h)}<br>` : ''}${r.L ? `<b>Length:</b> ${ft(r.L)}<br>` : r.d != null ? `<b>Across:</b> ${ft(r.d)}<br>` : ''}
+            ${r.c != null ? `<b>Roundness:</b> ${(+r.c).toFixed(2)}, <b>stretch</b> ${(+(r.e || 1)).toFixed(2)}&times;<br>` : ''}
+            <b>Coords:</b> ${r.la.toFixed(5)}, ${r.lo.toFixed(5)}${buttons}
+            <div style="font-size:0.7rem;color:#94a3b8;margin-top:4px;">Recorded when it was scanned; scan again for the full details.</div>`;
+    }
+    // a deep-learning result marked Not real (its mode differs from the training mode) leaves the map too
+    function histTakeOff(mode, lat, lon) {
+        const f = detectedFeatures.find(g => g.mode === mode && g.fromHistory && approxMetersBetween(g.lat, g.lon, lat, lon) < 1);
+        if (f) { removeFeatureLayers(f); detectedFeatures = detectedFeatures.filter(g => g !== f); map.closePopup(); updateDetectionLegend(); }
+    }
+    async function scanHistoryShow(id) {
+        const rec = (await scanHistoryLoad()).find(x => x.id === id); if (!rec) return;
+        const modes = [...new Set([...rec.modes, ...rec.results.map(r => r.m)])];
+        for (const m of modes) clearModeDetections(m);
+        rec.results.forEach((r, i) => {
+            const f = histFeature(r, rec), st = MODE_STYLE[r.m] || { color: '#475569' }, layer = modeLayer(r.m);
+            const ls = [L.marker([r.la, r.lo], { icon: featureIcon(r.m, !!r.kn || !!r.cf) }).bindPopup(histPopup(r, rec, i), { maxWidth: 320 }).addTo(layer)];
+            if (r.pg) ls.push(L.polygon(r.pg, { color: st.color, weight: 2, dashArray: '4,3', fillOpacity: 0.08, interactive: false }).addTo(layer));
+            else ls.push(L.circle([r.la, r.lo], { radius: (r.d || 10) / 2, color: st.color, weight: 2, dashArray: '4,3', fillOpacity: 0.08, interactive: false }).addTo(layer));
+            f._layers = ls; detectedFeatures.push(f);
+        });
+        updateDetectionLegend(); if (typeof updateExportButtons === 'function') updateExportButtons();
+        const a = rec.area; map.fitBounds([[a.s, a.w], [a.n, a.e]], { animate: false });
+        const d = document.getElementById('scanHistoryModal'); if (d) d.remove();
+        document.getElementById('status').innerText = `Showing ${rec.results.length} result(s) from the ${rec.label} of ${new Date(rec.at).toLocaleString()} (from scan history; they replace any current results of the same kind). The terrain isn't kept: download it again to rescan or inspect.`;
+    }
+    async function scanHistoryGo(id) {
+        const rec = (await scanHistoryLoad()).find(x => x.id === id); if (!rec) return;
+        const a = rec.area; map.fitBounds([[a.s, a.w], [a.n, a.e]], { animate: false });
+        const d = document.getElementById('scanHistoryModal'); if (d) d.remove();
+        document.getElementById('status').innerText = `This is the area of the ${rec.label} of ${new Date(rec.at).toLocaleString()}. Press Download to load its terrain again.`;
+    }
+    async function scanHistoryDelete(id) {
+        const h = await scanHistoryLoad(), i = h.findIndex(x => x.id === id); if (i < 0) return;
+        h.splice(i, 1); await scanHistorySave(); renderScanHistory();
+    }
+    async function scanHistoryClear() {
+        if (!confirm('Delete the whole scan history? Your training data and current results are not touched.')) return;
+        scanHistoryCache = []; await scanHistorySave(); renderScanHistory();
+    }
+    async function openScanHistory() {
+        let d = document.getElementById('scanHistoryModal');
+        if (!d) {
+            d = document.createElement('div'); d.id = 'scanHistoryModal';
+            d.style.cssText = 'position:fixed;inset:0;z-index:4000;background:rgba(15,23,42,0.45);display:flex;align-items:flex-start;justify-content:center;padding:4vh 8px;box-sizing:border-box;';
+            d.onclick = (ev) => { if (ev.target === d) d.remove(); };
+            document.body.appendChild(d);
+        }
+        await renderScanHistory();
+    }
+    async function renderScanHistory() {
+        const d = document.getElementById('scanHistoryModal'); if (!d) return;
+        const h = await scanHistoryLoad();
+        const rows = h.map(rec => {
+            const counts = Object.entries(rec.counts || {}).map(([m, n]) => `${n} ${escapeHtml((MODE_STYLE[m] ? MODE_STYLE[m].label : m).toLowerCase())}`).join(', ') || 'no results';
+            return `<div style="border-top:1px solid #e2e8f0;padding:8px 0;">
+              <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;"><b>${escapeHtml(rec.label)}</b><span style="color:#64748b;font-size:0.78rem;">${new Date(rec.at).toLocaleString()}</span></div>
+              <div style="font-size:0.78rem;color:#334155;margin:2px 0 4px;">${counts} &middot; ${rec.km2 < 0.1 ? Math.round(rec.km2 * 247.1) + ' acres' : rec.km2.toFixed(2) + ' km&sup2;'} at ${rec.res} m/px &middot; ${rec.area.n.toFixed(4)}, ${rec.area.w.toFixed(4)}</div>
+              <details style="font-size:0.72rem;color:#64748b;margin-bottom:4px;"><summary>Status line</summary>${escapeHtml(rec.status)}</details>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dbeafe;color:#1e3a8a;" onclick="scanHistoryShow('${rec.id}')" ${rec.results.length ? '' : 'disabled'}>Show results</button>
+                <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;" onclick="scanHistoryGo('${rec.id}')">Go to area</button>
+                <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#fee2e2;color:#991b1b;" onclick="scanHistoryDelete('${rec.id}')">Delete</button>
+              </div></div>`;
+        }).join('');
+        d.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:560px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
+            <div style="position:sticky;top:0;background:#fff;padding:10px 12px;border-bottom:1px solid #e2e8f0;display:flex;align-items:center;gap:8px;">
+              <b style="flex:1;">&#128339; Scan history (${h.length})</b>
+              <button onclick="scanHistoryClear()" style="width:auto;margin:0;padding:4px 8px;font-size:0.78rem;background:#f1f5f9;color:#64748b;" ${h.length ? '' : 'disabled'}>Clear all</button>
+              <button onclick="document.getElementById('scanHistoryModal').remove()" style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;">Close</button>
+            </div>
+            <div style="padding:4px 12px 10px;">
+              <div style="font-size:0.75rem;color:#64748b;margin:6px 0;line-height:1.4;">Your last ${SCAN_HISTORY_MAX} scans (regular, Scan All and deep learning), kept in this browser. <b>Show results</b> puts a scan's results back on the map, replacing current results of the same kind, with Yes / Not real still working. The terrain isn't kept: download it again to rescan.</div>
+              ${rows || '<div style="color:#64748b;padding:12px 0;">No scans yet. Results are added here every time you scan.</div>'}
+            </div></div>`;
+    }
+
     async function runScanner() {
         if (autoTuneRunning) await autoTuneRunning; // use the settings detected for this area
         if (!currentDEM || scanInProgress || downloadAbort) return;
@@ -11068,6 +11214,7 @@
                     (detectedFeatures.some(f => f.mode !== mode) ? ' Results from your other scans are still shown (see the legend, top left).' : '');
             }
             else if (fullView && settle) document.getElementById('status').innerText += ` (Scanned the area in view; pan and scan again for other parts of the download.)`;
+            await scanHistoryAdd('scan', [mode], sectionsBounds(secs), `${(MODE_STYLE[mode] ? MODE_STYLE[mode].label : mode)} scan`);
         } finally {
             scanInProgress = false;
             document.getElementById('downloadBtn').disabled = false;
@@ -11129,6 +11276,7 @@
             (total ? `${total} feature(s) - ` + found.map(([m, n]) => `${n} ${MODE_STYLE[m].label.toLowerCase()}`).join(', ') + '. Toggle each type in the legend at the top left; all of them also show in the 3D view.'
                    : 'nothing detected with the current settings.') +
             (secs.length > 1 ? sectionsNote(secs, secsDone) + ' Settlement likelihood (a heat map ranked within one scan) was left out: select it, zoom in to 16 Mpx or less and press Scan.' : '');
+        await scanHistoryAdd('all', order, sectionsBounds(secs), 'Scan All');
     }
 
     async function runScannerOnGrid() {
