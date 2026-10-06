@@ -11233,6 +11233,17 @@
         } catch (e) { console.warn('Could not add to the scan history', e); }
     }
     const histTrainMode = (m) => m === 'dlmounds' || m === 'dlbigmounds' ? 'mounds' : m === 'dleffigy' ? 'effigy' : m === 'dlshell' ? 'shell' : m;
+    // A saved result's standing now, from your training data (so an answer
+    // given later, or undone, shows in the history straight away): 'no' when
+    // you marked it (or a spot within a scan's skip distance of it) Not real,
+    // 'yes' when you confirmed it, else null
+    function histAnswer(r) {
+        const tm = histTrainMode(r.m), td = trainingData[tm]; if (!td) return r.kn ? 'yes' : null;
+        const skip = tm === 'effigy' || tm === 'shell' ? 30 : 20;
+        if (!r.kn && (td.rejected || []).some(x => approxMetersBetween(x.lat, x.lon, r.la, r.lo) < skip)) return 'no';
+        if (r.kn || (td.examples || []).some(x => approxMetersBetween(x.lat, x.lon, r.la, r.lo) < 20)) return 'yes';
+        return null;
+    }
     // a result from the history as a map feature (exports, legend and the 3D
     // view treat it like any result; its shape is the recorded size and stretch)
     function histFeature(r, rec) {
@@ -11267,9 +11278,14 @@
         const rec = (await scanHistoryLoad()).find(x => x.id === id); if (!rec) return;
         const modes = [...new Set([...rec.modes, ...rec.results.map(r => r.m)])];
         for (const m of modes) clearModeDetections(m);
+        let shown = 0, notReal = 0;
         rec.results.forEach((r, i) => {
+            const ans = histAnswer(r);
+            if (ans === 'no') { notReal++; return; }   // you marked it Not real since
+            shown++;
             const f = histFeature(r, rec), st = MODE_STYLE[r.m] || { color: '#475569' }, layer = modeLayer(r.m);
-            const ls = [L.marker([r.la, r.lo], { icon: featureIcon(r.m, !!r.kn || !!r.cf) }).bindPopup(histPopup(r, rec, i), { maxWidth: 320 }).addTo(layer)];
+            f.confirmed = ans === 'yes';
+            const ls = [L.marker([r.la, r.lo], { icon: featureIcon(r.m, ans === 'yes') }).bindPopup(histPopup(r, rec, i), { maxWidth: 320 }).addTo(layer)];
             if (r.pg) ls.push(L.polygon(r.pg, { color: st.color, weight: 2, dashArray: '4,3', fillOpacity: 0.08, interactive: false }).addTo(layer));
             else ls.push(L.circle([r.la, r.lo], { radius: (r.d || 10) / 2, color: st.color, weight: 2, dashArray: '4,3', fillOpacity: 0.08, interactive: false }).addTo(layer));
             f._layers = ls; detectedFeatures.push(f);
@@ -11277,7 +11293,8 @@
         updateDetectionLegend(); if (typeof updateExportButtons === 'function') updateExportButtons();
         const a = rec.area; map.fitBounds([[a.s, a.w], [a.n, a.e]], { animate: false });
         const d = document.getElementById('scanHistoryModal'); if (d) d.remove();
-        document.getElementById('status').innerText = `Showing ${rec.results.length} result(s) from the ${rec.label} of ${new Date(rec.at).toLocaleString()} (from scan history; they replace any current results of the same kind). The terrain isn't kept: download it again to rescan or inspect.`;
+        document.getElementById('status').innerText = `Showing ${shown} result(s) from the ${rec.label} of ${new Date(rec.at).toLocaleString()} (from scan history; they replace any current results of the same kind)` +
+            (notReal ? `; ${notReal} you marked Not real since are left out` : '') + `. The terrain isn't kept: download it again to rescan or inspect.`;
     }
     async function scanHistoryGo(id) {
         const rec = (await scanHistoryLoad()).find(x => x.id === id); if (!rec) return;
@@ -11307,13 +11324,17 @@
         const d = document.getElementById('scanHistoryModal'); if (!d) return;
         const h = await scanHistoryLoad();
         const rows = h.map(rec => {
-            const counts = Object.entries(rec.counts || {}).map(([m, n]) => `${n} ${escapeHtml((MODE_STYLE[m] ? MODE_STYLE[m].label : m).toLowerCase())}`).join(', ') || 'no results';
+            // counts as they stand now: results you marked Not real are left out
+            const cnt = {}; let nNo = 0, nYes = 0;
+            for (const r of rec.results) { const a = histAnswer(r); if (a === 'no') { nNo++; continue; } if (a === 'yes') nYes++; cnt[r.m] = (cnt[r.m] || 0) + 1; }
+            const counts = (Object.entries(cnt).map(([m, n]) => `${n} ${escapeHtml((MODE_STYLE[m] ? MODE_STYLE[m].label : m).toLowerCase())}`).join(', ') || 'no results') +
+                (nYes ? ` &middot; <span style="color:#166534;">${nYes} confirmed real</span>` : '') + (nNo ? ` &middot; <span style="color:#991b1b;">${nNo} marked Not real (left out)</span>` : '');
             return `<div style="border-top:1px solid #e2e8f0;padding:8px 0;">
               <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;"><b>${escapeHtml(rec.label)}</b><span style="color:#64748b;font-size:0.78rem;">${new Date(rec.at).toLocaleString()}</span></div>
               <div style="font-size:0.78rem;color:#334155;margin:2px 0 4px;">${counts} &middot; ${rec.km2 < 0.1 ? Math.round(rec.km2 * 247.1) + ' acres' : rec.km2.toFixed(2) + ' km&sup2;'} at ${rec.res} m/px &middot; ${rec.area.n.toFixed(4)}, ${rec.area.w.toFixed(4)}</div>
               <details style="font-size:0.72rem;color:#64748b;margin-bottom:4px;"><summary>Status line</summary>${escapeHtml(rec.status)}</details>
               <div style="display:flex;gap:6px;flex-wrap:wrap;">
-                <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dbeafe;color:#1e3a8a;" onclick="scanHistoryShow('${rec.id}')" ${rec.results.length ? '' : 'disabled'}>Show results</button>
+                <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dbeafe;color:#1e3a8a;" onclick="scanHistoryShow('${rec.id}')" ${rec.results.length > nNo ? '' : 'disabled'}>Show results</button>
                 <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;" onclick="scanHistoryGo('${rec.id}')">Go to area</button>
                 <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#fee2e2;color:#991b1b;" onclick="scanHistoryDelete('${rec.id}')">Delete</button>
               </div></div>`;
@@ -11325,7 +11346,7 @@
               <button onclick="document.getElementById('scanHistoryModal').remove()" style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;">Close</button>
             </div>
             <div style="padding:4px 12px 10px;">
-              <div style="font-size:0.75rem;color:#64748b;margin:6px 0;line-height:1.4;">Your last ${SCAN_HISTORY_MAX} scans (regular, Scan All and deep learning), kept in this browser. <b>Show results</b> puts a scan's results back on the map, replacing current results of the same kind, with Yes / Not real still working. The terrain isn't kept: download it again to rescan.</div>
+              <div style="font-size:0.75rem;color:#64748b;margin:6px 0;line-height:1.4;">Your last ${SCAN_HISTORY_MAX} scans (regular, Scan All and deep learning), kept in this browser. <b>Show results</b> puts a scan's results back on the map, replacing current results of the same kind, with Yes / Not real still working. Your answers carry over: results you marked Not real (on the map or later) are left out, and ones you confirmed show as confirmed; undoing an answer brings them back. The terrain isn't kept: download it again to rescan.</div>
               ${rows || '<div style="color:#64748b;padding:12px 0;">No scans yet. Results are added here every time you scan.</div>'}
             </div></div>`;
     }

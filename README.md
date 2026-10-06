@@ -244,6 +244,7 @@ In tests, the traced outline reproduced a rectangle, an L shape and a bird-shape
 - **Show results** puts a scan's results back on the map and zooms to its area. They replace current results of the same kind, and they show in the legend and exports like any result.
 - **Yes / Not real** still work on them and go into your training data.
 - **Go to area** zooms to the area, and **Delete** or **Clear all** removes entries.
+- **Your answers carry over.** The history always reflects your current training data. A result you mark **Not real**, whether on the map, from the history, or later in another scan, is left out of its saved scan. So are other results within the distance a new scan would skip around a Not real mark (65 ft; 100 ft for effigies and shell middens). Each entry's counts drop to match and say how many were left out. A result you confirm shows with the green confirmed badge. Undoing an answer, or removing it in Training Data, brings the history back in line.
 
 The terrain isn't kept, so download it again to rescan or inspect a spot. In a test, a regular and a deep-learning scan of Russell Cave came back after a page reload with the same 10 and 7 results at the same places.
 
