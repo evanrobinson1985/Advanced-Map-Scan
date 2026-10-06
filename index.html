@@ -3412,7 +3412,7 @@
     // cell edges (so it encloses exactly those cells), stair-steps
     // simplified (within 0.75 cell) and corners softened once. Holes inside
     // are ignored. null when there are too few cells.
-    function cellsToOutline(cells, W, H, b) {
+    function cellsToOutline(cells, W, H, b, anchor) {
         const n0 = cells ? cells.length : 0;
         if (n0 < 3) return null;
         let r0 = Infinity, r1 = -1, c0 = Infinity, c1 = -1;
@@ -3421,7 +3421,14 @@
         if (bw * bh > 4e6) return null;
         const m = new Uint8Array(bw * bh);
         for (let k = 0; k < n0; k++) { const i = cells[k]; m[((i / W | 0) - r0 + 1) * bw + (i % W) - c0 + 1] = 1; }
-        // largest 4-connected part
+        // cells touching only at a corner (thin diagonal limbs) are joined, so
+        // a feature isn't broken into pieces by the tracing
+        for (let r = 1; r < bh - 2; r++) for (let c = 1; c < bw - 2; c++) {
+            const i = r * bw + c;
+            if (m[i] && m[i + bw + 1] && !m[i + 1] && !m[i + bw]) m[i + 1] = 2;
+            if (m[i + 1] && m[i + bw] && !m[i] && !m[i + bw + 1]) m[i] = 2;
+        }
+        // the part holding the anchor (where the feature's marker goes), else the largest
         const lab = new Int32Array(bw * bh); let best = 0, bestN = 0, cur = 0; const st = [];
         for (let i = 0; i < bw * bh; i++) {
             if (!m[i] || lab[i]) continue;
@@ -3429,6 +3436,7 @@
             while (st.length) { const j = st.pop(); cnt++; for (const q of [j - 1, j + 1, j - bw, j + bw]) if (m[q] && !lab[q]) { lab[q] = cur; st.push(q); } }
             if (cnt > bestN) { bestN = cnt; best = cur; }
         }
+        if (anchor != null && anchor >= 0) { const ar = ((anchor / W) | 0) - r0 + 1, ac = (anchor % W) - c0 + 1; if (ar >= 0 && ac >= 0 && ar < bh && ac < bw && lab[ar * bw + ac]) best = lab[ar * bw + ac]; }
         const inC = (r, c) => r >= 0 && c >= 0 && r < bh && c < bw && lab[r * bw + c] === best;
         // boundary edges, clockwise with the feature on the right: start corner -> list of [end corner, direction]
         const out = new Map(), key = (x, y) => y * (bw + 1) + x;
@@ -3486,6 +3494,28 @@
         }
         return ring.map(([cx, cy]) => [b.n - ((cy + r0 - 1) / H) * (b.n - b.s), b.w + ((cx + c0 - 1) / W) * (b.e - b.w)]);
     }
+    // A result's marker belongs inside its outline. Where it would fall
+    // outside (the centre of a curved or ring-shaped region), it moves to
+    // the nearest point just inside the outline. Returns [lat, lon].
+    function markerInOutline(lat, lon, ring) {
+        if (!ring || ring.length < 3 || pointInPoly(lon, lat, ring.map(([a, b2]) => [b2, a]))) return [lat, lon];
+        const kx = 111320 * Math.cos(lat * Math.PI / 180), ky = 111320;
+        let best = null, bd = Infinity;
+        for (let i = 0; i < ring.length; i++) {
+            const [a1, b1] = ring[i], [a2, b2] = ring[(i + 1) % ring.length];
+            const ax = (b1 - lon) * kx, ay = (a1 - lat) * ky, vx = (b2 - b1) * kx, vy = (a2 - a1) * ky;
+            const t = Math.max(0, Math.min(1, -(ax * vx + ay * vy) / (vx * vx + vy * vy || 1))), px = ax + t * vx, py = ay + t * vy, d = Math.hypot(px, py);
+            if (d < bd) { bd = d; best = [px, py, vx, vy]; }
+        }
+        // step 0.5 m inward from the nearest edge point (inward = the side the ring encloses)
+        const [px, py, vx, vy] = best, L2 = Math.hypot(vx, vy) || 1;
+        for (const sgn of [1, -1]) {
+            const qx = px + sgn * (-vy / L2) * 0.5, qy = py + sgn * (vx / L2) * 0.5, la = lat + qy / ky, lo = lon + qx / kx;
+            if (pointInPoly(lo, la, ring.map(([a, b2]) => [b2, a]))) return [la, lo];
+        }
+        let cy = 0, cx = 0; for (const [a, b2] of ring) { cy += a; cx += b2; }
+        return [cy / ring.length, cx / ring.length];
+    }
     // the cells of the 4-connected region of mask holding cell start
     function maskRegionCells(mask, W, H, start, cap = 4e6) {
         if (start == null || start < 0 || !mask[start]) return null;
@@ -3505,7 +3535,7 @@
     }
     // the traced outline of an effigy's or shell midden's cells (the
     // convex hull when tracing fails)
-    function effigyOutline(pix) { return cellsToOutline(pix, demWidth, demHeight, demBounds) || effigyHull(pix); }
+    function effigyOutline(pix, anchor) { return cellsToOutline(pix, demWidth, demHeight, demBounds, anchor) || effigyHull(pix); }
     // convex hull of the feature's cells, as [lat, lon] (for merging hits on one feature)
     function effigyHull(pix) {
         const pts = [];
@@ -3519,10 +3549,10 @@
         return lower.slice(0, -1).concat(upper.slice(0, -1)).map(([c, r]) => effigyLatLon(r * demWidth + c));
     }
     function effigyFeatureRecord(d, score, extraHtml, grid) {
-        const [lat, lon] = effigyLatLon(d.anchor);
+        const polygon = effigyOutline(d.pix, d.anchor), [lat, lon] = markerInOutline(...effigyLatLon(d.anchor), polygon);
         const k = { centroidR: d.cr, centroidC: d.cc, area: d.pix.length, count: d.pix.length, maxMetric: d.maxH, sumMetric: d.volume / (effRes * effRes),
                     circularity: d.circ, elongation: Math.max(1, d.L / Math.max(0.5, d.meanW)), orientation: d.orientation, fillRatio: 1, maxFlankSlope: d.flank, _sizeD: d.L, _template: effigyShapeCode(d) };
-        return { mode: 'effigy', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon: effigyOutline(d.pix), effigy: d };
+        return { mode: 'effigy', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon, effigy: d };
     }
     function effigyPopup(f, extraHtml, confirmHtml) {
         const d = f.effigy, ft = metersToFeetInches;
@@ -3843,10 +3873,10 @@
     function shellVector(d) { return { diameterM: d.L, heightM: d.maxH, circularity: d.circ, elongation: d.elong, template: shellShapeCode(d), groundSlopeDeg: null, flankSlopeDeg: d.flank }; }
     function shellKind(d) { return { ring: 'Shell ring (closed)', crescent: 'Shell ring or crescent (open)', ridge: 'Shell ridge / linear midden', heap: 'Shell mound / midden heap' }[d.kind]; }
     function shellFeatureRecord(d, score, grid) {
-        const [lat, lon] = effigyLatLon(d.anchor);
+        const polygon = effigyOutline(d.pix, d.anchor), [lat, lon] = markerInOutline(...effigyLatLon(d.anchor), polygon);
         const k = { centroidR: d.cr, centroidC: d.cc, area: d.pix.length, count: d.pix.length, maxMetric: d.maxH, sumMetric: d.volume / (effRes * effRes),
                     circularity: d.circ, elongation: d.elong, orientation: d.orientation, fillRatio: d.solidity, maxFlankSlope: d.flank, _sizeD: d.L, _template: shellShapeCode(d) };
-        return { mode: 'shell', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon: effigyOutline(d.pix), shell: d };
+        return { mode: 'shell', k, lat, lon, diameter: d.L, matchScore: score, grid: grid || gridInfo(), polygon, shell: d };
     }
     function shellPopup(f, extraHtml, confirmHtml) {
         const d = f.shell, ft = metersToFeetInches;
@@ -5496,12 +5526,13 @@
                 if (!best || bd > 40) return null;
                 const [la, lo] = effigyLatLon(best.anchor);
                 return { d: best, L: best.L, h: best.maxH, lat: la, lon: lo, circ: best.circ, elong: Math.max(1, best.L / Math.max(0.5, best.meanW)),
-                         paths: best.paths.map(p => p.map(effigyLatLon)), hull: effigyHull(best.pix), outline: effigyOutline(best.pix), why: best.why };
+                         paths: best.paths.map(p => p.map(effigyLatLon)), hull: effigyHull(best.pix), outline: effigyOutline(best.pix, best.anchor), why: best.why };
             });
         } catch (e) { console.warn('Tracing a deep-learning effigy candidate failed', e); return null; }
     }
     function dlRenderEffigyResult(res) {
-        const m = res.meas, lat = m ? m.lat : res.lat, lon = m ? m.lon : res.lon, d = m ? m.d : null;
+        const m = res.meas, d = m ? m.d : null;
+        const [lat, lon] = markerInOutline(m ? m.lat : res.lat, m ? m.lon : res.lon, m && m.outline);
         const ex = trainingData.effigy.examples.find(e => approxMetersBetween(e.lat, e.lon, lat, lon) < Math.max(30, 0.3 * (e.diameter || 50)));
         const f = knownMoundFeature({ id: 'dle' + Math.random().toString(36).slice(2), lat, lon, d: m ? m.L : 50, h: m ? m.h : 0, circ: m ? m.circ : 0.3, elong: m ? m.elong : 5 }, Math.round(res.p * 100));
         delete f.known;
@@ -5527,6 +5558,7 @@
         const icon = L.divIcon({ className: 'det-icon', iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12],
             html: `<div style="background:${st.color};color:#fff;width:20px;height:20px;border-radius:4px;transform:rotate(45deg);border:2px solid ${ex ? '#16a34a' : '#fff'};box-shadow:0 1px 4px rgba(0,0,0,0.5);"><div style="transform:rotate(-45deg);font:bold 11px/20px sans-serif;text-align:center;">F</div></div>` });
         f._layers = [L.marker([lat, lon], { icon }).bindPopup(html, { maxWidth: 320 }).addTo(layer)];
+        if (m && m.outline && m.outline.length >= 3) f._layers.push(L.polygon(m.outline, { color: st.color, weight: 1, dashArray: '4,4', fillColor: st.color, fillOpacity: 0.06, interactive: false }).addTo(layer));
         if (m) for (const p of m.paths) if (p.length >= 2) f._layers.push(L.polyline(p, { color: st.color, weight: 4, opacity: 0.85, dashArray: '8,5', interactive: false }).addTo(layer));
         detectedFeatures.push(f);
     }
@@ -5541,12 +5573,13 @@
                 const best = shellNearest({ ...S, minSize: Math.min(S.minSize, 10) }, r - r0, c - c0, 40);
                 if (!best) return null;
                 const [la, lo] = effigyLatLon(best.anchor);
-                return { d: best, L: best.L, h: best.maxH, lat: la, lon: lo, circ: best.circ, elong: best.elong, hull: effigyHull(best.pix), outline: effigyOutline(best.pix), why: best.why };
+                return { d: best, L: best.L, h: best.maxH, lat: la, lon: lo, circ: best.circ, elong: best.elong, hull: effigyHull(best.pix), outline: effigyOutline(best.pix, best.anchor), why: best.why };
             });
         } catch (e) { console.warn('Measuring a deep-learning shell candidate failed', e); return null; }
     }
     function dlRenderShellResult(res) {
-        const m = res.meas, lat = m ? m.lat : res.lat, lon = m ? m.lon : res.lon, d = m ? m.d : null;
+        const m = res.meas, d = m ? m.d : null;
+        const [lat, lon] = markerInOutline(m ? m.lat : res.lat, m ? m.lon : res.lon, m && m.outline);
         const ex = trainingData.shell.examples.find(e => approxMetersBetween(e.lat, e.lon, lat, lon) < Math.max(30, 0.3 * (e.diameter || 50)));
         const f = knownMoundFeature({ id: 'dls' + Math.random().toString(36).slice(2), lat, lon, d: m ? m.L : 50, h: m ? m.h : 0, circ: m ? m.circ : 0.5, elong: m ? m.elong : 1.5 }, Math.round(res.p * 100));
         delete f.known;
@@ -5572,11 +5605,13 @@
         const icon = L.divIcon({ className: 'det-icon', iconSize: [24, 24], iconAnchor: [12, 12], popupAnchor: [0, -12],
             html: `<div style="background:${st.color};color:#fff;width:20px;height:20px;border-radius:4px;transform:rotate(45deg);border:2px solid ${ex ? '#16a34a' : '#fff'};box-shadow:0 1px 4px rgba(0,0,0,0.5);"><div style="transform:rotate(-45deg);font:bold 11px/20px sans-serif;text-align:center;">O</div></div>` });
         f._layers = [L.marker([lat, lon], { icon }).bindPopup(html, { maxWidth: 320 }).addTo(layer)];
-        if (m && m.hull && m.hull.length >= 3) f._layers.push(L.polygon(m.hull, { color: st.color, weight: 2, dashArray: '8,5', fillOpacity: 0.05, interactive: false }).addTo(layer));
+        const shp = m && (m.outline || m.hull);
+        if (shp && shp.length >= 3) f._layers.push(L.polygon(shp, { color: st.color, weight: 2, dashArray: '8,5', fillOpacity: 0.05, interactive: false }).addTo(layer));
         detectedFeatures.push(f);
     }
     function dlRenderResult(res) {
-        const m = res.meas, lat = m ? m.lat : res.lat, lon = m ? m.lon : res.lon;
+        const m = res.meas;
+        const [lat, lon] = markerInOutline(m ? m.lat : res.lat, m ? m.lon : res.lon, m && m.outline);
         const d = m ? m.d : 10, h = m ? m.h : 0;
         const km = knownMounds().find(k2 => approxMetersBetween(k2.lat, k2.lon, lat, lon) < Math.max(10, 0.6 * k2.d));
         const f = knownMoundFeature({ id: 'dl' + Math.random().toString(36).slice(2), lat, lon, d, h, circ: m ? m.circ : 0.7, elong: m ? m.elong : 1 }, Math.round(res.p * 100));
@@ -11573,7 +11608,8 @@
                 if (persist < minPersist) continue;
                 const preset = c.preset;
                 // its outline: the hillside footprint it was measured by, else its closed contour
-                const outline = cellsToOutline(k._footCells || maskRegionCells(c.mask, W, H, k.start != null && c.mask[k.start] ? k.start : peak), W, H, demBounds);
+                const outline = cellsToOutline(k._footCells || maskRegionCells(c.mask, W, H, k.start != null && c.mask[k.start] ? k.start : peak), W, H, demBounds,
+                    k._footCells && k._footR != null ? Math.round(k._footR) * W + Math.round(k._footC) : peak);
                 comps.push({
                     ...k, _footCells: null, _outline: outline,
                     _presetName: preset.name,
@@ -11770,7 +11806,13 @@
             if (km) { if (!knownScore.has(km.id)) knownScore.set(km.id, fz.matchScore); return false; }
             return true;
         });
-        for (const { k, lat, lon, diameter, extra, matchScore } of shownFinalists.slice(0, maxResults)) {
+        for (let { k, lat, lon, diameter, extra, matchScore } of shownFinalists.slice(0, maxResults)) {
+            // the outline of the cells it found (its closed contour, or its
+            // footprint above the hillside); the size ellipse only if those
+            // are missing. The marker goes inside it.
+            const outline = k._outline || (lastMask && k.start != null ? cellsToOutline(maskRegionCells(lastMask, demWidth, demHeight, k.start), demWidth, demHeight, demBounds, k.start) : null);
+            const ring = outline || ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
+            [lat, lon] = markerInOutline(lat, lon, ring);
             const volume = k.sumMetric * effRes * effRes;
 
             const already = trainingData[mode].examples.find(ex => approxMetersBetween(ex.lat, ex.lon, lat, lon) < 20);
@@ -11841,10 +11883,6 @@
             // [lat,lng] pairs; ellipseRingLatLon returns [lon,lat] (GIS/shapefile
             // convention), so each point gets swapped going in. Non-interactive so
             // it's purely visual and doesn't steal clicks from the marker/map.
-            // the outline of the cells it found (its closed contour, or its
-            // footprint above the hillside); the size ellipse only if those are missing
-            const outline = k._outline || (lastMask && k.start != null ? cellsToOutline(maskRegionCells(lastMask, demWidth, demHeight, k.start), demWidth, demHeight, demBounds) : null);
-            const ring = outline || ellipseRingLatLon(k, 32).map(([lon2, lat2]) => [lat2, lon2]);
             fLayers.push(L.polygon(ring, { color: modeColor, weight: 2, fillColor: modeColor, fillOpacity: 0.15, interactive: false }).addTo(modeLayer(mode)));
             detectedFeatures.push({ mode, k, lat, lon, diameter, matchScore, grid: gridInfo(), _layers: fLayers, polygon: outline || null });
         }
