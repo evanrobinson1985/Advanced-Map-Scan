@@ -5296,21 +5296,10 @@
             if (RW < DL.INPUT || RH < DL.INPUT) { dlSetStatus(`Zoom out a little: the view must be at least ${Math.round(DL.INPUT * DL.RES)} m across.`); return; }
             // too big for one pass: scanned in sections, results combined
             const sections = dlSections(area, RW, RH, mLon), km2 = (RW * RH * DL.RES * DL.RES / 1e6);
-            const sure = [];
-            for (let si = 0; si < sections.length; si++) {
-                const sec = sections[si], c = sec.core;
-                const label = sections.length > 1 ? `Section ${si + 1} of ${sections.length} (${km2.toFixed(1)} km² in all): ` : '';
-                const got = await dlScanArea(tf, model, g, sec.area, label, sections.length > 1 ? mLon : null);
-                if (got === null || dlCancel) { dlSetStatus('Scan stopped.'); return; }
-                for (const pk of got) if (pk.lat <= c.n && pk.lat > c.s && pk.lon >= c.w && pk.lon < c.e) sure.push(pk);
-            }
-            sure.sort((a, b2) => b2.p - a.p);
-            const kept = [];
-            for (const pk of sure) if (!kept.some(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < DL.PEAK_SEP)) kept.push(pk);
             const effigyModel = DL.TRAIN_MODE !== 'mounds', shellModel = DL.TRAIN_MODE === 'shell';   // effigyModel: either traced (non-mound) model
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
-            let skippedRejected = 0, skippedBuilt = 0, skippedSteep = 0, hiddenDoubt = 0;
-            const results = [];
+            let skippedRejected = 0, skippedBuilt = 0, skippedSteep = 0, hiddenDoubtLoop = 0;
+            const results = [], kept = [];
             const dlBuildings = await builtBuildingsForScan(g);
             // clear false alarms (a bump on steep ground, no closed rise, far
             // too small, a ridge) are hidden, and kept as look-alikes for the
@@ -5320,82 +5309,140 @@
             const lookMinD = DL.LOOK_PER_AREA ? dlLookMinD() : 0, mined = [];
             const lookAvoid = DL.LOOK_PER_AREA ? [...dlTrainingItems().filter(i => i.label === 1), ...knownMounds()] : [];
             const nearKnown = (la, lo) => lookAvoid.some(a => approxMetersBetween(a.lat, a.lon, la, lo) < DL.AVOID_M);
-            const mine = (la, lo, why) => { if (learnFalse && !nearKnown(la, lo)) mined.push({ lat: la, lon: lo, why }); };
-            for (const pk of kept) {
-                if (results.length >= 2 * maxResults) break;
-                // your "Not real" marks and look-alike outlines always win
-                if (trainingData[DL.TRAIN_MODE].rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, pk.lat, pk.lon) < (effigyModel ? 30 : 20)) ||
-                    (!effigyModel && trainingData.outlines.some(o => o.label === 'not' && pointInPoly(pk.lon, pk.lat, o.polygon.map(([a2, b2]) => [b2, a2]))))) { skippedRejected++; continue; }
-                const meas = shellModel ? dlMeasureShell(g, pk.lat, pk.lon) : effigyModel ? dlMeasureEffigy(g, pk.lat, pk.lon) : dlMeasure(g, pk.lat, pk.lon);
-                // house pads and building foundations: mapped buildings, then the shape test
-                {
-                    const la = meas ? meas.lat : pk.lat, lo = meas ? meas.lon : pk.lon;
-                    if (builtSettings().mapped && onMappedBuilding(dlBuildings, la, lo, 5)) { skippedBuilt++; continue; }
-                    if (effigyModel && meas && meas.why && meas.why.includes(BUILT_WHY)) { skippedBuilt++; continue; }
-                    if (!effigyModel && builtSettings().shape) { const bs = builtShapeAt(g, la, lo, meas ? meas.d : 15); if (bs && bs.verdict === 'built') { skippedBuilt++; continue; } if (bs && bs.verdict === 'maybe') pk.builtMaybe = bs; }
-                    // the mound scan's hillside rules: nothing on ground steeper
-                    // than 20 degrees; above the Flat-ground slope setting only a
-                    // clean mound shape counts (others are listed last, flagged)
-                    pk.groundSlope = dlGroundSlopeAt(g, la, lo, effigyModel ? 60 : DL.key === 'large' ? Math.max(60, 0.8 * (meas ? meas.d : 60)) : 25);
-                    if (!effigyModel && pk.groundSlope != null) {
-                        if (pk.groundSlope > MOUND_SLOPE_HARD_MAX) { skippedSteep++; if (DL.LOOK_PER_AREA) mine(la, lo, 'a bump on ground steeper than 20 degrees'); continue; }
-                        const flatMax = parseFloat((document.getElementById('moundMaxGroundSlope') || { value: 8 }).value);
-                        pk.hillside = pk.groundSlope > flatMax && !(meas && meas.template != null && meas.template >= 0.85 && meas.elong <= 1.5 && meas.circ >= 0.45);
+            let curPk = null;   // the peak being checked, so a lesson taken from it can be withdrawn
+            const mine = (la, lo, why) => { if (learnFalse && !nearKnown(la, lo)) { const e = { lat: la, lon: lo, why }; mined.push(e); if (curPk) curPk._mined = e; } };
+            const rejectedAt = (la, lo) => trainingData[DL.TRAIN_MODE].rejected.some(rj => approxMetersBetween(rj.lat, rj.lon, la, lo) < (effigyModel ? 30 : 20));
+            // One section's confident peaks: each measured and checked as before
+            // (up to twice Max results per section, most confident first)
+            const processPeaks = async (peaks, label) => {
+                peaks.sort((a, b2) => b2.p - a.p);
+                let taken = 0;
+                for (const pk of peaks) {
+                    // peaks closer than PEAK_SEP: the more confident one counts, as in
+                    // a single pass. A weaker one kept from an earlier section (across a
+                    // seam) is withdrawn with everything it added.
+                    const clash = kept.filter(o => approxMetersBetween(o.lat, o.lon, pk.lat, pk.lon) < DL.PEAK_SEP);
+                    if (clash.some(o => o.p >= pk.p)) continue;
+                    for (const o of clash) {
+                        kept.splice(kept.indexOf(o), 1);
+                        if (o._out === 'result') { const i = results.findIndex(r2 => r2.lat === o.lat && r2.lon === o.lon); if (i >= 0) results.splice(i, 1); }
+                        else if (o._out === 'rejected') skippedRejected--; else if (o._out === 'built') skippedBuilt--; else if (o._out === 'steep') skippedSteep--; else if (o._out === 'hidden') hiddenDoubtLoop--;
+                        if (o._mined) { const i = mined.indexOf(o._mined); if (i >= 0) mined.splice(i, 1); }
                     }
-                    if (DL.LOOK_PER_AREA) {
-                        const why = dlClearlyNotMound(meas, pk.groundSlope, lookMinD);
-                        if (why && !nearKnown(la, lo)) { mine(la, lo, why); if (hideDoubt) { hiddenDoubt++; continue; } pk.doubt = why; }
+                    kept.push(pk); curPk = pk;
+                    if (taken >= 2 * maxResults) { pk._out = 'capped'; continue; }
+                    // your "Not real" marks and look-alike outlines always win
+                    if (rejectedAt(pk.lat, pk.lon) ||
+                        (!effigyModel && trainingData.outlines.some(o => o.label === 'not' && pointInPoly(pk.lon, pk.lat, o.polygon.map(([a2, b2]) => [b2, a2]))))) { skippedRejected++; pk._out = 'rejected'; continue; }
+                    const meas = shellModel ? dlMeasureShell(g, pk.lat, pk.lon) : effigyModel ? dlMeasureEffigy(g, pk.lat, pk.lon) : dlMeasure(g, pk.lat, pk.lon);
+                    // house pads and building foundations: mapped buildings, then the shape test
+                    {
+                        const la = meas ? meas.lat : pk.lat, lo = meas ? meas.lon : pk.lon;
+                        if (builtSettings().mapped && onMappedBuilding(dlBuildings, la, lo, 5)) { skippedBuilt++; pk._out = 'built'; continue; }
+                        if (effigyModel && meas && meas.why && meas.why.includes(BUILT_WHY)) { skippedBuilt++; pk._out = 'built'; continue; }
+                        if (!effigyModel && builtSettings().shape) { const bs = builtShapeAt(g, la, lo, meas ? meas.d : 15); if (bs && bs.verdict === 'built') { skippedBuilt++; pk._out = 'built'; continue; } if (bs && bs.verdict === 'maybe') pk.builtMaybe = bs; }
+                        // the mound scan's hillside rules: nothing on ground steeper
+                        // than 20 degrees; above the Flat-ground slope setting only a
+                        // clean mound shape counts (others are listed last, flagged)
+                        pk.groundSlope = dlGroundSlopeAt(g, la, lo, effigyModel ? 60 : DL.key === 'large' ? Math.max(60, 0.8 * (meas ? meas.d : 60)) : 25);
+                        if (!effigyModel && pk.groundSlope != null) {
+                            if (pk.groundSlope > MOUND_SLOPE_HARD_MAX) { skippedSteep++; pk._out = 'steep'; if (DL.LOOK_PER_AREA) mine(la, lo, 'a bump on ground steeper than 20 degrees'); continue; }
+                            const flatMax = parseFloat((document.getElementById('moundMaxGroundSlope') || { value: 8 }).value);
+                            pk.hillside = pk.groundSlope > flatMax && !(meas && meas.template != null && meas.template >= 0.85 && meas.elong <= 1.5 && meas.circ >= 0.45);
+                        }
+                        if (DL.LOOK_PER_AREA) {
+                            const why = dlClearlyNotMound(meas, pk.groundSlope, lookMinD);
+                            if (why && !nearKnown(la, lo)) { mine(la, lo, why); if (hideDoubt) { hiddenDoubtLoop++; pk._out = 'hidden'; continue; } pk.doubt = why; }
+                        }
                     }
+                    results.push({ ...pk, meas }); taken++; pk._out = 'result';
+                    if (results.length % 5 === 0) { dlSetStatus(`${label}measuring candidates: ${results.length}...`); await dlTick(); }
                 }
-                results.push({ ...pk, meas });
-                if (results.length % 5 === 0) { dlSetStatus(`Measuring candidates: ${results.length}...`); await dlTick(); }
-            }
-            // A long effigy (or a big shell ring) can light up several windows
-            // along its body: keep one candidate per traced feature, the most
-            // confident, so each effigy is reported once, as a whole
-            let mergedDup = 0;
-            if (effigyModel || DL.key === 'large') {
-                results.sort((a, b2) => b2.p - a.p);
-                const one = [];
-                for (const r2 of results) {
-                    const la = r2.meas ? r2.meas.lat : r2.lat, lo = r2.meas ? r2.meas.lon : r2.lon;
-                    const same = one.some(k2 => k2.meas && (approxMetersBetween(k2.meas.lat, k2.meas.lon, la, lo) < (DL.key === 'large' ? Math.max(10, 0.5 * (k2.meas.d || 0)) : 10) ||
-                        (k2.meas.hull && k2.meas.hull.length >= 3 && (pointInPoly(lo, la, k2.meas.hull.map(([a2, b2]) => [b2, a2])) || pointInPoly(r2.lon, r2.lat, k2.meas.hull.map(([a2, b2]) => [b2, a2]))))));
-                    if (same) { mergedDup++; continue; }
-                    one.push(r2);
-                }
-                results.length = 0; results.push(...one);
-            }
-            // Order: spots the regular mound scan also found (or your
-            // confirmed mounds), then ones with a measurable rise (a confident
-            // peak with no closed high under it is usually a false alarm),
-            // then by confidence
-            const regular = detectedFeatures.filter(f => f.mode === DL.TRAIN_MODE && !f.known);
+            };
             // smaller than the regular scan accepts (mounds: tree throws,
-            // boulders and knobs usually are; effigies: under Min length):
-            // listed last
+            // boulders and knobs usually are; effigies: under Min length): listed last
             const pd = moundShapePresetDefs();
             const minD = DL.MIN_POS_D ? DL.MIN_POS_D : shellModel ? shellSettings().minSize : effigyModel ? effigySettings().minL : feetToMeters(Math.min(pd.conical.minDiameter, pd.platform.minDiameter, parseFloat(document.getElementById('minDiameter').value) || Infinity));
-            for (const res of results) {
-                res.small = !!res.meas && (effigyModel ? res.meas.L : res.meas.d) < minD; res.minD = minD;
-                const la = res.meas ? res.meas.lat : res.lat, lo = res.meas ? res.meas.lon : res.lon;
-                if (effigyModel) {
-                    res.agree = regular.some(f => approxMetersBetween(f.lat, f.lon, la, lo) < Math.max(30, 0.3 * (f.diameter || 50)));
-                    res.known = trainingData[DL.TRAIN_MODE].examples.some(ex => approxMetersBetween(ex.lat, ex.lon, la, lo) < Math.max(30, 0.3 * (ex.diameter || 50)));
-                } else {
-                    res.agree = regular.some(f => approxMetersBetween(f.lat, f.lon, la, lo) < Math.max(10, 0.6 * (f.diameter || 10)));
-                    res.known = knownMounds().some(k2 => approxMetersBetween(k2.lat, k2.lon, la, lo) < Math.max(10, 0.6 * k2.d));
+            // Everything found so far, ranked and put on the map (called after
+            // each section, so results appear as sections finish; the last
+            // call is the final list). Results you've marked Not real since
+            // they were found stay off.
+            const showResults = () => {
+                let list = results.filter(r2 => !rejectedAt(r2.meas ? r2.meas.lat : r2.lat, r2.meas ? r2.meas.lon : r2.lon));
+                // a peak near a section seam can be found from both sides: the more confident one stays
+                list.sort((a, b2) => b2.p - a.p);
+                { const one = []; for (const r2 of list) if (!one.some(o => approxMetersBetween(o.lat, o.lon, r2.lat, r2.lon) < DL.PEAK_SEP)) one.push(r2); list = one; }
+                // A long effigy (or a big shell ring) can light up several windows
+                // along its body: keep one candidate per traced feature, the most
+                // confident, so each effigy is reported once, as a whole
+                let mergedDup = 0;
+                if (effigyModel || DL.key === 'large') {
+                    const one = [];
+                    for (const r2 of list) {
+                        const la = r2.meas ? r2.meas.lat : r2.lat, lo = r2.meas ? r2.meas.lon : r2.lon;
+                        const same = one.some(k2 => k2.meas && (approxMetersBetween(k2.meas.lat, k2.meas.lon, la, lo) < (DL.key === 'large' ? Math.max(10, 0.5 * (k2.meas.d || 0)) : 10) ||
+                            (k2.meas.hull && k2.meas.hull.length >= 3 && (pointInPoly(lo, la, k2.meas.hull.map(([a2, b2]) => [b2, a2])) || pointInPoly(r2.lon, r2.lat, k2.meas.hull.map(([a2, b2]) => [b2, a2]))))));
+                        if (same) { mergedDup++; continue; }
+                        one.push(r2);
+                    }
+                    list = one;
                 }
-            }
-            // no closed rise, smaller than a mound, a knob without a clean
-            // mound shape above the Flat-ground slope setting, or anything on
-            // ground steeper than 12 degrees (97% of confirmed mounds are on
-            // ground of 8 degrees or less): hidden too, unless the regular
-            // scan agrees or it's one of your mounds. A clean shape on 8-12
-            // degrees (like Cottonpatch Mound) stays, flagged and listed last
-            if (hideDoubt) {
-                const keep = results.filter(r2 => r2.agree || r2.known || !(!r2.meas || r2.small || r2.hillside || (r2.groundSlope != null && r2.groundSlope > DL_LOOK_SLOPE)));
-                hiddenDoubt += results.length - keep.length; results.length = 0; results.push(...keep);
+                // Order: spots the regular mound scan also found (or your
+                // confirmed mounds), then ones with a measurable rise (a confident
+                // peak with no closed high under it is usually a false alarm),
+                // then by confidence
+                const regular = detectedFeatures.filter(f => f.mode === DL.TRAIN_MODE && !f.known);
+                for (const res of list) {
+                    res.small = !!res.meas && (effigyModel ? res.meas.L : res.meas.d) < minD; res.minD = minD;
+                    const la = res.meas ? res.meas.lat : res.lat, lo = res.meas ? res.meas.lon : res.lon;
+                    if (effigyModel) {
+                        res.agree = regular.some(f => approxMetersBetween(f.lat, f.lon, la, lo) < Math.max(30, 0.3 * (f.diameter || 50)));
+                        res.known = trainingData[DL.TRAIN_MODE].examples.some(ex => approxMetersBetween(ex.lat, ex.lon, la, lo) < Math.max(30, 0.3 * (ex.diameter || 50)));
+                    } else {
+                        res.agree = regular.some(f => approxMetersBetween(f.lat, f.lon, la, lo) < Math.max(10, 0.6 * (f.diameter || 10)));
+                        res.known = knownMounds().some(k2 => approxMetersBetween(k2.lat, k2.lon, la, lo) < Math.max(10, 0.6 * k2.d));
+                    }
+                }
+                // no closed rise, smaller than a mound, a knob without a clean
+                // mound shape above the Flat-ground slope setting, or anything on
+                // ground steeper than 12 degrees (97% of confirmed mounds are on
+                // ground of 8 degrees or less): hidden too, unless the regular
+                // scan agrees or it's one of your mounds. A clean shape on 8-12
+                // degrees (like Cottonpatch Mound) stays, flagged and listed last
+                let hidden = 0;
+                if (hideDoubt) {
+                    const keep = list.filter(r2 => r2.agree || r2.known || !(!r2.meas || r2.small || r2.hillside || (r2.groundSlope != null && r2.groundSlope > DL_LOOK_SLOPE)));
+                    hidden = list.length - keep.length; list = keep;
+                }
+                list.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!a.hillside - !!b2.hillside) || (!!b2.meas - !!a.meas) || b2.p - a.p);
+                const shownN = Math.min(list.length, maxResults), over = list.length - shownN;
+                list.length = shownN;
+                clearModeDetections(DL.RESULT_MODE);
+                window.__dlFeats = [];
+                for (const res of list) (shellModel ? dlRenderShellResult : effigyModel ? dlRenderEffigyResult : dlRenderResult)(res);
+                if (list.length && document.getElementById('panelContent').style.display !== 'none') togglePanel();
+                updateDetectionLegend();
+                if (typeof updateExportButtons === 'function') updateExportButtons();
+                return { list, mergedDup, hidden, over, regular };
+            };
+            // too big for one pass: scanned in sections; each section's results
+            // go on the map as soon as it is done, and the ranking is redone
+            // with every section, so the last one leaves the final list
+            for (let si = 0; si < sections.length; si++) {
+                const sec = sections[si], c = sec.core;
+                const label = sections.length > 1 ? `Section ${si + 1} of ${sections.length} (${km2.toFixed(1)} km² in all): ` : '';
+                const got = await dlScanArea(tf, model, g, sec.area, label, sections.length > 1 ? mLon : null);
+                if (got === null || dlCancel) {
+                    if (si > 0) { const sh = showResults(); dlSetStatus(`Scan stopped after ${si} of ${sections.length} sections: ${sh.list.length} candidate${sh.list.length === 1 ? '' : 's'} from the finished sections are on the map.`); }
+                    else dlSetStatus('Scan stopped.');
+                    return;
+                }
+                await processPeaks(got.filter(pk => pk.lat <= c.n && pk.lat > c.s && pk.lon >= c.w && pk.lon < c.e), label);
+                if (sections.length > 1 && si < sections.length - 1) {
+                    const sh = showResults();
+                    const m2 = `Section ${si + 1} of ${sections.length} done: ${sh.list.length} candidate${sh.list.length === 1 ? '' : 's'} so far are on the map (${Math.round((Date.now() - t0) / 1000)} s). Scanning the next section; the list is re-ranked as each one finishes.`;
+                    dlSetStatus(m2); status.innerText = m2; await dlTick();
+                }
             }
             // the network's clear false alarms become look-alike samples
             let nMined = 0;
@@ -5409,18 +5456,12 @@
                 }
                 if (nMined) { dlTrimLook(); await dlSavePatches(); updateDLSummary(); }
             }
-            results.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!a.hillside - !!b2.hillside) || (!!b2.meas - !!a.meas) || b2.p - a.p);
-            const heldBack = Math.max(0, kept.length - skippedRejected - skippedBuilt - skippedSteep - hiddenDoubt - mergedDup - maxResults);
-            results.length = Math.min(results.length, maxResults);
-            clearModeDetections(DL.RESULT_MODE);
-            window.__dlFeats = [];
-            for (const res of results) (shellModel ? dlRenderShellResult : effigyModel ? dlRenderEffigyResult : dlRenderResult)(res);
-            if (results.length && document.getElementById('panelContent').style.display !== 'none') togglePanel();
-            updateDetectionLegend();
-            if (typeof updateExportButtons === 'function') updateExportButtons();
-            const known = window.__dlFeats.filter(f => f.dlKnown).length, agreed = results.filter(r2 => r2.agree).length;
+            const final = showResults(), regular = final.regular, mergedDup = final.mergedDup, hiddenDoubt = hiddenDoubtLoop + final.hidden;
+            const results2 = final.list;
+            const heldBack = final.over + Math.max(0, kept.length - skippedRejected - skippedBuilt - skippedSteep - hiddenDoubtLoop - results.length);
+            const known = window.__dlFeats.filter(f => f.dlKnown).length, agreed = results2.filter(r2 => r2.agree).length;
             const scanName = shellModel ? 'shell midden scan' : effigyModel ? 'effigy & linear mound scan' : 'mound scan';
-            const msg = `Deep-learning scan: ${results.length} candidate${results.length === 1 ? '' : 's'} at ${Math.round(thr * 100)}%+ confidence` +
+            const msg = `Deep-learning scan: ${results2.length} candidate${results2.length === 1 ? '' : 's'} at ${Math.round(thr * 100)}%+ confidence` +
                 (sections.length > 1 ? ` across the ${km2.toFixed(1)} km² in view, scanned in ${sections.length} overlapping sections and combined` : '') +
                 (known ? ` (${known} of them your confirmed ${DL.NOUNS})` : '') +
                 (regular.length ? `; the regular ${scanName} agrees on ${agreed}` : `; run the regular ${scanName} too, then this one again, to see where both agree`) +
