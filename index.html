@@ -4942,23 +4942,39 @@
         } finally { dlSetBusy(false); }
     }
     // ==== TRAINING DATA CHECK ====
-    // Looks for mound training items that may be wrong, so one bad record
-    // doesn't quietly mislead the scans and the network:
+    // Looks for mound, effigy and shell-midden training items that may be
+    // wrong, so one bad record doesn't quietly mislead the scans and the
+    // network:
     //  - rule checks (always): a size no mound has, no size recorded, steeper
     //    than any mound could be, too low or too small to be a mound, the
     //    terrain under the point not rising as much as recorded, a mound
     //    confirmed twice, a "Not real" mark that contradicts a confirmed
     //    mound (scans skip anything within 20 m of such a mark);
+    //  - a record that traced a whole site rather than one mound (over 600 m
+    //    across, or roundness under 0.05): raised even if an earlier size
+    //    issue was marked "It's accurate", and it can't be;
+    //  - a mound on ground steeper than 12 degrees;
+    //  - effigies and shell middens: confirmed twice, next to a "Not real"
+    //    mark (30 m), and effigies longer or taller than any known one;
+    //  - across kinds: the same spot confirmed as two kinds (15 m), or
+    //    confirmed as one kind and marked "Not real" as another (10 m);
+    //  - two "Not real" marks on the same spot (2 m);
     //  - the network's opinion (when a trained model is available): confirmed
-    //    mounds it scores under 30%, "Not real" marks it scores 90%+.
+    //    mounds it scores under 30%, "Not real" marks it scores 90%+, and
+    //    the two together within 100 m (the labels may be swapped).
     // Each issue has "Go to & edit" (the item's editor on the map, with a bar
     // back to the list) and "It's accurate", which records that you checked
     // it: that issue isn't raised again for the item unless you later change
     // its position, size or label. Both can be undone.
-    const TC_SEVERE = new Set(['size-huge', 'no-size', 'steep', 'duplicate', 'conflict']);
+    const TC_SEVERE = new Set(['size-huge', 'no-size', 'steep', 'duplicate', 'conflict', 'not-one', 'two-kinds', 'swapped']);
+    // never "accurate": no single mound is like that
+    const TC_NO_ACCURATE = new Set(['not-one']);
     const TC_TITLE = { 'size-huge': 'Size no mound has', 'no-size': 'No size recorded', steep: 'Impossibly steep', 'too-low': 'Very low', 'too-small': 'Very small',
                        terrain: "Terrain doesn't match", duplicate: 'Confirmed twice', conflict: 'Contradicts a "Not real" mark',
-                       'dl-pos': 'The network doubts this mound', 'dl-neg': 'Looks like a mound to the network' };
+                       'dl-pos': 'The network doubts this mound', 'dl-neg': 'Looks like a mound to the network',
+                       'not-one': 'A whole site, not one mound', 'ground-steep': 'On a steep slope', 'too-long': 'Longer than known effigies',
+                       'two-kinds': 'Confirmed as two kinds', 'kind-mixed': 'Real as one kind, "Not real" as another',
+                       'nr-duplicate': '"Not real" marked twice', swapped: 'Labels may be swapped' };
     let tcDLScores = null;   // dk -> { p, pos } from the last check with the network
     function dlKeyToReviewKey(key) {
         const [t, id] = [key.slice(0, 2), key.slice(3)];
@@ -4973,33 +4989,43 @@
     }
     // Every mound training item, with what the checks need
     function tcItems() {
-        const out = [];
-        for (const ex of trainingData.mounds.examples) out.push({ dk: 'ex:' + ex.ts, rk: { list: 'examples', mode: 'mounds', ts: ex.ts }, item: ex, kind: 'Confirmed mound', pos: true,
-            lat: ex.lat, lon: ex.lon, d: ex.diameter, h: ex.maxMetric, name: ex.name, ts: ex.ts });
-        for (const rj of trainingData.mounds.rejected) out.push({ dk: 'rj:' + rj.ts, rk: { list: 'rejected', mode: 'mounds', ts: rj.ts }, item: rj, kind: '"Not real" mark', pos: false,
-            lat: rj.lat, lon: rj.lon, d: rj.features ? rj.features.diameterM : null, h: rj.features ? rj.features.heightM : null, name: rj.name, ts: rj.ts });
-        for (const o of trainingData.outlines) out.push({ dk: 'ol:' + o.id, rk: { list: 'outlines', id: o.id }, item: o, kind: o.label === 'mound' ? 'Mound outline' : 'Look-alike outline',
+        const out = [], word = { mounds: 'mound', effigy: 'effigy', shell: 'shell midden' };
+        for (const m of KIND_MODES) {
+            const pre = m === 'mounds' ? '' : m + ':';   // mound keys are also the network samples' keys
+            for (const ex of trainingData[m].examples) out.push({ dk: pre + 'ex:' + ex.ts, rk: { list: 'examples', mode: m, ts: ex.ts }, item: ex, mode: m, kind: 'Confirmed ' + word[m], pos: true,
+                lat: ex.lat, lon: ex.lon, d: ex.diameter, h: ex.maxMetric, name: ex.name, ts: ex.ts });
+            for (const rj of trainingData[m].rejected) out.push({ dk: pre + 'rj:' + rj.ts, rk: { list: 'rejected', mode: m, ts: rj.ts }, item: rj, mode: m, kind: m === 'mounds' ? '"Not real" mark' : `"Not real" ${word[m]} mark`, pos: false,
+                lat: rj.lat, lon: rj.lon, d: rj.features ? rj.features.diameterM : null, h: rj.features ? rj.features.heightM : null, name: rj.name, ts: rj.ts });
+        }
+        for (const o of trainingData.outlines) out.push({ dk: 'ol:' + o.id, rk: { list: 'outlines', id: o.id }, item: o, mode: 'mounds', kind: o.label === 'mound' ? 'Mound outline' : 'Look-alike outline',
             pos: o.label === 'mound', lat: o.centroid[0], lon: o.centroid[1], d: o.outline && o.outline.eqDiameterM, h: o.outline && o.outline.heightM, name: o.name, ts: o.ts });
         return out;
     }
     // What a verification was made against: changing any of it re-checks
     function tcSig(it) { return [it.lat.toFixed(6), it.lon.toFixed(6), it.pos ? 1 : 0, (+it.d || 0).toFixed(2), (+it.h || 0).toFixed(2)].join('|'); }
-    function tcVerified(it, code) { const v = it.item.verified; return !!v && v.sig === tcSig(it) && (v.codes || []).includes(code); }
+    function tcVerified(it, code) { if (TC_NO_ACCURATE.has(code)) return false; const v = it.item.verified; return !!v && v.sig === tcSig(it) && (v.codes || []).includes(code); }
     async function tcFindIssues() {
         try { await dlLoadPatchesFor('mounds'); } catch (e) { /* no samples: skip the terrain check */ }
         return dlWithProfile('mounds', () => {   // always the mound model's samples and opinions
         tcRestoreScores();
         // a newer model makes the old opinions stale
         if (tcDLScores && dlPrefs().checkScores && dlPrefs().model && dlPrefs().checkScores.modelAt !== dlPrefs().model.at) tcDLScores = null;
-        const items = tcItems(), issues = [], ft = metersToFeetInches;
+        const items = tcItems(), issues = [], ft = metersToFeetInches, dt = (ts) => new Date(ts).toLocaleDateString();
         const add = (it, code, text) => { if (!tcVerified(it, code)) issues.push({ it, code, text, severe: TC_SEVERE.has(code) }); };
-        for (const it of items) {
+        const dist = (a, b) => approxMetersBetween(a.lat, a.lon, b.lat, b.lon);
+        const nearest = (it, list, r) => { let best = null; for (const o of list) { if (o === it) continue; const d = dist(it, o); if (d < r && (!best || d < best.dist)) best = { o, dist: d }; } return best; };
+        const mounds = items.filter(i => i.mode === 'mounds');
+        for (const it of mounds) {
             if (!it.pos) continue;
             if (!(it.h > 0) || !(it.d > 0)) { add(it, 'no-size', `No ${!(it.h > 0) ? 'height' : 'width'} recorded, so it can't help the size settings. Outline the mound, or Edit to enter its size.`); continue; }
-            if (it.d > 350 || it.h > 32) add(it, 'size-huge', `Recorded ${ft(it.d)} across and ${ft(it.h)} tall: bigger than any known mound (Monks Mound, the largest in North America, is about 100 ft tall and 950 ft long). Probably a hill or landscape measured by mistake.`);
+            const circ = it.item.circularity;
+            if (it.d > 600 || (circ != null && circ < 0.05)) add(it, 'not-one', `Recorded ${ft(it.d)} across${circ != null && circ < 0.05 ? ` with a roundness of ${circ.toFixed(4)} (a mound is about 0.5-1)` : ''}: this traced a whole site or a stretch of landscape, not one mound, and it skews the size settings for every scan. Remove it, or Edit it to the size of one mound. This one can't be marked accurate.`);
+            else if (it.d > 350 || it.h > 32) add(it, 'size-huge', `Recorded ${ft(it.d)} across and ${ft(it.h)} tall: bigger than any known mound (Monks Mound, the largest in North America, is about 100 ft tall and 950 ft long). Probably a hill or landscape measured by mistake.`);
             else if (it.h / it.d > 0.5) add(it, 'steep', `Recorded ${ft(it.h)} tall but only ${ft(it.d)} across: steeper than a 45&deg; cone, which no earthen mound is. Probably mis-measured.`);
             if (it.h < 0.15) add(it, 'too-low', `Only ${ft(it.h)} tall: lower than LiDAR can reliably show, so the scans can't learn much from it.`);
             if (it.d < 3) add(it, 'too-small', `Only ${ft(it.d)} across: the size of a stump or tree throw.`);
+            const gs = it.item.scanner && it.item.scanner.groundSlopeDeg;
+            if (gs > 12) add(it, 'ground-steep', `The ground under it slopes ${Math.round(gs)}&deg;. Mounds are rarely built on slopes that steep, so it may be a hillside bump or a terrace edge. If it is a real mound (some sit on bluff edges), it's accurate.`);
             const p = dlSampleFor({ key: it.dk });
             if (p && approxMetersBetween(p.lat, p.lon, it.lat, it.lon) < 2 && it.d <= DL.MAX_POS_D && it.h >= 0.6) {
                 const rise = dlCentreRise(p.cm);
@@ -5007,23 +5033,75 @@
             }
         }
         // the same mound confirmed twice: the newer one is flagged
-        const exs = items.filter(i => i.dk.startsWith('ex:')).sort((a, b) => a.ts - b.ts);
-        for (let i = 0; i < exs.length; i++) for (let j = 0; j < i; j++) {
-            const dist = approxMetersBetween(exs[i].lat, exs[i].lon, exs[j].lat, exs[j].lon);
-            if (dist < 5) { add(exs[i], 'duplicate', `Another confirmation ${ft(dist)} away (${new Date(exs[j].ts).toLocaleDateString()}) is probably the same mound, counted twice. Remove one.`); break; }
+        // (within 5 m, or 30% of the smaller one's width for big mounds, up to 30 m)
+        const word = { mounds: 'mound', effigy: 'effigy', shell: 'shell midden' };
+        for (const m of KIND_MODES) {
+            const exs = items.filter(i => i.mode === m && i.rk.list === 'examples').sort((a, b) => a.ts - b.ts);
+            for (let i = 0; i < exs.length; i++) for (let j = 0; j < i; j++) {
+                const d = dist(exs[i], exs[j]);
+                const lim = m === 'mounds' ? Math.max(5, Math.min(30, 0.3 * Math.min(exs[i].d || 10, exs[j].d || 10))) : 10;
+                if (d < lim) { add(exs[i], 'duplicate', `Another confirmation ${ft(d)} away (${dt(exs[j].ts)}) is probably the same ${word[m]}, counted twice. Remove one.`); break; }
+            }
         }
-        // a confirmed mound next to a "Not real" mark: one of them is wrong
-        const rjs = items.filter(i => i.dk.startsWith('rj:'));
-        for (const it of items.filter(i => i.pos)) {
-            const near = rjs.map(r => ({ r, dist: approxMetersBetween(r.lat, r.lon, it.lat, it.lon) })).filter(x => x.dist < 20).sort((a, b) => a.dist - b.dist)[0];
-            if (near) add(it, 'conflict', `A "Not real" mark ${ft(near.dist)} away (${new Date(near.r.ts).toLocaleDateString()}). Scans skip anything within 65 ft of a "Not real" mark, so this mound would be hidden. If the mark is wrong, Go to it from Show Training Data on Map and remove it.`);
+        // a confirmed item next to a "Not real" mark of its kind: one of them is wrong
+        const rjs = mounds.filter(i => i.rk.list === 'rejected');
+        for (const it of mounds.filter(i => i.pos)) {
+            const near = nearest(it, rjs, 20);
+            if (near) add(it, 'conflict', `A "Not real" mark ${ft(near.dist)} away (${dt(near.o.ts)}). Scans skip anything within 65 ft of a "Not real" mark, so this mound would be hidden. If the mark is wrong, Go to it from Show Training Data on Map and remove it.`);
+        }
+        const posEx = mounds.filter(i => i.rk.list === 'examples');
+        for (const it of mounds.filter(i => i.rk.list === 'outlines' && !i.pos)) {
+            const near = nearest(it, posEx, 20);
+            if (near) add(it, 'conflict', `Outlined as a look-alike, but a confirmed mound is ${ft(near.dist)} away (${dt(near.o.ts)}). One of them is wrong.`);
+        }
+        for (const m of ['effigy', 'shell']) {
+            const rj = items.filter(i => i.mode === m && !i.pos);
+            for (const it of items.filter(i => i.mode === m && i.pos)) {
+                const near = nearest(it, rj, 30);
+                if (near) add(it, 'conflict', `Marked "Not real" as ${word[m] === 'effigy' ? 'an effigy' : 'a shell midden'} ${ft(near.dist)} away (${dt(near.o.ts)}). Both can't be right; remove the wrong one.`);
+            }
+        }
+        // effigies longer or taller than any known one (Serpent Mound, the
+        // longest, is about 1,350 ft; effigies are rarely over 6 ft tall)
+        for (const it of items.filter(i => i.mode === 'effigy' && i.pos)) {
+            if (!(it.d > 0)) continue;
+            if (it.d > 450 || it.h > 4) add(it, 'size-huge', `Recorded ${ft(it.d)} long and ${ft(it.h || 0)} tall: bigger than any known effigy (Serpent Mound, the longest, is about 1,350 ft and 3-5 ft tall). Probably a ridge or a whole group traced by mistake.`);
+            else if (it.d > 200) add(it, 'too-long', `Recorded ${ft(it.d)} long. Only a few effigies are that long (most are 80-300 ft; Man Mound is 214 ft), so check the outline didn't take in its surroundings.`);
+        }
+        // across kinds: the same spot confirmed twice as different kinds,
+        // or confirmed as one and marked "Not real" as another
+        const kp = items.filter(i => i.pos && i.rk.list === 'examples');
+        for (const it of kp) {
+            const other = kp.filter(o => o.mode !== it.mode && o.ts < it.ts);
+            const near = nearest(it, other, 15);
+            if (near) add(it, 'two-kinds', `Also confirmed as ${near.o.mode === 'effigy' ? 'an effigy' : 'a ' + word[near.o.mode]} ${ft(near.dist)} away (${dt(near.o.ts)}). Each scan learns from its own kind, so keep the one it really is (Edit &rarr; Kind) and remove the other.`);
+            const nr = nearest(it, items.filter(o => !o.pos && o.mode !== it.mode && o.rk.list === 'rejected'), 10);
+            if (nr) add(it, 'kind-mixed', `Marked "Not real" as ${nr.o.mode === 'effigy' ? 'an effigy' : 'a ' + word[nr.o.mode]} ${ft(nr.dist)} away (${dt(nr.o.ts)}). That can be right (a round mound is not an effigy), but if you meant the same feature, one of the two is wrong.`);
+        }
+        // the same "Not real" mark twice (harmless, but counted twice)
+        for (const m of KIND_MODES) {
+            const rs = items.filter(i => i.mode === m && i.rk.list === 'rejected').sort((a, b) => a.ts - b.ts);
+            for (let i = 0; i < rs.length; i++) for (let j = 0; j < i; j++) {
+                const d = dist(rs[i], rs[j]);
+                if (d < 2) { add(rs[i], 'nr-duplicate', `Another "Not real" mark ${ft(d)} away (${dt(rs[j].ts)}): the same spot marked twice, so it counts double in training. Remove one.`); break; }
+            }
         }
         // the network's opinion, from the last check that used it
-        if (tcDLScores) for (const it of items) {
-            const s = tcDLScores.get(it.dk);
-            if (!s || s.pos !== it.pos) continue;
-            if (it.pos && s.p < 0.3 && !(it.d > DL.MAX_POS_D)) add(it, 'dl-pos', `The network scores it only ${Math.round(s.p * 100)}% a mound. Check the point is on the mound and that it really is one.`);
-            if (!it.pos && s.p >= 0.9) add(it, 'dl-neg', `The network scores it ${Math.round(s.p * 100)}% a mound although you marked it not real. If it really is a mound, Edit it to "Real".`);
+        if (tcDLScores) {
+            const lowPos = [], highNeg = [];
+            for (const it of mounds) {
+                const s = tcDLScores.get(it.dk);
+                if (!s || s.pos !== it.pos) continue;
+                if (it.pos && s.p < 0.3 && !(it.d > DL.MAX_POS_D)) { add(it, 'dl-pos', `The network scores it only ${Math.round(s.p * 100)}% a mound. Check the point is on the mound and that it really is one.`); lowPos.push({ it, p: s.p }); }
+                if (!it.pos && s.p >= 0.9) { add(it, 'dl-neg', `The network scores it ${Math.round(s.p * 100)}% a mound although you marked it not real. If it really is a mound, Edit it to "Real".`); highNeg.push({ it, p: s.p }); }
+            }
+            // a doubted mound close to a "Not real" mark that looks like one:
+            // the two answers may have been given the wrong way round
+            for (const a of lowPos) {
+                let best = null;
+                for (const b of highNeg) { const d = dist(a.it, b.it); if (d < 100 && (!best || d < best.d)) best = { b, d }; }
+                if (best) add(a.it, 'swapped', `The network scores this confirmed mound ${Math.round(a.p * 100)}%, but a "Not real" mark ${ft(best.d)} away (${dt(best.b.it.ts)}) ${Math.round(best.b.p * 100)}%. The Real and Not real answers may have been given the wrong way round (or the mound's point sits on the wrong rise): Go to both and check.`);
+            }
         }
         return issues.sort((a, b) => (b.severe - a.severe) || (b.it.ts - a.it.ts));
         });
@@ -5031,7 +5109,7 @@
     // The network's score for every training item that has a sample
     async function tcScoreWithNetwork(tf, model) {
         const N = DL.INPUT, CH = DL.CH, sz = N * N * CH, c0 = (DL.PATCH - N) / 2;
-        const list = tcItems().map(it => ({ it, p: dlSampleFor({ key: it.dk }) })).filter(x => x.p && approxMetersBetween(x.p.lat, x.p.lon, x.it.lat, x.it.lon) < 2);
+        const list = tcItems().filter(it => it.mode === 'mounds').map(it => ({ it, p: dlSampleFor({ key: it.dk }) })).filter(x => x.p && approxMetersBetween(x.p.lat, x.p.lon, x.it.lat, x.it.lon) < 2);
         const scores = new Map(), B = 32;
         for (let i = 0; i < list.length; i += B) {
             const grp = list.slice(i, i + B), xs = new Float32Array(grp.length * 8 * sz);
@@ -5086,7 +5164,7 @@
             <div style="font-size:0.78rem;color:#475569;margin:3px 0 6px;">${x.text}</div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
               <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dbeafe;color:#1e3a8a;" onclick="tcGo(${i})">&#9998; Go to &amp; edit</button>
-              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dcfce7;color:#166534;" onclick="tcAccurate(${i})">&#10003; It's accurate</button>
+              ${TC_NO_ACCURATE.has(x.code) ? '' : `<button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dcfce7;color:#166534;" onclick="tcAccurate(${i})">&#10003; It's accurate</button>`}
               <button style="width:auto;margin:0 0 0 auto;padding:4px 10px;font-size:0.78rem;background:#fee2e2;color:#991b1b;" onclick="tcRemove(${i})">Remove</button></div></div>`;
         const severe = issues.filter(x => x.severe).length;
         el.innerHTML = `<div style="background:#fff;border-radius:10px;max-width:600px;width:100%;max-height:88vh;overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.35);font:13px sans-serif;color:#1e293b;">
@@ -5097,12 +5175,12 @@
             <div style="padding:8px 12px;font-size:0.74rem;color:#64748b;background:#f8fafc;border-bottom:1px solid #e2e8f0;">
               ${severe ? `<b style="color:#991b1b;">${severe} probably wrong</b>, ` : ''}${issues.length - severe} worth a look. <b>Go to &amp; edit</b> takes you to the item with its editor open; <b>It's accurate</b> means you've checked it and it stays as it is (it won't be raised again unless you change it).
               ${window.__tcNote ? '<br>' + escapeHtml(window.__tcNote) : ''}</div>
-            ${issues.length ? issues.map(row).join('') : '<div style="padding:16px;color:#166534;">&#10003; No issues found in your mound training data.</div>'}</div>`;
+            ${issues.length ? issues.map(row).join('') : '<div style="padding:16px;color:#166534;">&#10003; No issues found in your mound, effigy and shell-midden training data.</div>'}</div>`;
         tcUpdateBadge(issues);
     }
     function tcFresh(x) { return tcItems().find(i => i.dk === x.it.dk) || null; }
     function tcAccurate(i) {
-        const x = (window.__tcIssues || [])[i]; if (!x) return;
+        const x = (window.__tcIssues || [])[i]; if (!x || TC_NO_ACCURATE.has(x.code)) return;
         const it = tcFresh(x); if (!it) return renderTrainingCheck();
         applyTrainingEdit(it.rk, ({ item }) => {
             const sig = tcSig(it), v = item.verified && item.verified.sig === sig ? item.verified : { sig, codes: [] };
@@ -5143,7 +5221,7 @@
         }
         bar.innerHTML = `<div style="margin-bottom:6px;"><b>${TC_TITLE[x.code]}:</b> ${x.text}</div>
             <div style="display:flex;gap:8px;flex-wrap:wrap;">
-              <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dcfce7;color:#166534;" onclick="tcAccurate(${i})">&#10003; It's accurate</button>
+              ${TC_NO_ACCURATE.has(x.code) ? '' : `<button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;background:#dcfce7;color:#166534;" onclick="tcAccurate(${i})">&#10003; It's accurate</button>`}
               <button style="width:auto;margin:0;padding:4px 10px;font-size:0.78rem;" onclick="document.getElementById('tcBar').remove(); renderTrainingCheck();">&#8592; Back to the list</button>
               <span style="font-size:0.72rem;color:#64748b;align-self:center;">Or change it in the editor (Save), then go back.</span></div>`;
     }

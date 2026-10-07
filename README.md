@@ -169,17 +169,32 @@ Every edit is one Undo step. Confirmed mounds on the map, the look-alike avoidan
 
 **Checking training data for issues.** A wrong record, such as a hill saved as a mound, a mound counted twice or a "Not real" mark tapped by mistake, quietly misleads the scans and the network. The Training Data panel shows **⚠ N possible issues… Review** whenever any are found. **Check training data for issues** (also in the Deep Learning section) lists them.
 
-Rule checks always run:
+Rule checks always run. For mounds:
 
+- **A whole site, not one mound:** more than 600 m across, or a roundness under 0.05 (a mound is about 0.5–1). The record traced a whole site or a stretch of landscape. This is raised even if an earlier size issue was marked "It's accurate", and it has no "It's accurate" button: remove it or edit it to one mound's size.
 - **Size no mound has:** more than 350 m across or 32 m tall. Monks Mound, the largest, is about 30 m tall and 290 m long.
 - **No size recorded.**
 - **Impossibly steep:** taller than half its width.
 - **Very low** (under 15 cm) or **very small** (under 3 m across).
+- **On a steep slope:** the ground under it slopes more than 12°. It may be a hillside bump; mark it accurate if it really is a mound on a bluff edge.
 - **Terrain doesn't match:** the terrain sample under the point rises less than a third of the recorded height, so the point may be off the mound.
-- **Confirmed twice:** two confirmations within 5 m.
-- **Contradicts a "Not real" mark:** a confirmed mound within 20 m of a "Not real" mark. Scans skip anything that close to such a mark, so the mound would be hidden.
+- **Confirmed twice:** two confirmations within 5 m, or within 30% of the smaller one's width for big mounds (up to 30 m).
+- **Contradicts a "Not real" mark:** a confirmed mound within 20 m of a "Not real" mark. Scans skip anything that close to such a mark, so the mound would be hidden. A look-alike outline within 20 m of a confirmed mound is raised too.
 
-When a deep-learning model is trained, its opinion is added: confirmed mounds it scores under 30%, and "Not real" marks it scores 90% or more. Its scores are saved with the model, so the panel's count includes them.
+For effigies and shell middens:
+
+- **Confirmed twice:** within 10 m.
+- **Contradicts a "Not real" mark:** a confirmed one within 30 m of a "Not real" mark of the same kind.
+- **Size no mound has:** an effigy over 450 m long or over 4 m tall. Serpent Mound, the longest, is about 410 m.
+- **Longer than known effigies:** 200–450 m long. Most are 25–90 m.
+
+Across kinds:
+
+- **Confirmed as two kinds:** the same spot (within 15 m) confirmed as, say, a mound and an effigy. Keep the one it really is (Edit → Kind).
+- **Real as one kind, "Not real" as another:** within 10 m. That can be right (a round mound is not an effigy), so it is only worth a look.
+- **"Not real" marked twice:** two "Not real" marks of the same kind within 2 m.
+
+When a deep-learning model is trained, its opinion is added: confirmed mounds it scores under 30%, and "Not real" marks it scores 90% or more. When one of each is within 100 m of the other, **Labels may be swapped** is raised: the Real and Not real answers may have gone the wrong way round. Its scores are saved with the model, so the panel's count includes them.
 
 Each issue has three buttons:
 
