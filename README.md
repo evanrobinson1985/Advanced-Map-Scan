@@ -52,7 +52,14 @@ A summary lists what was detected and every value set, and all sliders stay adju
 - **The next area, ahead of you.** Whenever the ground within a quarter of an area's size around you isn't covered yet, the next view-sized area is downloaded and scanned. It is shifted towards the uncovered side, so it's ready before you get there. One area is done at a time.
 - **Edges.** Each area is downloaded with a 120 m margin, so a feature on its edge is seen whole; the deep-learning scan's windows reach 60 m past the area for the same reason.
 - **Overlap.** Where areas overlap, a result already found isn't added again. Results of the same kind from a scan before the trip, on an area's new ground, are replaced by the new ones, as a rescan would.
-- **Scan with** chooses the scan: the scan mode selected in the panel, deep learning (the selected model), both, or Scan All (every mode, slower). Settlement likelihood is a heat map for one area, so it isn't scanned as you go.
+- **Scan with** chooses the scans. The regular scans always run first and their results go on the map at once; then the deep-learning scan (the selected model) runs. It ranks first the spots the regular scan also found. The status shows *step 1 of 2* and *step 2 of 2*. The options are:
+  - **Selected scan mode, then deep learning** (the default);
+  - **Scan All (every mode), then deep learning**;
+  - the selected scan mode only;
+  - Scan All only;
+  - deep learning only.
+
+  Without a trained model the deep-learning step is skipped, with a note. Settlement likelihood is a heat map for one area, so it isn't scanned as you go.
 - **Results stay.** A new download normally clears the map, but here the results from earlier areas are kept and stay on the map, with Yes / Not real working as usual.
 - **On the map,** areas are drawn green when scanned, orange while in progress, and grey dashed where no LiDAR could be downloaded.
 - **Ending a trip.** Turning it off (or Stop following my location) finishes the area under way and adds the whole trip to the scan history as one entry.

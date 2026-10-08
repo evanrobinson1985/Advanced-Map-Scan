@@ -105,7 +105,7 @@
         <h4>Scan as you go</h4>
         <label style="display:flex; gap:6px; align-items:center; font-size:0.85rem;"><input type="checkbox" id="sagOn" onchange="sagToggle(this.checked)"> Download and scan the map around you as you move</label>
         <div class="slider-row" style="margin:6px 0 0;"><label style="font-size:0.8rem; flex:1;">Scan with</label>
-            <select id="sagWhat" style="flex:2;"><option value="regular">The selected scan mode</option><option value="dl">Deep learning (selected model)</option><option value="both">Both</option><option value="all">Scan All (every mode, slower)</option></select></div>
+            <select id="sagWhat" style="flex:2;"><option value="both" selected>Selected scan mode, then deep learning</option><option value="allboth">Scan All (every mode), then deep learning</option><option value="regular">Selected scan mode only</option><option value="all">Scan All only</option><option value="dl">Deep learning only</option></select></div>
         <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Uses My location, and the map follows you. The whole map view around you is downloaded and scanned (at least 1 km, at most 14 km&sup2; so it stays at full 1 m detail); as you near the edge of the scanned ground, the next view-sized area ahead of you is. Earlier areas' results stay on the map. Areas show green when scanned, orange while in progress. Uses mobile data: roughly 4 MB per km&sup2;.</div>
         <div id="sagStatus" style="font-size:0.75rem; color:#075985; margin-top:4px; line-height:1.4;"></div>
     </div>
@@ -1141,7 +1141,7 @@
     // trip to the scan history.
     const SAG_MARGIN_M = 120;
     const sag = { on: false, busy: false, areas: [], cur: null, layer: null, retry: null, added: new Set(), modes: new Set() };
-    function sagWhat() { return (document.getElementById('sagWhat') || { value: 'regular' }).value; }
+    function sagWhat() { return (document.getElementById('sagWhat') || { value: 'both' }).value; }
     function sagSet(msg) { const el = document.getElementById('sagStatus'); if (el) el.innerText = msg; }
     const inRect = (r, lat, lon, inset = 0) => {
         const iLat = inset / 111320, iLon = inset / (111320 * Math.cos(lat * Math.PI / 180));
@@ -1237,7 +1237,11 @@
             // the automatic settings for the new area run first (when that option is on)
             await new Promise(r => setTimeout(r, 120));
             if (autoTuneRunning) { say('detecting settings for this area...'); await autoTuneRunning; }
+            // the regular scans always go first, then the deep-learning scan,
+            // which ranks first the spots the regular scans also found
             const what = sagWhat();
+            const doRegular = what !== 'dl', doDL = what === 'dl' || what === 'both' || what === 'allboth';
+            const steps = (doRegular ? 1 : 0) + (doDL ? 1 : 0);
             // this area's own ground: inside it, and not already covered by an
             // earlier area (well inside one: right at an earlier area's edge a
             // feature may have been cut off, so it may be found whole again)
@@ -1256,9 +1260,9 @@
                 for (const f of drop) removeFeatureLayers(f);
                 if (drop.length) detectedFeatures = detectedFeatures.filter(f => !drop.includes(f));
             };
-            if (what !== 'dl') {
+            if (doRegular) {
                 const mode0 = scanModeEl.value;
-                const modes = what === 'all' ? SCAN_ALL_ORDER.filter(m => m !== 'settlement') : [mode0];
+                const modes = what === 'all' || what === 'allboth' ? SCAN_ALL_ORDER.filter(m => m !== 'settlement') : [mode0];
                 if (modes[0] === 'settlement') note = ' Settlement likelihood is a heat map for one area, so it is not scanned as you go: choose another scan mode.';
                 else if (!checkDTMResolution()) note = ' The terrain here is coarser than 1 m, so the regular scan was skipped (see the status line).';
                 else {
@@ -1267,7 +1271,7 @@
                     try {
                         await runInSections(scanSections(false), async () => {
                             for (let k = 0; k < modes.length; k++) {
-                                say(`scanning${modes.length > 1 ? ` (${k + 1} of ${modes.length}: ${MODE_STYLE[modes[k]].label})` : ''}...`);
+                                say(`${steps > 1 ? 'step 1 of 2, ' : ''}regular scan${modes.length > 1 ? ` (${k + 1} of ${modes.length}: ${MODE_STYLE[modes[k]].label})` : ` (${MODE_STYLE[modes[k]].label})`}...`);
                                 if (modes.length > 1) { scanModeEl.value = modes[k]; onScanModeChange(); }
                                 await runScannerOnGrid();
                             }
@@ -1278,12 +1282,15 @@
                     }
                     settle(modes, b0);
                     for (const m of modes) sag.modes.add(m);
+                    // the regular results are on the map while the network runs
+                    updateDetectionLegend(); updateExportButtons();
                 }
             }
-            if (what === 'dl' || what === 'both') {
+            if (doDL) {
                 if (!dlPrefs().model || dlModelOutdated()) note += ' No trained deep-learning model is selected, so the deep-learning scan was skipped.';
                 else {
-                    say('deep-learning scan...');
+                    const nReg = detectedFeatures.filter(f => !kept.has(f) && f.mode !== 'settlement').length;
+                    say(`${steps > 1 ? `step 2 of 2, deep-learning scan (the regular scan found ${nReg})` : 'deep-learning scan'}...`);
                     const b0 = new Set(detectedFeatures);
                     // the network's windows reach 60 m past the area, so a mound near its
                     // edge is scored whole; only peaks inside it are kept
