@@ -1219,7 +1219,9 @@
     async function sagRunArea(A) {
         sag.busy = true; sag.cur = A; sagDraw();
         const status = document.getElementById('status'), areaNo = sag.areas.length + 1;
-        const say = (m) => { sagSet(`Area ${areaNo}: ${m}`); };
+        const say = (m) => { sagSet(`Area ${areaNo}: ${m}`); progSet('sag', { text: m.charAt(0).toUpperCase() + m.slice(1) }); };
+        progBegin('sag', `Scan as you go · area ${areaNo}`, { cancel: () => { const cb = document.getElementById('sagOn'); if (cb) cb.checked = false; sagToggle(false); } });
+        progSet('sag', { frac: 0 });
         const prev = sag.areas.filter(a => !a.failed).map(a => a.r);
         // everything on the map now stays (a download clears the map)
         const kept = new Set(detectedFeatures.filter(f => f.mode !== 'settlement'));
@@ -1233,6 +1235,7 @@
             window.__dlBoundsOverride = bnd;
             try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
             sagRestore(kept);
+            progSet('sag', { frac: 0.25 });
             if (!fullDemGrid || fullDemGrid === before) { sag.areas.push({ r: A, failed: true, n: 0 }); say('no LiDAR terrain could be downloaded here; moving on.'); return; }
             // the automatic settings for the new area run first (when that option is on)
             await new Promise(r => setTimeout(r, 120));
@@ -1282,6 +1285,7 @@
                     }
                     settle(modes, b0);
                     for (const m of modes) sag.modes.add(m);
+                    progSet('sag', { frac: doDL ? 0.55 : 1 });
                     // the regular results are on the map while the network runs
                     updateDetectionLegend(); updateExportButtons();
                 }
@@ -1315,6 +1319,7 @@
             say('failed: ' + (e.message || e));
         } finally {
             sag.busy = false; sag.cur = null; sagDraw();
+            progEnd('sag');
         }
     }
     // ---- Send to watch ----
@@ -1712,6 +1717,90 @@
         return (c1 - c0 < 8 || r1 - r0 < 8) ? null : { r0, r1, c0, c1 };
     }
 
+    // ---- Progress card ----
+    // A card on the map (so it shows with the panel folded away) with a
+    // line for each job running, outermost first: e.g. Scan as you go, area
+    // 2 > Downloading terrain, or > Mound scan, section 1 of 2 > measuring.
+    // Each line has a bar (the share done, where it can be measured; a moving
+    // stripe where it can't), the time taken and the time left, and what it
+    // is doing now (the status line's latest message). A Stop button stops
+    // the outermost job that can be stopped. Jobs call progBegin(key, title,
+    // {cancel}), progSet(key, {frac, text}) and progEnd(key).
+    const progLevels = [];
+    let progRaf = 0, progStatusText = '', progLastEnd = 0;
+    function progBegin(key, title, opts) {
+        const old = progLevels.findIndex(l => l.key === key);
+        if (old >= 0) progLevels.splice(old, 1);
+        progLevels.push({ key, title, frac: null, text: '', ownText: false, t0: Date.now(), cancel: (opts && opts.cancel) || null });
+        progRender();
+    }
+    function progSet(key, patch) {
+        const l = progLevels.find(x => x.key === key); if (!l) return;
+        if (patch.text != null) l.ownText = true;
+        if (patch.frac != null) l.frac = Math.max(0, Math.min(1, patch.frac));
+        Object.assign(l, patch.frac != null ? { ...patch, frac: l.frac } : patch);
+        progRenderSoon();
+    }
+    function progEnd(key) {
+        const i = progLevels.findIndex(l => l.key === key);
+        if (i >= 0) { progLevels.splice(i, 1); progLastEnd = Date.now(); progRender(); }
+    }
+    function progRenderSoon() { if (!progRaf) progRaf = requestAnimationFrame(() => { progRaf = 0; progRender(); }); }
+    const progTime = (ms) => { const s = Math.max(0, Math.round(ms / 1000)); return s < 60 ? `${s} s` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+    function progRender() {
+        let card = document.getElementById('progCard');
+        if (!progLevels.length) { if (card) card.style.display = 'none'; return; }
+        if (!card) {
+            card = document.createElement('div'); card.id = 'progCard';
+            card.style.cssText = 'position:absolute;z-index:1002;left:50%;transform:translateX(-50%);bottom:30px;width:440px;max-width:calc(100% - 16px);box-sizing:border-box;' +
+                'background:#fff;border-radius:10px;box-shadow:0 3px 14px rgba(0,0,0,0.35);padding:8px 10px;font:12px sans-serif;color:#1e293b;';
+            L.DomEvent.disableClickPropagation(card); L.DomEvent.disableScrollPropagation(card);
+            map.getContainer().appendChild(card);
+            if (!document.getElementById('progStyle')) {
+                const st = document.createElement('style'); st.id = 'progStyle';
+                st.textContent = '@keyframes progStripe{from{background-position:0 0}to{background-position:40px 0}}' +
+                    '.prog-indet{background-image:linear-gradient(135deg,rgba(255,255,255,.45) 25%,transparent 25%,transparent 50%,rgba(255,255,255,.45) 50%,rgba(255,255,255,.45) 75%,transparent 75%);background-size:40px 40px;animation:progStripe .8s linear infinite;}';
+                document.head.appendChild(st);
+            }
+        }
+        card.style.display = 'block';
+        // just above the settings panel (bottom centre), wherever its top is now
+        const panel = document.getElementById('ui-panel'), mc = map.getContainer().getBoundingClientRect();
+        const pTop = panel ? panel.getBoundingClientRect().top : mc.bottom - 20;
+        card.style.bottom = Math.max(30, Math.min(mc.bottom - pTop + 8, mc.height - 160)) + 'px';
+        const now = Date.now(), inner = progLevels[progLevels.length - 1];
+        const stopper = progLevels.find(l => l.cancel);
+        const colors = ['#2563eb', '#7c3aed', '#0891b2', '#16a34a'];
+        const rows = progLevels.map((l, i) => {
+            const el = now - l.t0, f = l.frac;
+            let left = '';
+            if (f != null && f >= 0.03 && f < 1 && el > 3000) left = ` · about ${progTime(el * (1 - f) / f)} left`;
+            const text = l.ownText ? l.text : (l === inner ? progStatusText : '');
+            return `<div style="margin-top:${i ? 6 : 0}px;${i ? 'padding-left:' + Math.min(3, i) * 8 + 'px;' : ''}">
+                <div style="display:flex;gap:6px;align-items:baseline;"><b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(l.title)}</b>
+                  <span style="color:#475569;white-space:nowrap;">${f != null ? Math.floor(f * 100) + '% · ' : ''}${progTime(el)}${left}</span></div>
+                <div style="height:${i ? 5 : 7}px;background:#e2e8f0;border-radius:4px;overflow:hidden;margin-top:3px;">
+                  <div class="${f == null ? 'prog-indet' : ''}" style="height:100%;width:${f == null ? 100 : Math.max(2, f * 100)}%;background-color:${colors[i % colors.length]};${f == null ? 'opacity:.55;' : 'transition:width .25s;'}"></div></div>
+                ${text ? `<div style="color:#475569;margin-top:2px;font-size:11px;line-height:1.3;max-height:2.6em;overflow:hidden;">${escapeHtml(text)}</div>` : ''}</div>`;
+        }).join('');
+        const nRes = detectedFeatures.filter(f => f.mode !== 'settlement' && f.lat != null).length;
+        card.innerHTML = rows + `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11px;color:#64748b;">
+            <span style="flex:1;">${nRes} result${nRes === 1 ? '' : 's'} on the map</span>
+            ${stopper ? `<button id="progStopBtn" style="width:auto;margin:0;padding:3px 10px;font-size:0.75rem;background:#fee2e2;color:#991b1b;">&#9632; Stop ${escapeHtml(stopper.title.split(/[·(:]/)[0].trim().toLowerCase())}</button>` : ''}</div>`;
+        const b = document.getElementById('progStopBtn');
+        if (b && stopper) b.onclick = () => { b.disabled = true; b.innerText = 'Stopping...'; try { stopper.cancel(); } catch (e) { console.warn(e); } };
+    }
+    // the time ticks on, and the latest status message shows on the innermost line
+    setInterval(() => { if (progLevels.length) progRenderSoon(); }, 1000);
+    {
+        const watchText = (id) => {
+            const el = document.getElementById(id); if (!el) return;
+            new MutationObserver(() => { progStatusText = (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 220); if (progLevels.length) progRenderSoon(); })
+                .observe(el, { childList: true, characterData: true, subtree: true });
+        };
+        watchText('status'); watchText('dlStatus');
+    }
+
     // ---- Keeping the map smooth during scans ----
     // A scan runs on the page's one thread, so a long stretch of work
     // freezes panning and zooming. Long loops call uiYield(): once ~25 ms
@@ -1917,7 +2006,10 @@ onmessage = (e) => {
             return r >= c.r0 && r < c.r1 && cc >= c.c0 && cc < c.c1;
         };
         let done = 0;
+        progBegin('sections', `${secs.length} sections, ${km2.toFixed(1)} km² in all`);
+        try {
         for (let i = 0; i < secs.length && !(stop && stop()); i++) {
+            progSet('sections', { frac: i / secs.length, title: `Section ${i + 1} of ${secs.length} (${km2.toFixed(1)} km² in all)` });
             const sec = secs[i], before = new Set(detectedFeatures), beforeOv = new Set(last3DOverlays);
             await withStatusPrefix(`Section ${i + 1} of ${secs.length} (${km2.toFixed(1)} km² in all): `, () => withGrid(cropGrid(g, sec.r0, sec.c0, sec.r1, sec.c1), fn));
             done++;
@@ -1935,6 +2027,7 @@ onmessage = (e) => {
             for (const o of last3DOverlays) if (!beforeOv.has(o)) oursOv.add(o);
             await new Promise(r => setTimeout(r, 0));
         }
+        } finally { progEnd('sections'); }
         updateDetectionLegend();
         if (typeof updateExportButtons === 'function') updateExportButtons();
         return { done, ours };
@@ -2765,6 +2858,8 @@ onmessage = (e) => {
             jobs.push({ r0, c0, h: Math.min(DL_TILE_PX, H - r0), w: Math.min(DL_TILE_PX, W - c0) });
         const total = jobs.length;
         let done = 0;
+        progBegin('download', `Downloading terrain (${(plan.px / 1e6).toFixed(1)} Mpx at ${plan.res.toFixed(2)} m)`, { cancel: () => ctrl.abort() });
+        progSet('download', { frac: 0 });
         status.innerText = `Downloading ${total} tile(s) at ${plan.res.toFixed(2)} m/px...`;
         const worker = async () => {
             while (jobs.length) {
@@ -2773,6 +2868,7 @@ onmessage = (e) => {
                 done++;
                 bar.style.width = (100 * done / total).toFixed(1) + '%';
                 status.innerText = `Downloading tiles: ${done} / ${total} (${plan.res.toFixed(2)} m/px, ${(plan.px / 1e6).toFixed(1)} Mpx)...`;
+                progSet('download', { frac: done / total });
             }
         };
         try {
@@ -2789,6 +2885,7 @@ onmessage = (e) => {
             if (err.name !== 'AbortError') console.error(err);
         } finally {
             downloadAbort = null;
+            progEnd('download');
             downloadBtn.disabled = false;
             document.getElementById('dlProgressWrap').style.display = 'none';
         }
@@ -5989,6 +6086,8 @@ onmessage = (e) => {
     // The network's part of a scan for one area (lat/lon box inside grid g):
     // every window scored, peaks found and each scored again 8 ways; the
     // peaks at or above the confidence setting, or null when stopped
+    // progress of the deep-learning scan: f is the share of the current section done
+    function dlProgress(f) { const sc = window.__dlSec || { si: 0, n: 1 }; progSet('dlscan', { frac: (sc.si + f) / sc.n }); }
     // The network's scores for a batch, read back asynchronously
     async function dlPredict(tf, model, data, shape) {
         const x = tf.tensor4d(data, shape), y = model.predict(x);
@@ -6034,6 +6133,7 @@ onmessage = (e) => {
                 if (nb === BATCH) await flush();
                 else { const y = uiYield(); if (y) await y; }
             }
+            if (gi % 4 === 3) dlProgress(0.8 * (gi + 1) / GH);
             if (gi % 4 === 3) { dlSetStatus(label + `Scanning: ${Math.round(100 * (gi + 1) / GH)}% (${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}...`); await dlTick(); }
         }
         await flush();
@@ -6064,6 +6164,7 @@ onmessage = (e) => {
         dlSetStatus(label + `Double-checking ${peaks.length} possible candidates 8 ways...`); await dlTick();
         const raw = new Float32Array(N * N), per = Math.floor(BATCH / 8);
         for (let i0 = 0; i0 < peaks.length && !dlCancel; i0 += per) {
+            dlProgress(0.8 + 0.2 * i0 / peaks.length);
             const grp = peaks.slice(i0, i0 + per);
             grp.forEach((pk, i) => {
                 const off0 = pk.gi * st * RW + pk.gj * st;
@@ -6105,6 +6206,8 @@ onmessage = (e) => {
         if (scanInProgress) { dlSetStatus('Wait for the current scan to finish.'); return; }
         dlSetBusy(true);
         const status = document.getElementById('status');
+        progBegin('dlscan', `Deep-learning scan (${DL.label})`, { cancel: () => { dlCancel = true; } });
+        window.__dlSec = { si: 0, n: 1 };
         try {
             dlSetStatus('Loading TensorFlow.js...');
             const tf = await loadTF();
@@ -6259,6 +6362,7 @@ onmessage = (e) => {
             for (let si = 0; si < sections.length; si++) {
                 const sec = sections[si], c = sec.core;
                 const label = sections.length > 1 ? `Section ${si + 1} of ${sections.length} (${km2.toFixed(1)} km² in all): ` : '';
+                window.__dlSec = { si, n: sections.length };
                 const got = await dlScanArea(tf, model, g, sec.area, label, sections.length > 1 ? mLon : null);
                 if (got === null || dlCancel) {
                     if (si > 0) { const sh = showResults(); dlSetStatus(`Scan stopped after ${si} of ${sections.length} sections: ${sh.list.length} candidate${sh.list.length === 1 ? '' : 's'} from the finished sections are on the map.`); }
@@ -6309,7 +6413,7 @@ onmessage = (e) => {
         } catch (e) {
             console.error(e);
             dlSetStatus('Deep-learning scan failed: ' + (e.message || e));
-        } finally { dlSetBusy(false); }
+        } finally { dlSetBusy(false); progEnd('dlscan'); }
     }
     // Height, size and shape at a candidate, from the mound measurer, or null
     // when there is no closed high there to measure
@@ -12285,6 +12389,8 @@ onmessage = (e) => {
         const cancelBtn = document.getElementById('scanAllCancelBtn');
         const originalMode = scanModeEl.value;
         scanInProgress = true; scanAllActive = true; scanAllCancel = false;
+        progBegin('scanall', `Scan All (${order.length} modes)`, { cancel: () => { scanAllCancel = true; } });
+        progSet('scanall', { frac: 0 });
         btns.forEach(b => b.disabled = true);
         cancelBtn.disabled = false; cancelBtn.innerText = 'Stop Scan All';
         wrap.style.display = 'block'; bar.style.width = '0%';
@@ -12299,10 +12405,12 @@ onmessage = (e) => {
                 for (let idx = 0; idx < order.length && !scanAllCancel; idx++) {
                     const m = order[idx];
                     ptext.innerText = `Scan All: ${secs.length > 1 ? `section ${secNo} of ${secs.length}, ` : ''}${idx + 1} of ${order.length} - ${MODE_STYLE[m].label}...`;
+                    progSet('scanall', { title: `Scan All: mode ${idx + 1} of ${order.length}${secs.length > 1 ? `, section ${secNo} of ${secs.length}` : ''}` });
                     scanModeEl.value = m;
                     onScanModeChange(); // loads this mode's thresholds into the sliders
                     await runScannerOnGrid();
                     bar.style.width = (100 * ((secNo - 1) * order.length + idx + 1) / (secs.length * order.length)).toFixed(0) + '%';
+                    progSet('scanall', { frac: ((secNo - 1) * order.length + idx + 1) / (secs.length * order.length) });
                 }
             }, () => scanAllCancel)).done;
             for (const m of order) counts.push([m, detectedFeatures.filter(f => f.mode === m && !before0.has(f)).length]);
@@ -12311,6 +12419,7 @@ onmessage = (e) => {
             status.innerText = `Scan All stopped by an error during ${MODE_STYLE[scanModeEl.value] ? MODE_STYLE[scanModeEl.value].label : 'a scan'}: ${err.message || err}`;
         } finally {
             scanAllActive = false; scanInProgress = false;
+            progEnd('scanall');
             scanModeEl.value = originalMode;
             onScanModeChange();
             btns.forEach(b => b.disabled = false);
@@ -12328,6 +12437,11 @@ onmessage = (e) => {
     }
 
     async function runScannerOnGrid() {
+        const m = document.getElementById('scanMode').value;
+        progBegin('stage', `Scanning: ${MODE_STYLE[m] ? MODE_STYLE[m].label : m}`);
+        try { return await runScannerOnGridNow(); } finally { progEnd('stage'); }
+    }
+    async function runScannerOnGridNow() {
         if (!currentDEM) return;
         const mode0 = document.getElementById('scanMode').value;
         if (mode0 === 'settlement') { await runSettlementScan(); return; }
@@ -12429,6 +12543,9 @@ onmessage = (e) => {
             if (!trendCache.has(r30)) trendCache.set(r30, await trendOff(r30));
             const fineSlope = trendCache.get(r30).slopeDeg;
             let fineHost = null;   // closed highs of the finest normal pass: what a spot looks like close up
+            // progress: the size passes are 85% of the work, the persistence test the rest
+            const progPasses = presetsToRun.reduce((a, p) => a + moundScalesM(p).length * 2, 0);
+            let progPass = 0;
             for (const preset of presetsToRun) for (const scaleM of moundScalesM(preset)) {
                 await tick0(`Mounds (${preset.name}, ${Math.round(scaleM)} m scale): detrending and iMound inverted-DEM fill...`);
                 const trendR = Math.max(2, Math.round(scaleM / effRes));
@@ -12436,6 +12553,7 @@ onmessage = (e) => {
                 const { trend: baseTrend, quad } = trendCache.get(trendR);
                 let hostDiam = null;
                 for (const pass of ['normal', 'spur']) {
+                progSet('stage', { frac: 0.85 * (progPass++) / progPasses });
                 const trend = pass === 'normal' ? baseTrend : quad;
                 const resid = new Float32Array(n);
                 for (let i = 0; i < n; i++) resid[i] = (denoised[i] < nodataThresh || trend[i] < nodataThresh) ? -9999 : denoised[i] - trend[i];
@@ -12523,6 +12641,7 @@ onmessage = (e) => {
                 const k = c.k;
                 if (runs > 0 && persistChecked >= 400) { moundUnchecked = merged.length - merged.indexOf(c); break; } // keeps very large scans responsive
                 { const y = uiYield(); if (y) await y; }
+                progSet('stage', { frac: 0.85 + 0.15 * persistChecked / Math.max(1, Math.min(merged.length, 400)) });
                 if (runs > 0 && persistChecked % 10 === 0) await tick0(`Mounds: stochastic persistence test ${persistChecked + 1}-${Math.min(merged.length, persistChecked + 10)} of ${Math.min(merged.length, 400)}...`);
                 // peak cell of this candidate
                 const rad = Math.ceil(Math.sqrt(k.count / Math.PI) * Math.max(1, k.elongation));
@@ -13144,6 +13263,7 @@ onmessage = (e) => {
         scanInProgress = true;
         btn.disabled = true;
         document.getElementById('scanBtn').disabled = true;
+        progBegin('autotune', 'Detecting the best settings for this area');
         try {
             const g = fullDemGrid, nd = -100, res = g.res;
             const win = g.w * g.h <= SCAN_MAX_PX ? { r0: 0, r1: g.h, c0: 0, c1: g.w } : (visibleWindow(g) || { r0: 0, r1: g.h, c0: 0, c1: g.w });
@@ -13315,7 +13435,7 @@ onmessage = (e) => {
             status.innerText = `Could not auto-detect settings: ${err.message || err}.`;
             console.error(err);
         } finally {
-            scanInProgress = false;
+            scanInProgress = false; progEnd('autotune');
             btn.disabled = false;
             document.getElementById('scanBtn').disabled = false;
         }
