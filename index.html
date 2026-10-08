@@ -5788,6 +5788,11 @@ onmessage = (e) => {
     // The network's part of a scan for one area (lat/lon box inside grid g):
     // every window scored, peaks found and each scored again 8 ways; the
     // peaks at or above the confidence setting, or null when stopped
+    // The network's scores for a batch, read back asynchronously
+    async function dlPredict(tf, model, data, shape) {
+        const x = tf.tensor4d(data, shape), y = model.predict(x);
+        try { return await y.data(); } finally { x.dispose(); y.dispose(); }
+    }
     async function dlScanArea(tf, model, g, area, label, mLonIn) {
         const lat0 = (area.n + area.s) / 2, mLat = 1 / 111320, mLon = mLonIn || 1 / (111320 * Math.cos(lat0 * Math.PI / 180));
         const rnd = mLonIn ? Math.round : Math.floor, RW = rnd((area.e - area.w) / mLon / DL.RES), RH = rnd((area.n - area.s) / mLat / DL.RES);
@@ -5795,17 +5800,22 @@ onmessage = (e) => {
         if (RW < N || RH < N) return [];
         dlSetStatus(label + 'Preparing the terrain...'); await dlTick();
         const sample = dlSampler(g), R = new Float32Array(RW * RH);
-        for (let r = 0; r < RH; r++) for (let c = 0; c < RW; c++) R[r * RW + c] = sample(area.n - (r + 0.5) * DL.RES * mLat, area.w + (c + 0.5) * DL.RES * mLon);
+        for (let r = 0; r < RH; r++) {
+            for (let c = 0; c < RW; c++) R[r * RW + c] = sample(area.n - (r + 0.5) * DL.RES * mLat, area.w + (c + 0.5) * DL.RES * mLon);
+            const y = uiYield(); if (y) await y;
+        }
         const OP = DL.CH >= 6 ? dlOpenness(R, RW, RH, DL.RES, DL_OPEN_R) : null;
         const winP = new Float32Array(DL.INPUT * DL.INPUT), winN = new Float32Array(DL.INPUT * DL.INPUT);
         const st = DL.STRIDE, GW = Math.floor((RW - N) / st) + 1, GH = Math.floor((RH - N) / st) + 1, total = GW * GH;
         const prob = new Float32Array(total);
-        const BATCH = 256, xs = new Float32Array(BATCH * sz), which = new Int32Array(BATCH), win = new Float32Array(N * N);
+        // batches small enough that the map stays smooth, each read back
+        // without waiting on the page (the GPU works meanwhile)
+        const BATCH = 64, xs = new Float32Array(BATCH * sz), which = new Int32Array(BATCH), win = new Float32Array(N * N);
         const t0 = Date.now();
         let k = 0, nb = 0;
         const flush = async () => {
             if (!nb) return;
-            const p = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, nb * sz), [nb, N, N, CH])).dataSync());
+            const p = await dlPredict(tf, model, xs.subarray(0, nb * sz), [nb, N, N, CH]);
             for (let i = 0; i < nb; i++) prob[which[i]] = p[i];
             nb = 0;
         };
@@ -5861,7 +5871,7 @@ onmessage = (e) => {
                     dlFeatures(raw, 0, xs, (i * 8 + t) * sz, OP ? winP : null, OP ? winN : null);
                 }
             });
-            const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs.subarray(0, grp.length * 8 * sz), [grp.length * 8, N, N, CH])).dataSync());
+            const p8 = await dlPredict(tf, model, xs.subarray(0, grp.length * 8 * sz), [grp.length * 8, N, N, CH]);
             grp.forEach((pk, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; pk.p = m / 8; });
             await dlTick();
         }
@@ -5933,6 +5943,7 @@ onmessage = (e) => {
                 peaks.sort((a, b2) => b2.p - a.p);
                 let taken = 0;
                 for (const pk of peaks) {
+                    { const y = uiYield(); if (y) await y; }
                     // peaks closer than PEAK_SEP: the more confident one counts, as in
                     // a single pass. A weaker one kept from an earlier section (across a
                     // seam) is withdrawn with everything it added.
