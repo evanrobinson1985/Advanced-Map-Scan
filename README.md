@@ -37,6 +37,13 @@ Each waypoint also carries its elevation, match score, depth or height, and size
 
 A summary lists what was detected and every value set, and all sliders stay adjustable. Confirmed training examples are re-applied afterwards, so thresholds never exclude a site you've confirmed.
 
+**My location.** The 📍 button beside the map's search box, and **📍 My location** in the panel's Search box, find where you are and load the map there. Your browser asks for permission the first time. The app then:
+
+- marks you with a blue dot and a circle showing how accurate the position is;
+- zooms to the area and downloads the 1 m LiDAR terrain for a 1 km square around you, ready to scan. A rough position (a computer without GPS can be off by a mile or more) gets a bigger square, up to 3 km. If the loaded terrain already covers the spot, nothing is downloaded again.
+
+It needs the page opened over https or as a local file. If access is blocked, allow location for the page in the browser's site settings (and turn on Location Services on a phone). Your position is used only in your browser; it is not sent anywhere except as the area of the terrain download.
+
 **Go to a location.** The search box at the top right of the map (a 🔍 button on a phone) and the Search box in the panel take coordinates or an address. The Search box in the panel works the same way. Coordinates are read in any common form:
 - decimal degrees (`34.9745, -85.8136` or `34.9745 N 85.8136 W`; longitude-first as GIS software writes it also works);
 - degrees-minutes-seconds (`34°58'28"N 85°48'49"W`) and degrees with decimal minutes;

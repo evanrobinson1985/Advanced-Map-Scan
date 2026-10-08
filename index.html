@@ -97,6 +97,7 @@
             <input type="text" id="searchInput" placeholder="Coordinates or address..." style="flex-grow:1; padding:8px; border:1px solid #cbd5e1; border-radius:6px; font-size:0.9rem;" onkeydown="if(event.key==='Enter'){event.preventDefault(); searchLocation();}">
             <button onclick="searchLocation()" style="width:auto; margin-left:6px; padding:8px 14px; margin-top:0;">Go</button>
         </div>
+        <button onclick="locateMe()" title="Find where you are and load the terrain around you" style="margin-top:6px; background:#e0f2fe; color:#075985;">&#128205; My location</button>
         <div id="searchStatus" style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;"></div>
     </div>
 
@@ -914,6 +915,60 @@
             .bindPopup(`${label ? `<b>${escapeHtml(label)}</b><br>` : ''}<span style="font-size:0.78rem;">${formatLatLon(lat, lon)}</span><br>` +
                        `<a href="#" style="font-size:0.75rem;" onclick="event.preventDefault(); map.removeLayer(searchMarker); searchMarker = null;">Remove this pin</a>`).openPopup();
     }
+    // ---- My location ----
+    // Asks the browser where you are (GPS on a phone; Wi-Fi or network on a
+    // computer), shows it as a blue dot with its accuracy circle, and loads
+    // the terrain around it: a 1 km square of LiDAR (more when the position
+    // is rough), unless the loaded terrain already covers the spot
+    const LOCATE_HALF_M = 500;
+    let myLocMarker = null, myLocBusy = false;
+    function locateMe() {
+        const status = document.getElementById('status'), btn = document.getElementById('locMeBtn');
+        const say = (t) => { if (status) status.innerText = t; const ss = document.getElementById('searchStatus'); if (ss) ss.innerText = t; };
+        if (!navigator.geolocation) { say('This browser cannot tell where you are. Search for an address or coordinates instead.'); return; }
+        if (!window.isSecureContext) { say('Finding your location needs the page opened over https (or as a local file). Search for an address or coordinates instead.'); return; }
+        if (myLocBusy) return;
+        myLocBusy = true;
+        if (btn) btn.style.opacity = '0.5';
+        // on a phone, fold the settings panel away so the map is visible
+        if (window.innerWidth < 700 && document.getElementById('panelContent').style.display !== 'none') togglePanel();
+        say('Finding your location... (allow location access if your browser asks)');
+        const done = () => { myLocBusy = false; if (btn) btn.style.opacity = ''; };
+        navigator.geolocation.getCurrentPosition(async (pos) => {
+            try { await showMyLocation(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy, say); }
+            catch (e) { console.warn(e); say('Found your location, but the terrain could not be loaded: ' + (e.message || e)); }
+            finally { done(); }
+        }, (err) => {
+            done();
+            say(err.code === 1 ? 'Location access was blocked. Allow it for this page in your browser\'s site settings (and turn on Location Services on a phone), then press My location again.'
+              : err.code === 3 ? 'Finding your location took too long. Try again, ideally outdoors or with Wi-Fi on.'
+              : 'Your location is not available right now. Check Location Services is on, or search for an address instead.');
+        }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
+    }
+    async function showMyLocation(lat, lon, acc, say) {
+        if (myLocMarker) map.removeLayer(myLocMarker);
+        const ft = metersToFeetInches, rough = acc > 1500;
+        myLocMarker = L.layerGroup([
+            L.circle([lat, lon], { radius: acc, color: '#2563eb', weight: 1, fillColor: '#3b82f6', fillOpacity: 0.1, interactive: false }),
+            L.circleMarker([lat, lon], { radius: 8, color: '#fff', weight: 3, fillColor: '#2563eb', fillOpacity: 1 })
+                .bindPopup(`<b>You are here</b><br><span style="font-size:0.78rem;">${formatLatLon(lat, lon)}<br>Accurate to about ${ft(acc)}</span><br>` +
+                           `<a href="#" style="font-size:0.75rem;" onclick="event.preventDefault(); map.removeLayer(myLocMarker); myLocMarker = null;">Remove this dot</a>`)
+        ]).addTo(map);
+        // a rough fix (a computer without GPS) covers more ground, up to ~3 km
+        const half = Math.min(1500, Math.max(LOCATE_HALF_M, acc));
+        const dLat = half / 111320, dLon = half / (111320 * Math.cos(lat * Math.PI / 180));
+        const bnd = { n: lat + dLat, s: lat - dLat, e: lon + dLon, w: lon - dLon };
+        map.fitBounds([[bnd.s, bnd.w], [bnd.n, bnd.e]], { animate: false, maxZoom: 17 });
+        const where = `Found you at ${lat.toFixed(5)}, ${lon.toFixed(5)} (accurate to about ${ft(acc)})${rough ? ': only a rough position, from your network' : ''}`;
+        if (fullDemGrid && effRes <= 1.05 && dlInGrid(fullDemGrid, lat, lon, Math.min(half, 300))) { say(where + '. The terrain here is already loaded.'); return; }
+        if (downloadAbort || scanInProgress || tourBusy || dlBusy) { say(where + '. Wait for the current download, scan, tour or training to finish, then press Download to load the terrain here.'); return; }
+        say(where + '. Downloading the terrain around you...');
+        const before = fullDemGrid;
+        window.__dlBoundsOverride = bnd;
+        try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
+        map.fitBounds([[bnd.s, bnd.w], [bnd.n, bnd.e]], { animate: false, maxZoom: 17 });
+        if (!fullDemGrid || fullDemGrid === before) say(where + '. No LiDAR terrain could be loaded here (the map is still shown); try Download, or a nearby spot.');
+    }
     async function geocodeAddress(q) {
         const out = [];
         try {
@@ -956,6 +1011,7 @@
               <input id="locSearchInput" type="search" enterkeyhint="search" autocomplete="off" placeholder="Coordinates or address"
                      style="display:${compact ? 'none' : 'block'};width:${compact ? '64vw' : '250px'};border:none;outline:none;padding:7px 8px;font-size:14px;background:transparent;">
               <button id="locSearchBtn" title="Go to coordinates or an address" style="width:auto;margin:0;padding:6px 9px;background:transparent;border:none;font-size:16px;cursor:pointer;">&#128269;</button>
+              <button id="locMeBtn" title="My location: find where you are and load the terrain around you" onclick="locateMe()" style="width:auto;margin:0;padding:6px 9px;background:transparent;border:none;border-left:1px solid #e2e8f0;border-radius:0;font-size:16px;cursor:pointer;">&#128205;</button>
             </div>
             <div id="locSearchResults" style="display:none;max-width:${compact ? '72vw' : '290px'};max-height:40vh;overflow:auto;font-size:12px;"></div>`;
         L.DomEvent.disableClickPropagation(div);
