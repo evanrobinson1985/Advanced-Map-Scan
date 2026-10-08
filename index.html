@@ -1378,6 +1378,21 @@
         walk(d);
         return lines.join('').split('\n').map(s => s.replace(/\s+/g, ' ').trim()).filter(s => s.length > 1 && !/^(Yes|Not real|Confirm|Mark)/i.test(s)).slice(0, 14).map(s => s.length > 160 ? s.slice(0, 157) + '...' : s);
     }
+    // Your own notes on a site, from the training records at that spot: the
+    // name / note given when confirming or outlining it (or in the training
+    // map's editor), a significance mark's notes, a known settlement's evidence
+    function watchUserNotes(f) {
+        const near = (lat, lon, d) => lat != null && approxMetersBetween(lat, lon, f.lat, f.lon) < Math.max(20, 0.6 * (d || 0), 0.6 * (f.diameter || 0));
+        const names = [], lines = [];
+        const add = (arr, t) => { t = (t || '').trim(); if (t && !arr.includes(t)) arr.push(t); };
+        for (const m of [...GEOMETRIC_MODES]) for (const ex of trainingData[m].examples) if (near(ex.lat, ex.lon, ex.diameter)) {
+            add(names, ex.name);
+            if (ex.significance) add(lines, `Marked ${ex.significance.type}${ex.significance.notes ? ': ' + ex.significance.notes : ''}`);
+        }
+        for (const o of trainingData.outlines) if (o.label === 'mound' && o.centroid && near(o.centroid[0], o.centroid[1], o.outline && o.outline.eqDiameterM)) add(names, o.name);
+        for (const ex of trainingData.settlement.examples) if (near(ex.lat, ex.lon, 0)) { add(names, ex.name); if (ex.evidence) add(lines, 'Evidence: ' + ex.evidence); }
+        return { name: names[0] || '', notes: [...names.slice(1), ...lines].map(t => t.length > 160 ? t.slice(0, 157) + '...' : t) };
+    }
     function watchWaypoints(area) {
         const inA = (f) => !area || (f.lat <= area.n && f.lat >= area.s && f.lon <= area.e && f.lon >= area.w);
         const list = detectedFeatures.filter(f => f.mode !== 'settlement' && f.lat != null && f.lon != null && inA(f) && (!f._layers || f._layers.some(l => map.hasLayer(l) || (modeLayers[f.mode] && modeLayers[f.mode].hasLayer(l)))));
@@ -1388,6 +1403,11 @@
             const o = { id: 'w' + i + '_' + Math.round(f.lat * 1e5) + '_' + Math.round(f.lon * 1e5), lat: +f.lat.toFixed(7), lon: +f.lon.toFixed(7), kind: st.label, letter: st.letter, color: st.color,
                         score: f.matchScore != null ? Math.round(f.matchScore) : null, d: f.diameter != null ? +(+f.diameter).toFixed(2) : null,
                         h: k.maxMetric != null ? +(+k.maxMetric).toFixed(2) : null, conf: !!(f.confirmed || f.known || f.dlKnown), notes: watchNotes(f) };
+            // your name / notes for the site: its own field (shown as the title on the watch) and, for
+            // an older watch app, at the top of the notes too
+            const u = watchUserNotes(f);
+            if (u.name) o.name = u.name;
+            if (u.name || u.notes.length) { o.un = u.notes; o.notes = [...(u.name ? ['Note: ' + u.name] : []), ...u.notes.map(t => 'Note: ' + t), ...o.notes]; }
             if (Array.isArray(f.polygon) && f.polygon.length >= 3) {
                 const step = Math.max(1, Math.ceil(f.polygon.length / 60));   // at most ~60 points: plenty for a watch screen
                 o.ol = f.polygon.filter((_, j) => j % step === 0).map(([a, b]) => [+(+a).toFixed(6), +(+b).toFixed(6)]);

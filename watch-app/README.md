@@ -15,9 +15,13 @@ Once the waypoints are on the watch, it works on its own. It needs no phone and 
 - **List** (☰ at the top of the map). **Settings** comes first, then *Receive from phone*, *Filter waypoints* and *History*, then the waypoints, nearest first, with distance, direction and confidence.
 - **Filter waypoints.** A switch for each group of waypoints, for example *Mounds*, *Mounds (deep learning)* or *Effigies*, with how many each holds. Hidden groups leave the map, the list and the "nearest" line. *Show all* brings them back, and the choice is remembered.
 - **History.** Every package received from the phone (its waypoints, hillshade and satellite imagery) is kept, newest first, with when it came and what it holds. The one on the map has a ✓. Tap one to **Load it on the map** or **Delete** it (tap twice to confirm).
-- **Details**. The feature type, distance and bearing from you, confidence, size, height, coordinates, and the notes from the web app's result (shape measures, borrow pits, slope and so on). **➤** guides you to it; **Map** shows it on the map.
+- **Details**. Your own name or note for the site comes first, in amber: what you typed when you confirmed or outlined it in the web app, or in its training map's *Name / note* box. Any significance mark's notes or a known settlement's evidence follow it. A waypoint with a name shows it in the list too. Then come the feature type, distance and bearing from you, confidence, size, height, coordinates, and the notes from the web app's result (shape measures, borrow pits, slope and so on). **➤** guides you to it; **Map** shows it on the map.
 - **Guide**. A large arrow pointing to the waypoint, relative to the way you face, so you just walk where it points. It also shows the distance, and "turn left 40°" or "straight ahead". The arrow turns blue when you're on course, and green with a buzz when you arrive (within 10 m; change this in Settings). The screen stays on while you're guided.
   - Without a compass reading, the direction comes from your GPS course while you walk. If there is neither, the arrow points relative to north, with N marked.
+
+## Settings are remembered
+
+Every setting is kept on the watch and comes back each time the app opens. That covers the basemap, hillshade opacity, map facing, keep screen on, dimming, maps as you go, arrival distance and the waypoint filter. The map's zoom, the waypoint you chose and the package on the map are kept too. The one exception: a newly received package brings the web app's basemap and hillshade opacity with it. You can change them again on the watch, and those changes are then kept.
 
 ## Basemap and hillshade
 
@@ -92,7 +96,7 @@ Open this folder in Android Studio, or run `./gradlew assembleRelease`. You need
 
 ## How the transfer works
 
-- **The package.** `LWP1`, then the JSON's length (4 bytes, big-endian), then the JSON, then the hillshade JPEG and the basemap JPEG, each with its length in the JSON (`img.len`, `base.len`). `base` has `src` (`satellite` or `topo`) and the same edges as `img`. `view` carries the web app's basemap and hillshade opacity (`base`, `hs`). The JSON holds `name`, `made`, `img` (the hillshade's edges `n s e w` in degrees and its size in pixels) and `wps`. Each waypoint in `wps` has `id lat lon kind letter color score d h conf notes ol`, where `ol` is the outline as `[lat, lon]` pairs.
+- **The package.** `LWP1`, then the JSON's length (4 bytes, big-endian), then the JSON, then the hillshade JPEG and the basemap JPEG, each with its length in the JSON (`img.len`, `base.len`). `base` has `src` (`satellite` or `topo`) and the same edges as `img`. `view` carries the web app's basemap and hillshade opacity (`base`, `hs`). The JSON holds `name`, `made`, `img` (the hillshade's edges `n s e w` in degrees and its size in pixels) and `wps`. Each waypoint in `wps` has `id lat lon kind letter color score d h conf notes ol`, where `ol` is the outline as `[lat, lon]` pairs. When you have notes for the site in the web app, there is also `name` (your name / note) and `un` (your other notes). These are copied to the top of `notes` too, as `Note: …`, for older watch apps.
 - **The Bluetooth service.** It is `7b1e0001-5a4c-4b8e-9d3a-2f6c1a9e4d10`, with two characteristics:
   - **RX** (`…0002`, write, or write without response): the phone sends BEGIN (`1`, size, CRC-32), then DATA pieces (`2`, offset, then the bytes), then END (`3`).
     - In careful mode, each DATA piece holds up to 495 bytes and is a confirmed write.

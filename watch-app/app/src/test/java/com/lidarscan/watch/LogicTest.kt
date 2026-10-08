@@ -97,6 +97,19 @@ class LogicTest {
         assertTrue(img.contentEquals(p.imageBytes))
     }
 
+    @Test fun decodesYourNotes() {
+        val j = sample()
+        // as the web app sends them: in their own fields, and copied to the top of the notes for older watch apps
+        j.getJSONArray("wps").getJSONObject(0).put("name", "Cottonpatch Mound").put("un", JSONArray().put("Marked ritual: oral history"))
+            .put("notes", JSONArray().put("Note: Cottonpatch Mound").put("Note: Marked ritual: oral history").put("On a 10° slope"))
+        val p = WatchPackage.decode(pack(j, null))
+        val a = p.waypoints[0]
+        assertEquals("Cottonpatch Mound", a.name); assertEquals(listOf("Marked ritual: oral history"), a.userNotes)
+        assertEquals(listOf("On a 10° slope"), a.notes)
+        // a waypoint with no notes of yours
+        assertEquals("", p.waypoints[1].name); assertTrue(p.waypoints[1].userNotes.isEmpty())
+    }
+
     @Test fun rejectsOtherFiles() {
         try { WatchPackage.decode("hello world, not a package".toByteArray()); fail() } catch (e: IllegalArgumentException) { }
     }

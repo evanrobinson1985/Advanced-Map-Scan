@@ -90,6 +90,10 @@ object Store {
     fun setKeepAwake(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("keepAwake", v).apply()
     fun dimWhenDown(ctx: Context) = prefs(ctx).getBoolean("dimWhenDown", true)
     fun setDimWhenDown(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("dimWhenDown", v).apply()
+    fun selectedWaypoint(ctx: Context): String? = prefs(ctx).getString("selected", null)
+    fun setSelectedWaypoint(ctx: Context, v: String?) = prefs(ctx).edit().putString("selected", v).apply()
+    fun mapZoom(ctx: Context) = prefs(ctx).getFloat("mapMpp", 1.2f)
+    fun setMapZoom(ctx: Context, v: Float) = prefs(ctx).edit().putFloat("mapMpp", v).apply()
     fun arriveM(ctx: Context) = prefs(ctx).getInt("arriveM", 10)
     fun setArriveM(ctx: Context, v: Int) = prefs(ctx).edit().putInt("arriveM", v).apply()
 

@@ -115,7 +115,14 @@ class AppModel(private val ctx: Context) {
     var online by mutableStateOf<List<Pair<OnlineArea, Bitmap>>>(emptyList()); private set
     /** How many areas are kept on the watch. */
     var areaCount by mutableIntStateOf(0); private set
-    var selectedId by mutableStateOf<String?>(null)
+    /** The waypoint you chose (kept, with every setting, for next time the app opens). */
+    private var selectedState by mutableStateOf(Store.selectedWaypoint(ctx))
+    var selectedId: String?
+        get() = selectedState
+        set(v) { if (v != selectedState) { selectedState = v; Store.setSelectedWaypoint(ctx, v) } }
+    /** The map's zoom (metres per screen pixel) when it was last changed. */
+    var mapMpp = Store.mapZoom(ctx); private set
+    fun saveZoom(v: Float) { if (v != mapMpp) { mapMpp = v; Store.setMapZoom(ctx, v) } }
     var headingUp by mutableStateOf(Store.headingUp(ctx)); private set
     var onlineMaps by mutableStateOf(Store.onlineMaps(ctx)); private set
     var arriveM by mutableIntStateOf(Store.arriveM(ctx)); private set

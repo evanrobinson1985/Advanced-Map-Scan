@@ -18,6 +18,8 @@ data class Waypoint(
     val confirmed: Boolean,
     val notes: List<String>,   // the details from the result's popup
     val outline: List<Pair<Double, Double>>,
+    val name: String = "",     // your name / note for the site, given in the web app
+    val userNotes: List<String> = emptyList(),   // your other notes (significance, evidence)
 )
 
 /** The hillshade picture and where it lies (its edges in degrees). */
@@ -78,6 +80,12 @@ data class WatchPackage(
                 val o = arr.getJSONObject(i)
                 val notes = ArrayList<String>()
                 o.optJSONArray("notes")?.let { a -> for (j in 0 until a.length()) notes.add(a.getString(j)) }
+                // your own notes come in their own fields, and (for older watch apps) at the top of
+                // the notes too; here they are shown on their own, so that copy is left out
+                val name = o.optString("name", "").trim()
+                val un = ArrayList<String>()
+                o.optJSONArray("un")?.let { a -> for (j in 0 until a.length()) un.add(a.getString(j)) }
+                if (o.has("un")) repeat(minOf(notes.size, un.size + if (name.isNotEmpty()) 1 else 0)) { notes.removeAt(0) }
                 val ol = ArrayList<Pair<Double, Double>>()
                 o.optJSONArray("ol")?.let { a -> for (j in 0 until a.length()) { val p = a.getJSONArray(j); ol.add(Pair(p.getDouble(0), p.getDouble(1))) } }
                 wps.add(
@@ -94,6 +102,8 @@ data class WatchPackage(
                         confirmed = o.optBoolean("conf", false),
                         notes = notes,
                         outline = ol,
+                        name = name,
+                        userNotes = un,
                     )
                 )
             }

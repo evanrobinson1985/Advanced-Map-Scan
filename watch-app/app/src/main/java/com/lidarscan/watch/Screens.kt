@@ -27,6 +27,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -108,7 +109,8 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
     val m = act.model
     val fix by act.tracker.fix.collectAsState()
     val heading by act.tracker.heading.collectAsState()
-    var mpp by remember { mutableFloatStateOf(1.2f) }            // metres per screen pixel
+    var mpp by remember { mutableFloatStateOf(m.mapMpp) }       // metres per screen pixel (as last left)
+    LaunchedEffect(mpp) { delay(800); m.saveZoom(mpp) }
     var follow by remember { mutableStateOf(true) }
     var panLat by remember { mutableStateOf(Double.NaN) }
     var panLon by remember { mutableStateOf(Double.NaN) }
@@ -357,7 +359,7 @@ fun ListScreen(act: MainActivity, onWaypoint: (String) -> Unit, onReceive: () ->
             val where = if (f != null) Geo.distanceText(Geo.distanceM(f.lat, f.lon, w.lat, w.lon)) + " " + Geo.compassWord(Geo.bearingDeg(f.lat, f.lon, w.lat, w.lon)) else ""
             Chip(
                 onClick = { m.selectedId = w.id; onWaypoint(w.id) },
-                label = { Text("${w.kind}${if (w.confirmed) " ✓" else ""}", maxLines = 1) },
+                label = { Text("${w.name.ifEmpty { w.kind }}${if (w.confirmed) " ✓" else ""}", maxLines = 1) },
                 secondaryLabel = { Text(listOfNotNull(where.ifEmpty { null }, w.score?.let { "$it%" }).joinToString(" · "), maxLines = 1) },
                 icon = { Letter(w) },
                 colors = ChipDefaults.secondaryChipColors(),
@@ -376,6 +378,8 @@ private fun Letter(w: Waypoint, big: Boolean = false) {
 }
 
 // ---------------------------------------------------------------- details
+private val NoteColor = Color(0xFFFDE68A)   // your own notes, in amber
+
 @Composable
 fun DetailScreen(act: MainActivity, id: String, onGuide: () -> Unit, onMap: () -> Unit) {
     val m = act.model
@@ -383,6 +387,9 @@ fun DetailScreen(act: MainActivity, id: String, onGuide: () -> Unit, onMap: () -
     val fix by act.tracker.fix.collectAsState()
     ScalingLazyColumn(Modifier.fillMaxSize()) {
         item { Row(verticalAlignment = Alignment.CenterVertically) { Letter(w, true); Spacer(Modifier.width(6.dp)); Text(w.kind, fontWeight = FontWeight.Bold, maxLines = 2) } }
+        // your own name and notes for the site, from the web app
+        if (w.name.isNotEmpty()) item { Text(w.name, color = NoteColor, fontWeight = FontWeight.Bold, fontSize = 15.sp, textAlign = TextAlign.Center) }
+        items(w.userNotes) { Text(it, color = NoteColor, fontSize = 13.sp, textAlign = TextAlign.Center) }
         fix?.let { f ->
             item {
                 Text(Geo.distanceText(Geo.distanceM(f.lat, f.lon, w.lat, w.lon)) + " " + Geo.compassWord(Geo.bearingDeg(f.lat, f.lon, w.lat, w.lon)) +
@@ -464,7 +471,7 @@ fun GuideScreen(act: MainActivity, id: String) {
             f?.let { Text("GPS ±${Geo.lengthText(it.accM.toDouble())}", fontSize = 10.sp, color = Color(0xFF94A3B8)) }
         }
         Row(Modifier.align(Alignment.TopCenter).padding(top = 22.dp), verticalAlignment = Alignment.CenterVertically) {
-            Letter(w); Spacer(Modifier.width(4.dp)); Text(w.kind, fontSize = 12.sp, maxLines = 1)
+            Letter(w); Spacer(Modifier.width(4.dp)); Text(w.name.ifEmpty { w.kind }, fontSize = 12.sp, maxLines = 1)
         }
     }
 }
