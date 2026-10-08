@@ -133,8 +133,8 @@ class AppModel(private val ctx: Context) {
         main.post {
             applyPackage(p); showPackageArea = true
             // the web app's map settings come with the waypoints (you can still change them here)
-            p.viewBase?.let { setBasemap(Basemap.of(it)) }
-            p.viewHillshadeOpacity?.let { setHillshadeOpacity(it) }
+            p.viewBase?.let { chooseBasemap(Basemap.of(it)) }
+            p.viewHillshadeOpacity?.let { chooseHillshadeOpacity(it) }
         }
         return "${p.waypoints.size} waypoint${if (p.waypoints.size == 1) "" else "s"}" + (if (p.image != null) ", the hillshade" else "") +
             (if (p.baseBytes != null) " and the ${if (p.baseSrc == "topo") "topo map" else "satellite imagery"}" else "")
@@ -143,10 +143,10 @@ class AppModel(private val ctx: Context) {
     fun deletePackage() { Store.deletePackage(ctx); pkg = null; pkgBitmap = null; selectedId = null }
     fun toggleHeadingUp() { headingUp = !headingUp; Store.setHeadingUp(ctx, headingUp) }
     fun toggleOnlineMaps() { onlineMaps = !onlineMaps; Store.setOnlineMaps(ctx, onlineMaps); tiles.enabled = onlineMaps }
-    fun setBasemap(b: Basemap) { basemap = b; Store.setBasemap(ctx, b.key) }
-    fun nextBasemap() { setBasemap(basemap.next()); mapNote = "Basemap: ${basemap.label}"; mapNoteUntil = System.currentTimeMillis() + 2500 }
-    fun setHillshadeOpacity(v: Float) { hillshadeOpacity = v.coerceIn(0f, 1f); Store.setHillshadeOpacity(ctx, hillshadeOpacity) }
-    fun nextHillshadeOpacity() { val o = floatArrayOf(0.4f, 0.55f, 0.7f, 0.85f, 1f); val i = o.indexOfFirst { kotlin.math.abs(it - hillshadeOpacity) < 0.03f }; setHillshadeOpacity(o[(i + 1) % o.size]) }
+    fun chooseBasemap(b: Basemap) { basemap = b; Store.setBasemap(ctx, b.key) }
+    fun nextBasemap() { chooseBasemap(basemap.next()); mapNote = "Basemap: ${basemap.label}"; mapNoteUntil = System.currentTimeMillis() + 2500 }
+    fun chooseHillshadeOpacity(v: Float) { hillshadeOpacity = v.coerceIn(0f, 1f); Store.setHillshadeOpacity(ctx, hillshadeOpacity) }
+    fun nextHillshadeOpacity() { val o = floatArrayOf(0.4f, 0.55f, 0.7f, 0.85f, 1f); val i = o.indexOfFirst { kotlin.math.abs(it - hillshadeOpacity) < 0.03f }; chooseHillshadeOpacity(o[(i + 1) % o.size]) }
     fun nextArrive() { val opts = intArrayOf(5, 10, 20, 30); arriveM = opts[(opts.indexOf(arriveM) + 1) % opts.size]; Store.setArriveM(ctx, arriveM) }
 
     /**
