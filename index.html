@@ -917,57 +917,165 @@
     }
     // ---- My location ----
     // Asks the browser where you are (GPS on a phone; Wi-Fi or network on a
-    // computer), shows it as a blue dot with its accuracy circle, and loads
-    // the terrain around it: a 1 km square of LiDAR (more when the position
-    // is rough), unless the loaded terrain already covers the spot
+    // computer) and keeps following you: a blue dot with its accuracy circle
+    // and, when the direction is known, a beam showing which way you face
+    // (the phone's compass, or your direction of travel while moving). The
+    // first fix loads the terrain around it: a 1 km square of LiDAR (more
+    // when the position is rough), unless the loaded terrain already covers
+    // the spot. Pressing the button again returns the map to you; "Stop
+    // following" in the dot's popup turns it off.
     const LOCATE_HALF_M = 500;
-    let myLocMarker = null, myLocBusy = false;
+    const myLoc = { watchId: null, marker: null, circle: null, lat: null, lon: null, acc: null,
+                    compass: null, compassAt: 0, gpsHeading: null, listening: false };
+    let myLocBusy = false;   // finding the first fix
+    function myLocSay(t) {
+        const status = document.getElementById('status'); if (status) status.innerText = t;
+        const ss = document.getElementById('searchStatus'); if (ss) ss.innerText = t;
+    }
     function locateMe() {
-        const status = document.getElementById('status'), btn = document.getElementById('locMeBtn');
-        const say = (t) => { if (status) status.innerText = t; const ss = document.getElementById('searchStatus'); if (ss) ss.innerText = t; };
-        if (!navigator.geolocation) { say('This browser cannot tell where you are. Search for an address or coordinates instead.'); return; }
-        if (!window.isSecureContext) { say('Finding your location needs the page opened over https (or as a local file). Search for an address or coordinates instead.'); return; }
+        const btn = document.getElementById('locMeBtn');
+        if (!navigator.geolocation) { myLocSay('This browser cannot tell where you are. Search for an address or coordinates instead.'); return; }
+        if (!window.isSecureContext) { myLocSay('Finding your location needs the page opened over https (or as a local file). Search for an address or coordinates instead.'); return; }
+        // the compass has to be asked for while handling the tap (iPhone)
+        myLocStartCompass();
+        // on a phone, fold the settings panel away so the map is visible
+        if (window.innerWidth < 700 && document.getElementById('panelContent').style.display !== 'none') togglePanel();
+        if (myLoc.watchId != null && myLoc.lat != null) {   // already following: back to you
+            map.setView([myLoc.lat, myLoc.lon], Math.max(map.getZoom(), 17));
+            myLocLoadTerrain(myLoc.lat, myLoc.lon, myLoc.acc).catch(e => console.warn(e));
+            return;
+        }
         if (myLocBusy) return;
         myLocBusy = true;
         if (btn) btn.style.opacity = '0.5';
-        // on a phone, fold the settings panel away so the map is visible
-        if (window.innerWidth < 700 && document.getElementById('panelContent').style.display !== 'none') togglePanel();
-        say('Finding your location... (allow location access if your browser asks)');
+        myLocSay('Finding your location... (allow location access if your browser asks)');
         const done = () => { myLocBusy = false; if (btn) btn.style.opacity = ''; };
-        navigator.geolocation.getCurrentPosition(async (pos) => {
-            try { await showMyLocation(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy, say); }
-            catch (e) { console.warn(e); say('Found your location, but the terrain could not be loaded: ' + (e.message || e)); }
+        let first = true;
+        myLoc.watchId = navigator.geolocation.watchPosition(async (pos) => {
+            const c = pos.coords;
+            myLoc.lat = c.latitude; myLoc.lon = c.longitude; myLoc.acc = c.accuracy;
+            // the direction of travel, only while really moving
+            if (c.heading != null && isFinite(c.heading) && c.speed > 0.7) myLoc.gpsHeading = c.heading;
+            else if (!(c.speed > 0.7)) myLoc.gpsHeading = null;
+            myLocDraw();
+            if (!first) return;
+            first = false;
+            try { await myLocArrive(c.latitude, c.longitude, c.accuracy); }
+            catch (e) { console.warn(e); myLocSay('Found your location, but the terrain could not be loaded: ' + (e.message || e)); }
             finally { done(); }
         }, (err) => {
+            if (!first) return;   // a later hiccup: the dot stays where it was
             done();
-            say(err.code === 1 ? 'Location access was blocked. Allow it for this page in your browser\'s site settings (and turn on Location Services on a phone), then press My location again.'
+            myLocStop(true);
+            myLocSay(err.code === 1 ? 'Location access was blocked. Allow it for this page in your browser\'s site settings (and turn on Location Services on a phone), then press My location again.'
               : err.code === 3 ? 'Finding your location took too long. Try again, ideally outdoors or with Wi-Fi on.'
               : 'Your location is not available right now. Check Location Services is on, or search for an address instead.');
-        }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 60000 });
+        }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 5000 });
     }
-    async function showMyLocation(lat, lon, acc, say) {
-        if (myLocMarker) map.removeLayer(myLocMarker);
+    function myLocStop(quiet) {
+        if (myLoc.watchId != null) navigator.geolocation.clearWatch(myLoc.watchId);
+        myLoc.watchId = null;
+        if (myLoc.listening) {
+            window.removeEventListener('deviceorientationabsolute', myLocOnOrient, true);
+            window.removeEventListener('deviceorientation', myLocOnOrient, true);
+            myLoc.listening = false;
+        }
+        if (myLoc.marker) map.removeLayer(myLoc.marker);
+        if (myLoc.circle) map.removeLayer(myLoc.circle);
+        Object.assign(myLoc, { marker: null, circle: null, lat: null, lon: null, acc: null, compass: null, gpsHeading: null });
+        if (!quiet) myLocSay('Stopped following your location.');
+    }
+    // ---- Direction ----
+    function myLocStartCompass() {
+        if (myLoc.listening || !window.DeviceOrientationEvent) return;
+        const listen = () => {
+            if (myLoc.listening) return;
+            myLoc.listening = true;
+            if ('ondeviceorientationabsolute' in window) window.addEventListener('deviceorientationabsolute', myLocOnOrient, true);
+            else window.addEventListener('deviceorientation', myLocOnOrient, true);
+        };
+        if (typeof DeviceOrientationEvent.requestPermission === 'function')
+            DeviceOrientationEvent.requestPermission().then(r => { if (r === 'granted') listen(); }).catch(() => {});
+        else listen();
+    }
+    function myLocOnOrient(e) {
+        let h = null;
+        if (e.webkitCompassHeading != null && isFinite(e.webkitCompassHeading)) h = e.webkitCompassHeading;   // iPhone: already from north
+        else if ((e.absolute || e.type === 'deviceorientationabsolute') && e.alpha != null) h = 360 - e.alpha;
+        if (h == null) return;   // not referenced to north: no use for a map
+        const scr = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+        h = ((h + scr) % 360 + 360) % 360;
+        // smoothed, so the beam doesn't jitter
+        if (myLoc.compass == null) myLoc.compass = h;
+        else { const d = ((h - myLoc.compass + 540) % 360) - 180; myLoc.compass = (myLoc.compass + 0.3 * d + 360) % 360; }
+        myLoc.compassAt = Date.now();
+        if (!myLoc.drawPending) { myLoc.drawPending = true; requestAnimationFrame(() => { myLoc.drawPending = false; myLocDraw(); }); }
+    }
+    // compass first (it works standing still); else the direction of travel
+    function myLocHeading() {
+        if (myLoc.compass != null && Date.now() - myLoc.compassAt < 3000) return { h: myLoc.compass, src: 'compass' };
+        if (myLoc.gpsHeading != null) return { h: myLoc.gpsHeading, src: 'travel' };
+        return null;
+    }
+    function myLocIcon() {
+        return L.divIcon({ className: 'myloc-icon', iconSize: [64, 64], iconAnchor: [32, 32], popupAnchor: [0, -10],
+            html: `<div style="position:relative;width:64px;height:64px;pointer-events:none;">
+                <svg class="myloc-beam" width="64" height="64" viewBox="0 0 64 64" style="position:absolute;inset:0;display:none;transition:transform 0.15s linear;">
+                  <defs><linearGradient id="mylocG" x1="0" y1="1" x2="0" y2="0"><stop offset="0" stop-color="#2563eb" stop-opacity="0.65"/><stop offset="1" stop-color="#2563eb" stop-opacity="0"/></linearGradient></defs>
+                  <path d="M32 32 L19 2 A31 31 0 0 1 45 2 Z" fill="url(#mylocG)"/>
+                  <path d="M32 10 L38 21 L32 18 L26 21 Z" fill="#1d4ed8" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/></svg>
+                <div style="position:absolute;left:23px;top:23px;width:18px;height:18px;border-radius:50%;background:#2563eb;border:3px solid #fff;box-sizing:border-box;box-shadow:0 0 0 1px rgba(0,0,0,0.25),0 1px 5px rgba(0,0,0,0.45);pointer-events:auto;"></div></div>` });
+    }
+    function myLocPopup() {
+        const hd = myLocHeading(), ft = metersToFeetInches;
+        const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+        return `<b>You are here</b><br><span style="font-size:0.78rem;">${formatLatLon(myLoc.lat, myLoc.lon)}<br>Accurate to about ${ft(myLoc.acc)}<br>` +
+            (hd ? `Facing ${dirs[Math.round(hd.h / 45) % 8]} (${Math.round(hd.h)}&deg;) ${hd.src === 'compass' ? 'by the compass' : 'by your direction of travel'}`
+                : 'Direction: not known yet (turn the phone, or start walking)') + `</span><br>` +
+            `<a href="#" style="font-size:0.75rem;" onclick="event.preventDefault(); myLocStop();">Stop following my location</a>`;
+    }
+    function myLocDraw() {
+        if (myLoc.lat == null) return;
+        const ll = [myLoc.lat, myLoc.lon];
+        if (!myLoc.circle) myLoc.circle = L.circle(ll, { radius: myLoc.acc, color: '#2563eb', weight: 1, fillColor: '#3b82f6', fillOpacity: 0.1, interactive: false }).addTo(map);
+        else { myLoc.circle.setLatLng(ll); myLoc.circle.setRadius(myLoc.acc); }
+        if (!myLoc.marker) {
+            myLoc.marker = L.marker(ll, { icon: myLocIcon(), zIndexOffset: 2000, keyboard: false }).addTo(map).bindPopup('');
+            myLoc.marker.on('popupopen', () => myLoc.marker.setPopupContent(myLocPopup()));
+        } else myLoc.marker.setLatLng(ll);
+        const el = myLoc.marker.getElement(), beam = el && el.querySelector('.myloc-beam'), hd = myLocHeading();
+        if (beam) {
+            beam.style.display = hd ? 'block' : 'none';
+            if (hd) {
+                // the shortest way round, so 359 -> 1 doesn't spin the beam backwards
+                const prev = myLoc.beamDeg == null ? hd.h : myLoc.beamDeg;
+                myLoc.beamDeg = prev + (((hd.h - prev) % 360 + 540) % 360 - 180);
+                beam.style.transform = `rotate(${myLoc.beamDeg}deg)`;
+            }
+        }
+    }
+    // The first fix: the map goes to you and the terrain around you is loaded
+    async function myLocArrive(lat, lon, acc) {
+        const half = Math.min(1500, Math.max(LOCATE_HALF_M, acc));
+        const dLat = half / 111320, dLon = half / (111320 * Math.cos(lat * Math.PI / 180));
+        map.fitBounds([[lat - dLat, lon - dLon], [lat + dLat, lon + dLon]], { animate: false, maxZoom: 17 });
+        await myLocLoadTerrain(lat, lon, acc);
+    }
+    async function myLocLoadTerrain(lat, lon, acc) {
         const ft = metersToFeetInches, rough = acc > 1500;
-        myLocMarker = L.layerGroup([
-            L.circle([lat, lon], { radius: acc, color: '#2563eb', weight: 1, fillColor: '#3b82f6', fillOpacity: 0.1, interactive: false }),
-            L.circleMarker([lat, lon], { radius: 8, color: '#fff', weight: 3, fillColor: '#2563eb', fillOpacity: 1 })
-                .bindPopup(`<b>You are here</b><br><span style="font-size:0.78rem;">${formatLatLon(lat, lon)}<br>Accurate to about ${ft(acc)}</span><br>` +
-                           `<a href="#" style="font-size:0.75rem;" onclick="event.preventDefault(); map.removeLayer(myLocMarker); myLocMarker = null;">Remove this dot</a>`)
-        ]).addTo(map);
         // a rough fix (a computer without GPS) covers more ground, up to ~3 km
         const half = Math.min(1500, Math.max(LOCATE_HALF_M, acc));
         const dLat = half / 111320, dLon = half / (111320 * Math.cos(lat * Math.PI / 180));
         const bnd = { n: lat + dLat, s: lat - dLat, e: lon + dLon, w: lon - dLon };
-        map.fitBounds([[bnd.s, bnd.w], [bnd.n, bnd.e]], { animate: false, maxZoom: 17 });
         const where = `Found you at ${lat.toFixed(5)}, ${lon.toFixed(5)} (accurate to about ${ft(acc)})${rough ? ': only a rough position, from your network' : ''}`;
-        if (fullDemGrid && effRes <= 1.05 && dlInGrid(fullDemGrid, lat, lon, Math.min(half, 300))) { say(where + '. The terrain here is already loaded.'); return; }
-        if (downloadAbort || scanInProgress || tourBusy || dlBusy) { say(where + '. Wait for the current download, scan, tour or training to finish, then press Download to load the terrain here.'); return; }
-        say(where + '. Downloading the terrain around you...');
+        if (fullDemGrid && effRes <= 1.05 && dlInGrid(fullDemGrid, lat, lon, Math.min(half, 300))) { myLocSay(where + '. The terrain here is already loaded. The blue dot follows you.'); return; }
+        if (downloadAbort || scanInProgress || tourBusy || dlBusy) { myLocSay(where + '. Wait for the current download, scan, tour or training to finish, then press Download to load the terrain here.'); return; }
+        myLocSay(where + '. Downloading the terrain around you...');
         const before = fullDemGrid;
         window.__dlBoundsOverride = bnd;
         try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
-        map.fitBounds([[bnd.s, bnd.w], [bnd.n, bnd.e]], { animate: false, maxZoom: 17 });
-        if (!fullDemGrid || fullDemGrid === before) say(where + '. No LiDAR terrain could be loaded here (the map is still shown); try Download, or a nearby spot.');
+        if (myLoc.lat != null) map.fitBounds([[bnd.s, bnd.w], [bnd.n, bnd.e]], { animate: false, maxZoom: 17 });
+        if (!fullDemGrid || fullDemGrid === before) myLocSay(where + '. No LiDAR terrain could be loaded here (the map is still shown); try Download, or a nearby spot.');
     }
     async function geocodeAddress(q) {
         const out = [];

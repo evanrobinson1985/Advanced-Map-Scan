@@ -39,8 +39,11 @@ A summary lists what was detected and every value set, and all sliders stay adju
 
 **My location.** The 📍 button beside the map's search box, and **📍 My location** in the panel's Search box, find where you are and load the map there. Your browser asks for permission the first time. The app then:
 
-- marks you with a blue dot and a circle showing how accurate the position is;
+- marks you with a blue dot and a circle showing how accurate the position is. The dot keeps following you as you move;
+- shows which way you are facing with a blue beam and arrow. On a phone it uses the compass, which works standing still; an iPhone asks for permission to use motion and orientation the first time. Without a compass (most computers), the beam shows your direction of travel while you walk or drive, and is hidden when you stop. Tap the dot to see your coordinates, accuracy and direction (for example "Facing NE (60°)");
 - zooms to the area and downloads the 1 m LiDAR terrain for a 1 km square around you, ready to scan. A rough position (a computer without GPS can be off by a mile or more) gets a bigger square, up to 3 km. If the loaded terrain already covers the spot, nothing is downloaded again.
+
+Pressing the button again brings the map back to you. **Stop following my location**, in the dot's popup, turns it off.
 
 It needs the page opened over https or as a local file. If access is blocked, allow location for the page in the browser's site settings (and turn on Location Services on a phone). Your position is used only in your browser; it is not sent anywhere except as the area of the terrain download.
 
