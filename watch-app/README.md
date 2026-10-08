@@ -21,7 +21,7 @@ Once the waypoints are on the watch, it works on its own. It needs no phone and 
 
 1. On the watch: **LiDAR Guide › ☰ › Receive from phone**. Allow *Nearby devices* the first time.
 2. On the phone, in the LiDAR web app in **Chrome**: scan an area, then under **Watch** press **⌚ Send to watch** and pick the watch.
-3. The watch shows progress, then *Received: N waypoints and the map*. Tap *Open the map*.
+3. The watch shows progress, then *Received: N waypoints and the map*. Tap *Open the map*. The map opens on the received area, zoomed to show all its waypoints. Press ◎ to go back to following you. Whenever no waypoint is on screen, the bottom line names the nearest one and how far away it is, in which direction.
 
 Options in the web app's Watch box:
 - **Waypoints**: all results on the map, or only those in view.

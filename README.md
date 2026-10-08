@@ -41,21 +41,22 @@ A summary lists what was detected and every value set, and all sliders stay adju
 
 - marks you with a blue dot and a circle showing how accurate the position is. The dot keeps following you as you move;
 - shows which way you are facing with a blue beam and arrow. On a phone it uses the compass, which works standing still; an iPhone asks for permission to use motion and orientation the first time. Without a compass (most computers), the beam shows your direction of travel while you walk or drive, and is hidden when you stop. Tap the dot to see your coordinates, accuracy and direction (for example "Facing NE (60°)");
-- zooms to the area and downloads the 1 m LiDAR terrain for a 1 km square around you, ready to scan. A rough position (a computer without GPS can be off by a mile or more) gets a bigger square, up to 3 km. If the loaded terrain already covers the spot, nothing is downloaded again.
+- centres the map on you and **follows you**: when your dot nears the edge of the view, the map pans to keep you in it. Dragging the map stops the following, so you can look around; pressing 📍 again brings the map back to you and follows again;
+- downloads the 1 m LiDAR terrain of the **whole map view around you**, ready to scan. The area is at least 1 km across and at most 14 km² (14 million cells at 1 m), so it is always downloaded and scanned at full 1 m detail. If you're zoomed out further than that, the map first zooms in to the closest view that fits. If the loaded terrain already covers the view, nothing is downloaded again.
 
-Pressing the button again brings the map back to you. **Stop following my location**, in the dot's popup, turns it off.
+**Stop following my location**, in the dot's popup, turns it off.
 
-**Scan as you go.** Tick **Download and scan the tiles around you as you move** in the *Scan as you go* box (under Search) to have the app download and scan the ground around you while My location follows you. It starts My location if it isn't on.
+**Scan as you go.** Tick **Download and scan the map around you as you move** in the *Scan as you go* box (under Search). The app then downloads and scans the ground around you while My location follows you. It starts My location if it isn't on.
 
-- The ground is cut into fixed square tiles: 0.5 km (walking), 1 km or 2 km (driving). When you are inside a tile, or within a quarter of a tile of one, that you haven't scanned yet, it is downloaded and scanned, nearest first. One tile is done at a time.
-- Each tile is downloaded with a 120 m margin, so a feature on its edge is seen whole. The deep-learning scan's windows reach 60 m past the tile for the same reason. A result is kept only from the tile that holds it, so nothing is listed twice.
-- Results of the same kind from an earlier scan inside a tile are replaced by the tile's new ones, as a rescan would.
+- **Areas.** The first area is the whole map view around you, sized as for My location.
+- **The next area, ahead of you.** Whenever the ground within a quarter of an area's size around you isn't covered yet, the next view-sized area is downloaded and scanned. It is shifted towards the uncovered side, so it's ready before you get there. One area is done at a time.
+- **Edges.** Each area is downloaded with a 120 m margin, so a feature on its edge is seen whole; the deep-learning scan's windows reach 60 m past the area for the same reason.
+- **Overlap.** Where areas overlap, a result already found isn't added again. Results of the same kind from a scan before the trip, on an area's new ground, are replaced by the new ones, as a rescan would.
 - **Scan with** chooses the scan: the scan mode selected in the panel, deep learning (the selected model), both, or Scan All (every mode, slower). Settlement likelihood is a heat map for one area, so it isn't scanned as you go.
-- A new download normally clears the map, but here the results from earlier tiles are kept and stay on the map, with Yes / Not real working as usual.
-- Tiles are drawn on the map: green when scanned, orange while in progress, grey dashed where no LiDAR could be downloaded.
-- The map stays where you have it while tiles download, so it doesn't jump around under you.
-- Turning it off (or Stop following my location) finishes the tile under way and adds the whole trip to the scan history as one entry.
-- It uses mobile data: up to about 6 MB per 1 km tile.
+- **Results stay.** A new download normally clears the map, but here the results from earlier areas are kept and stay on the map, with Yes / Not real working as usual.
+- **On the map,** areas are drawn green when scanned, orange while in progress, and grey dashed where no LiDAR could be downloaded.
+- **Ending a trip.** Turning it off (or Stop following my location) finishes the area under way and adds the whole trip to the scan history as one entry.
+- **Mobile data:** roughly 4 MB per km² (a phone's view at street level is a few km²).
 
 **Galaxy Watch.** The *Watch* box sends your results to **LiDAR Guide**, a companion app for the Samsung Galaxy Watch Ultra 2 and other Wear OS watches (in [`watch-app/`](watch-app/README.md)). It sends either all results on the map or those in view, with a hillshade of the loaded LiDAR at 1 m or 2 m. On the watch, open *LiDAR Guide › ☰ › Receive from phone*, then press **⌚ Send to watch** in Chrome on the Android phone and pick the watch; the transfer goes over Bluetooth.
 
