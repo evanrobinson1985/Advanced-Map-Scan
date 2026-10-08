@@ -842,6 +842,8 @@
         content.style.display = collapsing ? 'none' : '';
         icon.innerHTML = collapsing ? '&#9660;' : '&#9650;';
         try { localStorage.setItem(PANEL_COLLAPSE_KEY, collapsing ? '1' : '0'); } catch (e) {}
+        // the progress card moves with the panel's top
+        if (typeof progRender === 'function') progRender();
     }
     (function initPanelState() {
         let collapsed = false;
@@ -1732,7 +1734,7 @@
     // (a step taking that share of the whole), so its bar and time left
     // move smoothly.
     const progLevels = [];
-    let progRaf = 0, progStatusText = '', progLastEnd = 0;
+    let progRaf = 0, progStatusText = '', progLastEnd = 0, progMin = false;
     function progBegin(key, title, opts) {
         const old = progLevels.findIndex(l => l.key === key);
         if (old >= 0) progLevels.splice(old, 1);
@@ -1769,11 +1771,21 @@
             }
         }
         card.style.display = 'block';
-        // just above the settings panel (bottom centre), wherever its top is now
-        const panel = document.getElementById('ui-panel'), mc = map.getContainer().getBoundingClientRect();
-        const pTop = panel ? panel.getBoundingClientRect().top : mc.bottom - 20;
-        card.style.bottom = Math.max(30, Math.min(mc.bottom - pTop + 8, mc.height - 160)) + 'px';
         const now = Date.now(), inner = progLevels[progLevels.length - 1];
+        // minimised: one slim line (the outermost job and its share done)
+        if (progMin) {
+            const o = progLevels[0];
+            let f0 = o.frac;
+            { let e = null; for (let i = progLevels.length - 1; i >= 0; i--) { const l = progLevels[i]; e = l.span && e != null ? l.span[0] + (l.span[1] - l.span[0]) * e : l.frac; } f0 = e; }
+            card.innerHTML = `<div style="display:flex;align-items:center;gap:8px;">
+                <b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(o.title)}</b>
+                <span style="color:#475569;white-space:nowrap;">${f0 != null ? Math.floor(f0 * 100) + '% \u00B7 ' : ''}${progTime(now - o.t0)}</span>
+                <button id="progMinBtn" title="Show the details" style="width:auto;margin:0;padding:1px 8px;font-size:0.8rem;">&#9650;</button></div>
+                <div style="height:4px;background:#e2e8f0;border-radius:3px;overflow:hidden;margin-top:4px;"><div class="${f0 == null ? 'prog-indet' : ''}" style="height:100%;width:${f0 == null ? 100 : Math.max(2, f0 * 100)}%;background-color:#2563eb;${f0 == null ? 'opacity:.55;' : ''}"></div></div>`;
+            document.getElementById('progMinBtn').onclick = () => { progMin = false; progRender(); };
+            progPlace(card);
+            return;
+        }
         const stopper = progLevels.find(l => l.cancel);
         const colors = ['#2563eb', '#7c3aed', '#0891b2', '#16a34a'];
         // the share done of each line, innermost first (a span follows the line inside it)
@@ -1799,9 +1811,42 @@
         const nRes = detectedFeatures.filter(f => f.mode !== 'settlement' && f.lat != null).length;
         card.innerHTML = rows + `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11px;color:#64748b;">
             <span style="flex:1;">${nRes} result${nRes === 1 ? '' : 's'} on the map</span>
+            <button id="progMinBtn" title="Make this smaller" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;">&#9660; Smaller</button>
             ${stopper ? `<button id="progStopBtn" style="width:auto;margin:0;padding:3px 10px;font-size:0.75rem;background:#fee2e2;color:#991b1b;">&#9632; Stop ${escapeHtml(stopper.title.split(/[·(:]/)[0].trim().toLowerCase())}</button>` : ''}</div>`;
         const b = document.getElementById('progStopBtn');
         if (b && stopper) b.onclick = () => { b.disabled = true; b.innerText = 'Stopping...'; try { stopper.cancel(); } catch (e) { console.warn(e); } };
+        document.getElementById('progMinBtn').onclick = () => { progMin = true; progRender(); };
+        progPlace(card);
+    }
+    // Where the card goes, never over the settings panel or its fold button:
+    // just above the panel when there is room; else (the panel opened up
+    // tall) beside it when the screen is wide enough; else inside the panel,
+    // under its header, pushing its contents down
+    function progPlace(card) {
+        const panel = document.getElementById('ui-panel'), header = document.getElementById('panelHeader');
+        const mapEl = map.getContainer(), mc = mapEl.getBoundingClientRect();
+        const float = (st) => {
+            if (card.parentNode !== mapEl) mapEl.appendChild(card);
+            Object.assign(card.style, { position: 'absolute', zIndex: 1002, boxShadow: '0 3px 14px rgba(0,0,0,0.35)', margin: '0', maxWidth: 'calc(100% - 16px)' }, st);
+        };
+        if (!panel || panel.offsetParent === null) { float({ top: 'auto', bottom: '30px', left: '50%', right: 'auto', transform: 'translateX(-50%)', width: '440px' }); return; }
+        if (card.parentNode !== mapEl) float({});   // measure it at its floating size
+        const pr = panel.getBoundingClientRect(), h = card.offsetHeight;
+        if (pr.top - mc.top >= h + 70) {
+            float({ top: 'auto', bottom: (mc.bottom - pr.top + 8) + 'px', left: '50%', right: 'auto', transform: 'translateX(-50%)', width: '440px' });
+            return;
+        }
+        const leftFree = pr.left - mc.left - 16, rightFree = mc.right - pr.right - 16 - 56;   // (the zoom buttons down the right)
+        if (Math.max(leftFree, rightFree) >= 280) {
+            const w = Math.min(440, Math.max(leftFree, rightFree));
+            float(leftFree >= rightFree ? { top: 'auto', bottom: '30px', left: '8px', right: 'auto', transform: 'none', width: w + 'px' }
+                                        : { top: 'auto', bottom: '30px', left: 'auto', right: '64px', transform: 'none', width: w + 'px' });
+            return;
+        }
+        // inside the panel, under its header
+        if (card.parentNode !== panel || card.previousElementSibling !== header) header.insertAdjacentElement('afterend', card);
+        Object.assign(card.style, { position: 'static', transform: 'none', width: 'auto', maxWidth: 'none', top: 'auto', bottom: 'auto', left: 'auto', right: 'auto',
+                                    margin: '0 0 10px', boxShadow: 'none', border: '1px solid #cbd5e1' });
     }
     // the time ticks on, and the latest status message shows on the innermost line
     setInterval(() => { if (progLevels.length) progRenderSoon(); }, 1000);
