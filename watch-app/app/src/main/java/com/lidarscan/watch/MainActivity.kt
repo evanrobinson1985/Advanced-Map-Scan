@@ -111,7 +111,10 @@ class MainActivity : ComponentActivity() {
 class AppModel(private val ctx: Context) {
     var pkg by mutableStateOf<WatchPackage?>(null); private set
     var pkgBitmap by mutableStateOf<Bitmap?>(null); private set
-    var online by mutableStateOf<Pair<MapImage, Bitmap>?>(null); private set
+    /** The downloaded hillshade areas near you that are drawn (at most 12 in memory). */
+    var online by mutableStateOf<List<Pair<OnlineArea, Bitmap>>>(emptyList()); private set
+    /** How many areas are kept on the watch. */
+    var areaCount by mutableIntStateOf(0); private set
     var selectedId by mutableStateOf<String?>(null)
     var headingUp by mutableStateOf(Store.headingUp(ctx)); private set
     var onlineMaps by mutableStateOf(Store.onlineMaps(ctx)); private set
@@ -140,8 +143,11 @@ class AppModel(private val ctx: Context) {
     var history by mutableStateOf<List<HistoryEntry>>(emptyList()); private set
     var currentId by mutableStateOf(-1L); private set
     val tiles = TileLayer(ctx) { main.post { tileTick++ } }
+    private var areas: List<OnlineArea> = emptyList()
     private var onlineBusy = false
-    private var onlineTriedAt = 0L
+    private var onlineFailedAt = 0L
+    private var shownAt: Pair<Double, Double>? = null   // where the drawn areas were last chosen
+    private var showing = false
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -150,7 +156,7 @@ class AppModel(private val ctx: Context) {
         Store.loadPackage(ctx)?.let { applyPackage(it) }
         currentId = Store.currentId(ctx)
         history = Store.history(ctx)
-        Store.loadOnline(ctx)?.let { (m, b) -> decodeMap(b)?.let { online = Pair(m, it) } }
+        areas = Store.onlineAreas(ctx); areaCount = areas.size
     }
 
     fun close() { scope.cancel(); tiles.close() }
@@ -212,34 +218,64 @@ class AppModel(private val ctx: Context) {
     fun nextArrive() { val opts = intArrayOf(5, 10, 20, 30); arriveM = opts[(opts.indexOf(arriveM) + 1) % opts.size]; Store.setArriveM(ctx, arriveM) }
 
     /**
-     * When you are off the received map (or have none) and online maps are
-     * on, the hillshade around you is downloaded (at most every 30 s).
+     * Maps as you go (with "Download maps as you go" on and Wi-Fi or LTE), as
+     * the web app's scan as you go: once you are within a quarter of an area's
+     * width of ground no map covers (the received one or those downloaded),
+     * the next 1.2 km area of USGS hillshade is downloaded, shifted ahead of
+     * you, and its basemap tiles are saved too, so the ground you walk onto
+     * is already mapped when the signal drops. Areas are kept (the newest 40).
      */
     fun maybeFetchOnline(f: Fix) {
-        if (!onlineMaps || onlineBusy) return
-        if (covers(pkg?.image, f, 100.0) || covers(online?.first, f, 150.0)) return
-        val now = System.currentTimeMillis()
-        if (now - onlineTriedAt < 30000) return
-        onlineTriedAt = now; onlineBusy = true
-        onlineNote = "Downloading the map around you..."
+        showAreasNear(f.lat, f.lon)
+        if (!onlineMaps || onlineBusy || f.accM > 150f) return
+        val have = areas.map { it.image } + listOfNotNull(pkg?.image)
+        val c = Geo.nextArea(f.lat, f.lon, have, AREA_HALF_M)
+        if (c == null) { if (onlineNote.startsWith("Downloading")) onlineNote = ""; return }
+        if (System.currentTimeMillis() - onlineFailedAt < 30000) return
+        onlineBusy = true
+        onlineNote = if (c.first == f.lat && c.second == f.lon) "Downloading the map around you..." else "Downloading the map ahead..."
         scope.launch {
             try {
-                val (m, b) = withContext(Dispatchers.IO) { Store.fetchOnline(ctx, f.lat, f.lon) }
-                val bmp = withContext(Dispatchers.Default) { decodeMap(b) }
-                if (bmp != null) { online = Pair(m, bmp); onlineNote = "" } else onlineNote = "The map download could not be read."
+                val a = withContext(Dispatchers.IO) { Store.fetchOnline(ctx, c.first, c.second, AREA_HALF_M) }
+                areas = withContext(Dispatchers.IO) { Store.onlineAreas(ctx) }; areaCount = areas.size
+                tiles.prefetch(basemap, a.image)
+                onlineNote = ""
+                shownAt = null; showAreasNear(f.lat, f.lon)
             } catch (e: Exception) {
+                onlineFailedAt = System.currentTimeMillis()
                 onlineNote = "No map here: ${e.message ?: "offline"}. Send one from the phone."
             } finally { onlineBusy = false }
         }
     }
 
-    private fun covers(m: MapImage?, f: Fix, marginM: Double): Boolean {
-        if (m == null) return false
-        val local = Geo.Local(f.lat, f.lon)
-        return local.north(m.n) > marginM && local.north(m.s) < -marginM && local.east(m.e) > marginM && local.east(m.w) < -marginM
+    /** Draws the 12 downloaded areas nearest you (chosen again each 200 m). */
+    private fun showAreasNear(lat: Double, lon: Double) {
+        val at = shownAt
+        if (showing || (at != null && Geo.distanceM(at.first, at.second, lat, lon) < 200)) return
+        shownAt = Pair(lat, lon)
+        val want = areas.sortedBy { Geo.distanceM(lat, lon, (it.image.n + it.image.s) / 2, (it.image.e + it.image.w) / 2) }.take(12)
+        val have = online.associateBy { it.first.id }
+        if (want.map { it.id }.toSet() == have.keys) return
+        showing = true
+        scope.launch {
+            try {
+                // the new list is drawn oldest first, so a newer area lies over an older one
+                online = withContext(Dispatchers.IO) {
+                    want.sortedBy { it.id }.mapNotNull { a -> have[a.id] ?: try { decodeMap(a.file.readBytes())?.let { Pair(a, it) } } catch (e: Exception) { null } }
+                }
+            } finally { showing = false }
+        }
+    }
+
+    /** Deletes the downloaded map areas (the received packages stay). */
+    fun clearDownloadedAreas() {
+        Store.clearOnline(ctx)
+        areas = emptyList(); areaCount = 0; online = emptyList(); shownAt = null
     }
 
     companion object {
+        /** Half the width of a downloaded area (1.2 km across). */
+        const val AREA_HALF_M = 600.0
         /** A map picture, made smaller if very large (watch memory). */
         fun decodeMap(bytes: ByteArray): Bitmap? {
             val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }

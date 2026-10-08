@@ -27,7 +27,7 @@ The map shows a basemap under the LiDAR hillshade, with the hillshade see-throug
 - **Settings › Basemap** does the same.
 - **Settings › Hillshade** steps the opacity through 40, 55, 70, 85 and 100%. With no basemap, the hillshade is solid.
 
-The satellite imagery (or topo map) for the sent area comes with the waypoints, so it works with no signal. Other basemaps, and ground outside the sent area, load as map tiles when the watch has Wi-Fi or LTE (with *Download map when needed* on). Tiles are kept on the watch, so places you've seen work offline later.
+The satellite imagery (or topo map) for the sent area comes with the waypoints, so it works with no signal. Other basemaps, and ground outside the sent area, load as map tiles when the watch has Wi-Fi or LTE (with *Download maps as you go* on). Tiles are kept on the watch, so places you've seen work offline later.
 
 ## Keeping the screen on, and dimming when your arm is down
 
@@ -48,11 +48,24 @@ Options in the web app's Watch box:
 - **Hillshade**: 1 m (sharpest), 2 m (quicker to send), or none.
 - **Include the basemap**: sends the satellite imagery (or topo map) shown in the web app, so it works offline. On by default; it roughly doubles the size, so the transfer takes about twice as long.
 
-A 1.5 km area at 1 m is about 300 KB, which takes roughly half a minute to a minute over Bluetooth. Sending again replaces what is on the watch.
+A 1.5 km area at 1 m is about 300 KB. Sending again puts the new package on the map; the earlier one stays in *History*.
+
+**Fast mode.** The phone sends small pieces without waiting for the watch to confirm each one, which is several times quicker than confirming every piece. It then asks the watch what never arrived and sends just those gaps again, with confirmation. If the phone or the watch can't do this (an older LiDAR Guide, or the link loses more than a quarter of the pieces), the phone starts again in careful mode, with every piece confirmed, so the package still arrives. Either way, the watch checks the whole package before it keeps it.
+
+**Why not NFC?** NFC is slower than Bluetooth: at most 424 kbit/s, and about 10–20 KB/s in practice. The phone and watch would also have to stay touching for the whole transfer. Phone-to-device NFC transfer (Android Beam) was removed in Android 10, and Chrome's Web NFC can only read and write NFC tags. So Bluetooth is the faster way.
 
 Sending uses Web Bluetooth, which is in Chrome on Android (the phone a Galaxy Watch pairs with). The page must be opened over https.
 
-**Map with no phone:** with *Download map when needed* on (Settings), a watch with Wi-Fi or LTE downloads a USGS 3DEP hillshade around you whenever you are off the map it has.
+## Maps as you go
+
+With **Settings › Download maps as you go** on, and Wi-Fi or LTE on the watch, it downloads the map ahead of you as you walk, like the web app's *scan as you go*. Then you aren't left without a map if you wander off the sent area.
+
+- The watch checks the ground 300 m around you (a quarter of an area's width) in 16 directions.
+- When part of that ground isn't on any map it has (the sent area or areas already downloaded), it downloads the next 1.2 km square of USGS 3DEP hillshade. That is the same 1 m LiDAR the web app uses.
+- The new square is shifted toward the unmapped ground, so it covers the way ahead and you stay well inside it. The bottom line says *Downloading the map ahead...*.
+- The basemap tiles for each new area are saved too, so the satellite or topo map is there offline later.
+- Areas are kept on the watch, up to the newest 40; the oldest are deleted. **Settings › Downloaded areas** shows how many there are. Tap it twice to delete them; received packages stay.
+- With no map and no signal, the bottom line says so; send a package from the phone instead.
 
 ## Installing it on the watch
 
@@ -75,12 +88,14 @@ New versions install over the old one with `adb install -r LiDAR-Guide.apk`. If 
 
 ## Building it yourself
 
-Open this folder in Android Studio, or run `./gradlew assembleRelease`. You need JDK 17 and the Android SDK (platform 34). `./gradlew testDebugUnitTest` runs the tests of the map maths, the package format and the Bluetooth reassembly.
+Open this folder in Android Studio, or run `./gradlew assembleRelease`. You need JDK 17 and the Android SDK (platform 34). `./gradlew testDebugUnitTest` runs the tests of the map maths, maps as you go, the package format and the Bluetooth reassembly, including the gap report.
 
 ## How the transfer works
 
 - **The package.** `LWP1`, then the JSON's length (4 bytes, big-endian), then the JSON, then the hillshade JPEG and the basemap JPEG, each with its length in the JSON (`img.len`, `base.len`). `base` has `src` (`satellite` or `topo`) and the same edges as `img`. `view` carries the web app's basemap and hillshade opacity (`base`, `hs`). The JSON holds `name`, `made`, `img` (the hillshade's edges `n s e w` in degrees and its size in pixels) and `wps`. Each waypoint in `wps` has `id lat lon kind letter color score d h conf notes ol`, where `ol` is the outline as `[lat, lon]` pairs.
 - **The Bluetooth service.** It is `7b1e0001-5a4c-4b8e-9d3a-2f6c1a9e4d10`, with two characteristics:
-  - **RX** (`…0002`, write): the phone sends BEGIN (`1`, size, CRC-32), then DATA pieces (`2`, offset, up to 495 bytes), then END (`3`).
-  - **STATUS** (`…0003`, notify): the watch answers `p received total` as pieces arrive, then `ok …` or `err …`.
+  - **RX** (`…0002`, write, or write without response): the phone sends BEGIN (`1`, size, CRC-32), then DATA pieces (`2`, offset, then the bytes), then END (`3`).
+    - In careful mode, each DATA piece holds up to 495 bytes and is a confirmed write.
+    - In fast mode, each piece holds 235 bytes and is a write without response. QUERY (`4`) then asks for the gaps, which are re-sent as confirmed writes until none are left.
+  - **STATUS** (`…0003`, notify): the watch answers `p received total` as pieces arrive and `m <bytes missing> offset:length,…` to a QUERY (up to 16 gaps), then `ok …` or `err …`.
 - The watch checks the size and the CRC-32 before it replaces what it has.

@@ -29,8 +29,11 @@ import java.util.UUID
  * Bluetooth) connects to it and writes the package in numbered pieces to the
  * RX characteristic (see [Reassembly]): BEGIN size+CRC, DATA offset+bytes,
  * END. Pieces up to 512 bytes arrive as long ("prepared") writes, which are
- * put together here. Progress and the result go back as notifications on the
- * STATUS characteristic ("p received total", "ok N", "err message").
+ * put together here. In the fast mode the phone sends small pieces without
+ * waiting for each to be confirmed, then asks (QUERY) for the gaps, answered
+ * as "m <bytes missing> off:len,...", and sends just those again. Progress
+ * and the result go back as notifications on the STATUS characteristic
+ * ("p received total", "m ...", "ok N", "err message").
  */
 @SuppressLint("MissingPermission")   // the screen asks for the Bluetooth permissions before start()
 class BleReceiver(
@@ -165,6 +168,19 @@ class BleReceiver(
                         main.post { onProgress(r, t) }
                         notifyStatus("p $r $t")
                     }
+                }
+                Reassembly.OP_QUERY -> {
+                    // after a fast send: which parts never arrived ("m <bytes missing> off:len,...")
+                    val sb = StringBuilder("m ${reasm.missing()}")
+                    var sep = " "
+                    for ((o, l) in reasm.missingRanges(16)) {
+                        val part = "$sep$o:$l"
+                        if (sb.length + part.length > 180) break
+                        sb.append(part); sep = ","
+                    }
+                    val r = reasm.received; val t = reasm.total
+                    main.post { onProgress(r, t) }
+                    notifyStatus(sb.toString())
                 }
                 Reassembly.OP_END -> {
                     val bytes = reasm.end()

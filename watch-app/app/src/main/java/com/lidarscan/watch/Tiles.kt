@@ -70,17 +70,11 @@ class TileLayer(private val ctx: Context, private val onLoaded: () -> Unit) {
                     val fl = file(k)
                     if (fl.exists()) bmp = BitmapFactory.decodeFile(fl.absolutePath)
                     if (bmp == null && enabled) {
-                        val u = b.url!!.replace("{z}", "$z").replace("{x}", "$x").replace("{y}", "$y")
-                        val c = URL(u).openConnection() as HttpURLConnection
-                        c.connectTimeout = 10000; c.readTimeout = 15000
-                        c.setRequestProperty("User-Agent", "LiDARGuide-WearOS/1.0")
-                        try {
-                            if (c.responseCode == 200) {
-                                val bytes = c.inputStream.use { it.readBytes() }
-                                bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                if (bmp != null) { fl.parentFile?.mkdirs(); fl.writeBytes(bytes) }
-                            }
-                        } finally { c.disconnect() }
+                        val bytes = download(b, z, x, y)
+                        if (bytes != null) {
+                            bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                            if (bmp != null) { fl.parentFile?.mkdirs(); fl.writeBytes(bytes) }
+                        }
                     }
                 } catch (e: Exception) { /* offline: try again later */ }
                 synchronized(pending) { pending.remove(k); if (bmp == null) failed[k] = System.currentTimeMillis() }
@@ -88,6 +82,41 @@ class TileLayer(private val ctx: Context, private val onLoaded: () -> Unit) {
             }
         }
         return null
+    }
+
+    private fun download(b: Basemap, z: Int, x: Int, y: Int): ByteArray? {
+        val u = b.url!!.replace("{z}", "$z").replace("{x}", "$x").replace("{y}", "$y")
+        val c = URL(u).openConnection() as HttpURLConnection
+        c.connectTimeout = 10000; c.readTimeout = 15000
+        c.setRequestProperty("User-Agent", "LiDARGuide-WearOS/1.0")
+        try { return if (c.responseCode == 200) c.inputStream.use { it.readBytes() } else null } finally { c.disconnect() }
+    }
+
+    /**
+     * Saves the basemap tiles of an area on the watch (not in memory), at the
+     * zooms the map uses, so the area works offline later. At most 160 tiles.
+     */
+    fun prefetch(b: Basemap, a: MapImage) {
+        if (b.url == null || !enabled) return
+        val lat = (a.n + a.s) / 2
+        var budget = 160
+        for (mpp in doubleArrayOf(1.2, 4.8)) {   // the map's close and far zooms
+            val z = Geo.Tiles.zoomFor(mpp, lat, b.maxZ)
+            val x0 = floor(Geo.Tiles.x(a.w, z)).toInt(); val x1 = floor(Geo.Tiles.x(a.e, z)).toInt()
+            val y0 = floor(Geo.Tiles.y(a.n, z)).toInt(); val y1 = floor(Geo.Tiles.y(a.s, z)).toInt()
+            for (ty in y0..y1) for (tx in x0..x1) {
+                if (budget-- <= 0) return
+                val fl = file(key(b, z, tx, ty))
+                if (fl.exists()) continue
+                scope.launch {
+                    gate.withPermit {
+                        try {
+                            if (!fl.exists() && enabled) download(b, z, tx, ty)?.let { fl.parentFile?.mkdirs(); fl.writeBytes(it) }
+                        } catch (e: Exception) { /* offline: it loads when the map needs it */ }
+                    }
+                }
+            }
+        }
     }
 
     fun draw(nc: Canvas, view: Geo.View, b: Basemap, paint: Paint) {

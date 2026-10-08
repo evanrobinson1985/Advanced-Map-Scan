@@ -269,7 +269,7 @@ private fun drawMap(nc: android.graphics.Canvas, m: AppModel, view: Geo.View, fi
     }
     // the hillshade over it, see-through as set (solid with no basemap)
     p.image.alpha = if (b == Basemap.NONE) 255 else (m.hillshadeOpacity * 255).roundToInt().coerceIn(0, 255)
-    m.online?.let { (img, bmp) -> drawImage(nc, bmp, img, view, p.image) }
+    for ((a, bmp) in m.online) drawImage(nc, bmp, a.image, view, p.image)
     val pb = m.pkgBitmap
     if (pkg?.image != null && pb != null) drawImage(nc, pb, pkg.image, view, p.image)
 
@@ -519,8 +519,15 @@ fun SettingsScreen(act: MainActivity) {
                 toggleControl = { Switch(checked = m.headingUp) }, modifier = Modifier.fillMaxWidth())
         }
         item {
-            ToggleChip(checked = m.onlineMaps, onCheckedChange = { m.toggleOnlineMaps() }, label = { Text("Download map when needed") },
-                secondaryLabel = { Text("USGS hillshade, Wi-Fi / LTE") }, toggleControl = { Switch(checked = m.onlineMaps) }, modifier = Modifier.fillMaxWidth())
+            ToggleChip(checked = m.onlineMaps, onCheckedChange = { m.toggleOnlineMaps() }, label = { Text("Download maps as you go") },
+                secondaryLabel = { Text("Hillshade ahead of you, Wi-Fi / LTE") }, toggleControl = { Switch(checked = m.onlineMaps) }, modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            var sure by remember { mutableStateOf(false) }
+            Chip(onClick = { if (m.areaCount > 0) { if (sure) { m.clearDownloadedAreas(); sure = false } else sure = true } },
+                label = { Text(if (sure) "Tap again to delete" else "Downloaded areas: ${m.areaCount}") },
+                secondaryLabel = { Text(if (sure) "Received maps stay" else "Tap twice to delete them") },
+                colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
         }
         item {
             Chip(onClick = { m.nextBasemap() }, label = { Text("Basemap: ${m.basemap.label}") },

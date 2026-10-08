@@ -145,11 +145,28 @@ class Reassembly {
         require(offset >= 0 && offset + len <= b.size) { "piece outside the package" }
         System.arraycopy(bytes, from, b, offset, len)
         val g = got!!
+        received += len - g.get(offset, offset + len).cardinality()   // counts only bytes new to it
         g.set(offset, offset + len)
-        received = g.cardinality()
     }
 
     fun missing(): Int = total - received
+
+    /**
+     * The gaps still to fill, as (offset, length), the first `limit` of them:
+     * after a fast send (pieces not confirmed one by one) the phone asks for
+     * these and sends just them again.
+     */
+    fun missingRanges(limit: Int = 16): List<Pair<Int, Int>> {
+        val g = got ?: return emptyList()
+        val out = ArrayList<Pair<Int, Int>>()
+        var i = g.nextClearBit(0)
+        while (i < total && out.size < limit) {
+            val j = minOf(g.nextSetBit(i).let { if (it < 0) total else it }, total)
+            out.add(Pair(i, j - i))
+            i = g.nextClearBit(j)
+        }
+        return out
+    }
 
     /** The whole package, or an exception saying what is wrong. */
     fun end(): ByteArray {
@@ -165,5 +182,6 @@ class Reassembly {
         const val OP_BEGIN: Byte = 1
         const val OP_DATA: Byte = 2
         const val OP_END: Byte = 3
+        const val OP_QUERY: Byte = 4
     }
 }

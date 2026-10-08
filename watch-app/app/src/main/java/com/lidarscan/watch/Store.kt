@@ -8,11 +8,9 @@ import java.net.URL
 import java.net.URLEncoder
 import kotlin.math.cos
 
-/** The received package, the online map and the settings, kept on the watch. */
+/** The received packages, the downloaded map areas and the settings, kept on the watch. */
 object Store {
     private fun pkgFile(ctx: Context) = File(ctx.filesDir, "package.lwp")   // (before the history: moved into it)
-    private fun onlineImg(ctx: Context) = File(ctx.filesDir, "online.jpg")
-    private fun onlineMeta(ctx: Context) = File(ctx.filesDir, "online.json")
 
     // ---- the history of received packages ----
     // Every package received is kept (history/<id>.lwp, with a summary in
@@ -95,18 +93,46 @@ object Store {
     fun arriveM(ctx: Context) = prefs(ctx).getInt("arriveM", 10)
     fun setArriveM(ctx: Context, v: Int) = prefs(ctx).edit().putInt("arriveM", v).apply()
 
-    // ---- the online hillshade ----
-    fun loadOnline(ctx: Context): Pair<MapImage, ByteArray>? = try {
-        val m = JSONObject(onlineMeta(ctx).readText())
-        Pair(MapImage(m.getDouble("n"), m.getDouble("s"), m.getDouble("e"), m.getDouble("w"), m.getInt("pw"), m.getInt("ph")), onlineImg(ctx).readBytes())
-    } catch (e: Exception) { null }
+    // ---- the online hillshade: areas downloaded as you go ----
+    // Each area is online/<id>.jpg with its edges in <id>.json; the oldest
+    // are deleted past MAX_AREAS.
+    private const val MAX_AREAS = 40
+    private fun areaDir(ctx: Context) = File(ctx.filesDir, "online").apply { mkdirs() }
+
+    /** The downloaded areas (edges and picture file), oldest first. */
+    fun onlineAreas(ctx: Context): List<OnlineArea> {
+        migrateOnline(ctx)
+        return (areaDir(ctx).listFiles { f -> f.name.endsWith(".json") } ?: emptyArray()).mapNotNull { f ->
+            try {
+                val m = JSONObject(f.readText())
+                val img = File(areaDir(ctx), f.name.removeSuffix(".json") + ".jpg")
+                if (!img.exists()) null
+                else OnlineArea(m.getLong("id"), MapImage(m.getDouble("n"), m.getDouble("s"), m.getDouble("e"), m.getDouble("w"), m.getInt("pw"), m.getInt("ph")), img)
+            } catch (e: Exception) { null }
+        }.sortedBy { it.id }
+    }
+
+    // the single area kept by the version before this one becomes the first
+    private fun migrateOnline(ctx: Context) {
+        val img = File(ctx.filesDir, "online.jpg"); val meta = File(ctx.filesDir, "online.json")
+        if (!meta.exists()) return
+        try {
+            if (img.exists()) {
+                val id = img.lastModified()
+                img.renameTo(File(areaDir(ctx), "$id.jpg"))
+                File(areaDir(ctx), "$id.json").writeText(JSONObject(meta.readText()).put("id", id).toString())
+            }
+        } catch (e: Exception) { }
+        img.delete(); meta.delete()
+    }
 
     /**
      * Downloads a USGS 3DEP hillshade (the same 1 m LiDAR the web app uses,
      * shaded by the USGS server) of a square around a point, when the watch
-     * has Wi-Fi or LTE. Blocking: call off the main thread.
+     * has Wi-Fi or LTE, and keeps it with the other areas. Blocking: call off
+     * the main thread.
      */
-    fun fetchOnline(ctx: Context, lat: Double, lon: Double, halfM: Double = 600.0, px: Int = 800): Pair<MapImage, ByteArray> {
+    fun fetchOnline(ctx: Context, lat: Double, lon: Double, halfM: Double = 600.0, px: Int = 800): OnlineArea {
         val dLat = halfM / Geo.M_PER_DEG_LAT
         val dLon = halfM / (Geo.M_PER_DEG_LAT * cos(Geo.rad(lat)))
         val img = MapImage(lat + dLat, lat - dLat, lon + dLon, lon - dLon, px, px)
@@ -123,12 +149,25 @@ object Store {
             val type = conn.contentType ?: ""
             val bytes = conn.inputStream.use { it.readBytes() }
             if (!type.startsWith("image")) throw IllegalStateException("map server sent no picture")
-            onlineImg(ctx).writeBytes(bytes)
-            onlineMeta(ctx).writeText(JSONObject().put("n", img.n).put("s", img.s).put("e", img.e).put("w", img.w).put("pw", px).put("ph", px).toString())
-            return Pair(img, bytes)
+            var id = System.currentTimeMillis()
+            while (File(areaDir(ctx), "$id.json").exists()) id++
+            val f = File(areaDir(ctx), "$id.jpg")
+            f.writeBytes(bytes)
+            File(areaDir(ctx), "$id.json").writeText(JSONObject().put("id", id).put("n", img.n).put("s", img.s).put("e", img.e).put("w", img.w).put("pw", px).put("ph", px).toString())
+            val all = onlineAreas(ctx)
+            for (old in all.take(maxOf(0, all.size - MAX_AREAS))) deleteArea(ctx, old)
+            return OnlineArea(id, img, f)
         } finally { conn.disconnect() }
     }
+
+    private fun deleteArea(ctx: Context, a: OnlineArea) { a.file.delete(); File(areaDir(ctx), "${a.id}.json").delete() }
+
+    /** Deletes every downloaded area. */
+    fun clearOnline(ctx: Context) { areaDir(ctx).listFiles()?.forEach { it.delete() } }
 }
+
+/** One downloaded hillshade area. */
+data class OnlineArea(val id: Long, val image: MapImage, val file: File)
 
 /** One package kept in the history. */
 data class HistoryEntry(

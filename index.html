@@ -1505,22 +1505,76 @@
             server = await device.gatt.connect();
             const svc = await server.getPrimaryService(WATCH_SVC);
             const rx = await svc.getCharacteristic(WATCH_RX), st = await svc.getCharacteristic(WATCH_STATUS);
-            let result = null, resultWait = null;
+            let result = null, resultWait = null, gapWait = null;
             const done = new Promise(r => { resultWait = r; });
             st.addEventListener('characteristicvaluechanged', (e) => {
                 const t = new TextDecoder().decode(e.target.value);
                 if (t.startsWith('ok') || t.startsWith('err')) { result = t; resultWait(t); }
+                else if (t.startsWith('m ') && gapWait) { const g = gapWait; gapWait = null; g(t); }
             });
-            try { await st.startNotifications(); } catch (e) { /* the result is read at the end instead */ }
+            let notifying = true;
+            try { await st.startNotifications(); } catch (e) { notifying = false; /* the result is read at the end instead */ }
             const total = pkg.bytes.length, crc = crc32(pkg.bytes), t0 = Date.now();
             const head = new Uint8Array(9); head[0] = 1; new DataView(head.buffer).setUint32(1, total, false); new DataView(head.buffer).setUint32(5, crc, false);
-            await rx.writeValueWithResponse(head);
-            const PIECE = 495;
-            for (let off = 0; off < total; off += PIECE) {
-                const len = Math.min(PIECE, total - off), msg = new Uint8Array(5 + len);
+            const piece = (off, len) => {
+                const msg = new Uint8Array(5 + len);
                 msg[0] = 2; new DataView(msg.buffer).setUint32(1, off, false); msg.set(pkg.bytes.subarray(off, off + len), 5);
-                await rx.writeValueWithResponse(msg);
-                if ((off / PIECE) % 8 === 0) watchSay(`Sending to the watch: ${Math.round(100 * (off + len) / total)}% of ${Math.round(total / 1024)} KB (${Math.round((Date.now() - t0) / 1000)} s)...`);
+                return msg;
+            };
+            const say = (pct, how) => watchSay(`Sending to the watch${how}: ${Math.round(pct)}% of ${Math.round(total / 1024)} KB (${Math.round((Date.now() - t0) / 1000)} s)...`);
+            // careful mode: every piece confirmed by the watch before the next
+            const sendCareful = async (from, to, how) => {
+                const PIECE = 495;
+                for (let off = from, i = 0; off < to; off += PIECE, i++) {
+                    const len = Math.min(PIECE, to - off);
+                    await rx.writeValueWithResponse(piece(off, len));
+                    if (i % 8 === 0) say(100 * (off + len) / total, how);
+                }
+            };
+            // the watch's list of what never arrived: "m <bytes missing> off:len,..." (null: no answer)
+            const askGaps = async () => {
+                const ans = new Promise(r => { gapWait = r; });
+                await rx.writeValueWithResponse(new Uint8Array([4]));
+                const t = await Promise.race([ans, new Promise(r => setTimeout(() => r(null), 4000))]);
+                gapWait = null;
+                if (!t) return null;
+                const parts = t.split(' ');
+                const ranges = (parts[2] || '').split(',').filter(x => /^\d+:\d+$/.test(x)).map(x => x.split(':').map(Number))
+                    .filter(([o, l]) => l > 0 && o + l <= total);
+                return { missing: +parts[1] || 0, ranges };
+            };
+            // Fast mode: small pieces sent without waiting for each to be
+            // confirmed (several times quicker), then only the gaps the watch
+            // reports are sent again, carefully. If the phone, the watch or the
+            // link can't do it, it falls back to careful mode from the start.
+            let sent = false;
+            if (notifying && rx.properties && rx.properties.writeWithoutResponse && rx.writeValueWithoutResponse) {
+                try {
+                    await rx.writeValueWithResponse(head);
+                    const FAST = 235;
+                    for (let off = 0, i = 0; off < total; off += FAST, i++) {
+                        const len = Math.min(FAST, total - off);
+                        await rx.writeValueWithoutResponse(piece(off, len));
+                        if (i % 20 === 0) say(100 * (off + len) / total, ' (fast)');
+                    }
+                    for (let round = 0; round < 60; round++) {
+                        const g = await askGaps();
+                        if (!g) throw new Error('the watch did not report the gaps (an older watch app?)');
+                        if (!g.missing) { sent = true; break; }
+                        if (g.missing > total * 0.25) throw new Error(`${Math.round(100 * g.missing / total)}% did not arrive`);
+                        if (!g.ranges.length) throw new Error('no gap list');
+                        watchSay(`Sending to the watch: filling ${Math.max(1, Math.round(g.missing / 1024))} KB of gaps...`);
+                        for (const [o, l] of g.ranges) await sendCareful(o, o + l, ' (filling gaps)');
+                    }
+                    if (!sent) throw new Error('gaps kept appearing');
+                } catch (e) {
+                    console.warn('Fast send to the watch failed; sending carefully instead:', e);
+                    if (!(server && server.connected)) throw e;
+                }
+            }
+            if (!sent) {
+                await rx.writeValueWithResponse(head);
+                await sendCareful(0, total, '');
             }
             await rx.writeValueWithResponse(new Uint8Array([3]));
             const r = result || await Promise.race([done, new Promise(r2 => setTimeout(() => r2(null), 15000))]) ||

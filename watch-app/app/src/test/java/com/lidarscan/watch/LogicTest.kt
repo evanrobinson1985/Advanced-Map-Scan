@@ -159,6 +159,47 @@ class LogicTest {
         assertEquals(17, Geo.Tiles.zoomFor(1.2, 34.978, 19)); assertEquals(16, Geo.Tiles.zoomFor(1.2, 34.978, 16))
     }
 
+    @Test fun reportsGapsToRefill() {
+        val data = ByteArray(1000) { it.toByte() }
+        val r = Reassembly()
+        r.begin(data.size, crc(data))
+        assertEquals(listOf(Pair(0, 1000)), r.missingRanges())
+        r.data(0, data.copyOfRange(0, 100)); r.data(300, data.copyOfRange(300, 400)); r.data(950, data.copyOfRange(950, 1000))
+        r.data(300, data.copyOfRange(300, 350))   // sent twice: not counted twice
+        assertEquals(listOf(Pair(100, 200), Pair(400, 550)), r.missingRanges())
+        assertEquals(750, r.missing())
+        assertEquals(listOf(Pair(100, 200)), r.missingRanges(1))
+        for ((o, l) in r.missingRanges()) r.data(o, data.copyOfRange(o, o + l))
+        assertTrue(r.missingRanges().isEmpty())
+        assertTrue(data.contentEquals(r.end()))
+    }
+
+    private fun square(lat: Double, lon: Double, halfM: Double): MapImage {
+        val l = Geo.Local(lat, lon)
+        return MapImage(l.lat(halfM), l.lat(-halfM), l.lon(halfM), l.lon(-halfM), 800, 800)
+    }
+
+    @Test fun mapsAsYouGo() {
+        val lat = 34.978; val lon = -85.81
+        // no map: the area around you
+        assertEquals(Pair(lat, lon), Geo.nextArea(lat, lon, emptyList(), 600.0))
+        // in the middle of a map: nothing to do
+        val a = square(lat, lon, 600.0)
+        assertNull(Geo.nextArea(lat, lon, listOf(a), 600.0))
+        // 400 m east of its centre (within 300 m of its east edge): the next area lies east, and you are inside it
+        val l = Geo.Local(lat, lon)
+        val pLon = l.lon(400.0)
+        val c = Geo.nextArea(lat, pLon, listOf(a), 600.0)!!
+        val here = Geo.Local(lat, pLon)
+        assertEquals(300.0, here.east(c.second), 1.0); assertEquals(0.0, here.north(c.first), 1.0)
+        val b = square(c.first, c.second, 600.0)
+        // with that one too, you're covered
+        assertNull(Geo.nextArea(lat, pLon, listOf(a, b), 600.0))
+        // near the north-east corner: the next one goes north-east
+        val d = Geo.nextArea(l.lat(450.0), l.lon(450.0), listOf(a), 600.0)!!
+        assertTrue(d.first > l.lat(450.0) && d.second > l.lon(450.0))
+    }
+
     /** A package made by the web app (written by its test), when present. */
     @Test fun decodesWebAppPackage() {
         val f = File(System.getProperty("webPackage") ?: System.getenv("WEB_PACKAGE") ?: return)

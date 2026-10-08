@@ -105,6 +105,30 @@ object Geo {
         }
     }
 
+    /**
+     * Maps as you go, as the web app's scan as you go: the ground a quarter of
+     * an area's width around you (`halfM` is half the width) is checked in 16
+     * directions. If all of it lies on the maps the watch has (`areas`), null.
+     * Otherwise the centre of the next area to download: shifted towards the
+     * unmapped ground, so it covers the way ahead and you stay well inside it.
+     */
+    fun nextArea(lat: Double, lon: Double, areas: List<MapImage>, halfM: Double): Pair<Double, Double>? {
+        fun on(la: Double, lo: Double) = areas.any { la < it.n && la > it.s && lo < it.e && lo > it.w }
+        if (!on(lat, lon)) return Pair(lat, lon)
+        val local = Local(lat, lon)
+        val r = halfM / 2
+        var ve = 0.0; var vn = 0.0; var misses = 0
+        for (i in 0 until 16) {
+            val a = 2 * PI * i / 16
+            if (!on(local.lat(r * cos(a)), local.lon(r * sin(a)))) { ve += sin(a); vn += cos(a); misses++ }
+        }
+        if (misses == 0) return null
+        val len = sqrt(ve * ve + vn * vn)
+        if (len < 1e-6) return Pair(lat, lon)
+        val shift = halfM / 2
+        return Pair(local.lat(vn / len * shift), local.lon(ve / len * shift))
+    }
+
     /** Web-map tiles (the usual z/x/y scheme): which tiles cover a place, and where a tile lies. */
     object Tiles {
         private const val MPP0 = 156543.03392   // metres per pixel at zoom 0 on the equator (256 px tiles)
