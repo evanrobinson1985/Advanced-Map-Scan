@@ -78,7 +78,7 @@ With Wi-Fi or LTE, it can also download a USGS hillshade around you. The install
 
 Each line has:
 - a bar with the percentage done. The download, the mound scan, the deep-learning scan, sections and Scan All are measured; the other scans show a moving stripe with their current step. An outer line moves on smoothly as the job inside it progresses;
-- the time taken, and roughly how long is left;
+- the time taken, and roughly how long is left. The time left shows only on lines that measure their own progress; an outer line made of steps of unequal length leaves it to the line inside it;
 - what it is doing now (for example *measuring 885 candidates*, or *Section 1 of 6: preparing the terrain*).
 
 Below the lines are the number of results on the map and a **Stop** button for the outermost job that can be stopped: a download, Scan All, a deep-learning scan, or scan as you go.
