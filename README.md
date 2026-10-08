@@ -57,6 +57,15 @@ Pressing the button again brings the map back to you. **Stop following my locati
 - Turning it off (or Stop following my location) finishes the tile under way and adds the whole trip to the scan history as one entry.
 - It uses mobile data: up to about 6 MB per 1 km tile.
 
+**Galaxy Watch.** The *Watch* box sends your results to **LiDAR Guide**, a companion app for the Samsung Galaxy Watch Ultra 2 and other Wear OS watches (in [`watch-app/`](watch-app/README.md)). It sends either all results on the map or those in view, with a hillshade of the loaded LiDAR at 1 m or 2 m. On the watch, open *LiDAR Guide › ☰ › Receive from phone*, then press **⌚ Send to watch** in Chrome on the Android phone and pick the watch; the transfer goes over Bluetooth.
+
+The watch then works on its own:
+- the waypoints over the hillshade, with your live GPS position and compass heading;
+- a guide arrow to the waypoint you pick, with a buzz when you arrive;
+- each waypoint's details.
+
+With Wi-Fi or LTE, it can also download a USGS hillshade around you. The installable APK is built by GitHub and published as the [watch-app release](https://github.com/evanrobinson1985/Advanced-Map-Scan/releases/tag/watch-app). [watch-app/README.md](watch-app/README.md) explains how to install it.
+
 **Smooth map while scanning.** The heavy number-crunching runs on background threads, so the map keeps panning and zooming smoothly during scans, downloads and scan as you go. That covers the drainage network, the terrain fill and trend surfaces, measuring every candidate bump, the effigy and shell midden searches, and the automatic settings for a new download. Collecting deep-learning samples from a new download (training items, background and look-alikes) is done in short steps, with breaks for the map between them. The deep-learning scan works out its openness views in the background, scores small batches and reads each back without holding up the page (on a GPU, the page stays free while the network runs). Measuring is shared over up to 4 threads, which also makes the mound scan about twice as fast. The results are exactly the same as before: the threads run the same code. Long loops that stay on the page take a short break every 25 ms to let the map redraw. If a browser can't start background threads, everything runs on the page as before.
 
 In testing on 1.5 km of 1 m LiDAR around Russell Cave, the longest freezes were:
