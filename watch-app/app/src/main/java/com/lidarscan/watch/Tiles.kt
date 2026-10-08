@@ -21,6 +21,28 @@ import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 
+/** Where a layer's map tiles come from: the address of tile z/x/y, and the sharpest zoom it has. */
+class TileSource(val key: String, val maxZ: Int, val urlFor: (z: Int, x: Int, y: Int) -> String) {
+    companion object {
+        fun template(key: String, url: String, maxZ: Int) =
+            TileSource(key, maxZ) { z, x, y -> url.replace("{z}", "$z").replace("{x}", "$x").replace("{y}", "$y") }
+
+        /**
+         * The LiDAR hillshade, as tiles: the USGS 3DEP elevation service
+         * (1 m LiDAR where flown, as the web app uses) shaded by the USGS
+         * server, cut to the web map's tiles. It loads as you look around the
+         * map, like the satellite imagery. Zoom 17 is about 1 m a pixel here;
+         * closer than that the tiles are enlarged.
+         */
+        val HILLSHADE = TileSource("hillshade", 17) { z, x, y ->
+            val (w, sth, e, n) = Geo.Tiles.mercatorBox(z, x, y)
+            "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage" +
+                "?bbox=$w,$sth,$e,$n&bboxSR=3857&imageSR=3857&size=256,256&format=jpgpng" +
+                "&renderingRule=%7B%22rasterFunction%22%3A%22Hillshade%20Gray%22%7D&interpolation=RSP_BilinearInterpolation&f=image"
+        }
+    }
+}
+
 /** A basemap the watch can show. */
 enum class Basemap(val key: String, val label: String, val url: String?, val maxZ: Int) {
     SATELLITE("satellite", "Satellite", "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", 19),
@@ -29,6 +51,7 @@ enum class Basemap(val key: String, val label: String, val url: String?, val max
     NONE("none", "None", null, 0);
 
     fun next(): Basemap = values()[(ordinal + 1) % values().size]
+    val source: TileSource? by lazy { url?.let { TileSource.template(key, it, maxZ) } }
 
     companion object {
         fun of(key: String?): Basemap = values().firstOrNull { it.key == key } ?: SATELLITE
@@ -43,7 +66,7 @@ enum class Basemap(val key: String, val label: String, val url: String?, val max
  * as each arrives, so the map redraws.
  */
 class TileLayer(private val ctx: Context, private val onLoaded: () -> Unit) {
-    private val mem = LruCache<String, Bitmap>(72)
+    private val mem = LruCache<String, Bitmap>(96)
     private val pending = HashSet<String>()
     private val failed = HashMap<String, Long>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -52,10 +75,10 @@ class TileLayer(private val ctx: Context, private val onLoaded: () -> Unit) {
 
     fun close() = scope.cancel()
 
-    private fun key(b: Basemap, z: Int, x: Int, y: Int) = "${b.key}/$z/$x/$y"
+    private fun key(b: TileSource, z: Int, x: Int, y: Int) = "${b.key}/$z/$x/$y"
     private fun file(k: String) = File(ctx.cacheDir, "tiles/$k.img")
 
-    private fun get(b: Basemap, z: Int, x: Int, y: Int): Bitmap? {
+    private fun get(b: TileSource, z: Int, x: Int, y: Int): Bitmap? {
         val k = key(b, z, x, y)
         mem.get(k)?.let { return it }
         synchronized(pending) {
@@ -84,8 +107,8 @@ class TileLayer(private val ctx: Context, private val onLoaded: () -> Unit) {
         return null
     }
 
-    private fun download(b: Basemap, z: Int, x: Int, y: Int): ByteArray? {
-        val u = b.url!!.replace("{z}", "$z").replace("{x}", "$x").replace("{y}", "$y")
+    private fun download(b: TileSource, z: Int, x: Int, y: Int): ByteArray? {
+        val u = b.urlFor(z, x, y)
         val c = URL(u).openConnection() as HttpURLConnection
         c.connectTimeout = 10000; c.readTimeout = 15000
         c.setRequestProperty("User-Agent", "LiDARGuide-WearOS/1.0")
@@ -96,8 +119,8 @@ class TileLayer(private val ctx: Context, private val onLoaded: () -> Unit) {
      * Saves the basemap tiles of an area on the watch (not in memory), at the
      * zooms the map uses, so the area works offline later. At most 160 tiles.
      */
-    fun prefetch(b: Basemap, a: MapImage) {
-        if (b.url == null || !enabled) return
+    fun prefetch(b: TileSource?, a: MapImage) {
+        if (b == null || !enabled) return
         val lat = (a.n + a.s) / 2
         var budget = 160
         for (mpp in doubleArrayOf(1.2, 4.8)) {   // the map's close and far zooms
@@ -119,8 +142,8 @@ class TileLayer(private val ctx: Context, private val onLoaded: () -> Unit) {
         }
     }
 
-    fun draw(nc: Canvas, view: Geo.View, b: Basemap, paint: Paint) {
-        if (b.url == null) return
+    fun draw(nc: Canvas, view: Geo.View, b: TileSource?, paint: Paint) {
+        if (b == null) return
         val w = view.cx * 2; val h = view.cy * 2
         // the ground under the screen (all four corners, so a turned map is covered)
         val corners = listOf(view.toLatLon(0f, 0f), view.toLatLon(w, 0f), view.toLatLon(0f, h), view.toLatLon(w, h))

@@ -245,7 +245,7 @@ class AppModel(private val ctx: Context) {
             try {
                 val a = withContext(Dispatchers.IO) { Store.fetchOnline(ctx, c.first, c.second, AREA_HALF_M) }
                 areas = withContext(Dispatchers.IO) { Store.onlineAreas(ctx) }; areaCount = areas.size
-                tiles.prefetch(basemap, a.image)
+                tiles.prefetch(basemap.source, a.image)
                 onlineNote = ""
                 shownAt = null; showAreasNear(f.lat, f.lon)
             } catch (e: Exception) {

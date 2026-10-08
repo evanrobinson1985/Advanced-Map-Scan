@@ -31,6 +31,8 @@ The map shows a basemap under the LiDAR hillshade, with the hillshade see-throug
 - **Settings › Basemap** does the same.
 - **Settings › Hillshade** steps the opacity through 40, 55, 70, 85 and 100%. With no basemap, the hillshade is solid.
 
+**The hillshade loads live** as you scroll and zoom the map, like the satellite imagery. Wherever you look, the watch loads LiDAR hillshade tiles from the USGS 3DEP service when it has Wi-Fi or LTE (with *Download maps as you go* on). That is the same 1 m LiDAR the web app uses where it has been flown, and coarser elsewhere. Tiles are kept on the watch, so places you've looked at work offline later. The hillshade sent from the phone is drawn over the live tiles, and the hillshade opacity applies to all of it as one layer, so overlaps aren't darker.
+
 The satellite imagery (or topo map) for the sent area comes with the waypoints, so it works with no signal. Other basemaps, and ground outside the sent area, load as map tiles when the watch has Wi-Fi or LTE (with *Download maps as you go* on). Tiles are kept on the watch, so places you've seen work offline later.
 
 ## Keeping the screen on, and dimming when your arm is down

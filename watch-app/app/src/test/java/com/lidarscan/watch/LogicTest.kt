@@ -213,6 +213,19 @@ class LogicTest {
         assertTrue(d.first > l.lat(450.0) && d.second > l.lon(450.0))
     }
 
+    @Test fun hillshadeTileEdges() {
+        // web-map metres back to degrees
+        val r = 6378137.0
+        fun lon(xm: Double) = Math.toDegrees(xm / r)
+        fun lat(ym: Double) = Math.toDegrees(2 * Math.atan(Math.exp(ym / r)) - Math.PI / 2)
+        val z = 16; val x = Geo.Tiles.x(-85.8099, z).toInt(); val y = Geo.Tiles.y(34.978, z).toInt()
+        val (w, s, e, n) = Geo.Tiles.mercatorBox(z, x, y)
+        assertEquals(Geo.Tiles.lon(x.toDouble(), z), lon(w), 1e-9); assertEquals(Geo.Tiles.lon(x + 1.0, z), lon(e), 1e-9)
+        assertEquals(Geo.Tiles.lat(y.toDouble(), z), lat(n), 1e-9); assertEquals(Geo.Tiles.lat(y + 1.0, z), lat(s), 1e-9)
+        // the tile holds the place it was chosen for
+        assertTrue(-85.8099 in lon(w)..lon(e) && 34.978 in lat(s)..lat(n))
+    }
+
     /** A package made by the web app (written by its test), when present. */
     @Test fun decodesWebAppPackage() {
         val f = File(System.getProperty("webPackage") ?: System.getenv("WEB_PACKAGE") ?: return)

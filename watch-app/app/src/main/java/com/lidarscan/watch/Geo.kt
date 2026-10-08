@@ -139,6 +139,13 @@ object Geo {
         }
         fun lon(x: Double, z: Int) = x / (1 shl z) * 360.0 - 180.0
         fun lat(y: Double, z: Int) = deg(Math.atan(Math.sinh(PI * (1 - 2 * y / (1 shl z)))))
+        private const val ORIGIN = 20037508.342789244   // half the web map's width, in its metres (EPSG:3857)
+        /** A tile's edges in web-map metres (EPSG:3857): west, south, east, north. */
+        fun mercatorBox(z: Int, x: Int, y: Int): List<Double> {
+            val size = 2 * ORIGIN / (1 shl z)
+            val w = -ORIGIN + x * size; val n = ORIGIN - y * size
+            return listOf(w, n - size, w + size, n)
+        }
         /** The zoom whose tiles are at least as sharp as the view (metres per screen pixel), up to maxZ. */
         fun zoomFor(mPerPx: Double, lat: Double, maxZ: Int): Int {
             val z = Math.ceil(Math.log(MPP0 * cos(rad(lat)) / mPerPx) / Math.log(2.0)).toInt()

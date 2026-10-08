@@ -265,15 +265,24 @@ private fun drawMap(nc: android.graphics.Canvas, m: AppModel, view: Geo.View, fi
     // picture sent from the phone over them (it works with no signal)
     val b = m.basemap
     if (b != Basemap.NONE) {
-        if (m.onlineMaps) m.tiles.draw(nc, view, b, p.base)
+        if (m.onlineMaps) m.tiles.draw(nc, view, b.source, p.base)
         val bb = m.baseBitmap; val bi = pkg?.baseImage
         if (bb != null && bi != null && pkg?.baseSrc == b.key) drawImage(nc, bb, bi, view, p.base)
     }
-    // the hillshade over it, see-through as set (solid with no basemap)
-    p.image.alpha = if (b == Basemap.NONE) 255 else (m.hillshadeOpacity * 255).roundToInt().coerceIn(0, 255)
+    // the hillshade over it, see-through as set (solid with no basemap). Its
+    // layers are put together solid first, then laid on at that opacity once,
+    // so where they overlap it isn't any darker:
+    //  - the live hillshade tiles, loaded as you look around (when online, or saved earlier)
+    //  - the areas downloaded as you go
+    //  - the hillshade sent from the phone, on top
+    val alpha = if (b == Basemap.NONE) 255 else (m.hillshadeOpacity * 255).roundToInt().coerceIn(0, 255)
+    val layer = nc.saveLayerAlpha(null, alpha)
+    p.image.alpha = 255
+    m.tiles.draw(nc, view, TileSource.HILLSHADE, p.image)
     for ((a, bmp) in m.online) drawImage(nc, bmp, a.image, view, p.image)
     val pb = m.pkgBitmap
     if (pkg?.image != null && pb != null) drawImage(nc, pb, pkg.image, view, p.image)
+    nc.restoreToCount(layer)
 
     val wps = m.visibleWaypoints
     // outlines when zoomed in enough to see them
