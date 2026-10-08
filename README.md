@@ -57,7 +57,7 @@ Pressing the button again brings the map back to you. **Stop following my locati
 - Turning it off (or Stop following my location) finishes the tile under way and adds the whole trip to the scan history as one entry.
 - It uses mobile data: up to about 6 MB per 1 km tile.
 
-**Smooth map while scanning.** The heavy number-crunching runs on background threads, so the map keeps panning and zooming smoothly during scans, downloads and scan as you go. That covers the drainage network, the terrain fill and trend surfaces, measuring every candidate bump, the effigy and shell midden searches, and the automatic settings for a new download. Collecting deep-learning samples from a new download (training items, background and look-alikes) is done in short steps, with breaks for the map between them. Measuring is shared over up to 4 threads, which also makes the mound scan about twice as fast. The results are exactly the same as before: the threads run the same code. Long loops that stay on the page take a short break every 25 ms to let the map redraw. If a browser can't start background threads, everything runs on the page as before.
+**Smooth map while scanning.** The heavy number-crunching runs on background threads, so the map keeps panning and zooming smoothly during scans, downloads and scan as you go. That covers the drainage network, the terrain fill and trend surfaces, measuring every candidate bump, the effigy and shell midden searches, and the automatic settings for a new download. Collecting deep-learning samples from a new download (training items, background and look-alikes) is done in short steps, with breaks for the map between them. The deep-learning scan works out its openness views in the background, scores small batches and reads each back without holding up the page (on a GPU, the page stays free while the network runs). Measuring is shared over up to 4 threads, which also makes the mound scan about twice as fast. The results are exactly the same as before: the threads run the same code. Long loops that stay on the page take a short break every 25 ms to let the map redraw. If a browser can't start background threads, everything runs on the page as before.
 
 In testing on 1.5 km of 1 m LiDAR around Russell Cave, the longest freezes were:
 
@@ -65,6 +65,7 @@ In testing on 1.5 km of 1 m LiDAR around Russell Cave, the longest freezes were:
 |---|---|---|
 | Mound scan | 17 s | 0.3 s |
 | Effigy scan | 3.9 s | 0.13 s |
+| Deep-learning mound scan | 4.2 s | 0.14 s |
 | Automatic settings after a download | 0.85 s | 0.05 s |
 | A whole scan-as-you-go walk (7 tiles) | — | 0.18 s |
 
