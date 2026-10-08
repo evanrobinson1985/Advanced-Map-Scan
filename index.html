@@ -1221,7 +1221,7 @@
         const status = document.getElementById('status'), areaNo = sag.areas.length + 1;
         const say = (m) => { sagSet(`Area ${areaNo}: ${m}`); progSet('sag', { text: m.charAt(0).toUpperCase() + m.slice(1) }); };
         progBegin('sag', `Scan as you go · area ${areaNo}`, { cancel: () => { const cb = document.getElementById('sagOn'); if (cb) cb.checked = false; sagToggle(false); } });
-        progSet('sag', { frac: 0 });
+        progSet('sag', { frac: 0, span: [0, 0.25] });
         const prev = sag.areas.filter(a => !a.failed).map(a => a.r);
         // everything on the map now stays (a download clears the map)
         const kept = new Set(detectedFeatures.filter(f => f.mode !== 'settlement'));
@@ -1235,7 +1235,7 @@
             window.__dlBoundsOverride = bnd;
             try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
             sagRestore(kept);
-            progSet('sag', { frac: 0.25 });
+            progSet('sag', { frac: 0.25, span: null });
             if (!fullDemGrid || fullDemGrid === before) { sag.areas.push({ r: A, failed: true, n: 0 }); say('no LiDAR terrain could be downloaded here; moving on.'); return; }
             // the automatic settings for the new area run first (when that option is on)
             await new Promise(r => setTimeout(r, 120));
@@ -1271,6 +1271,7 @@
                 else {
                     const b0 = new Set(detectedFeatures);
                     scanInProgress = true;
+                    progSet('sag', { span: [0.25, doDL ? 0.55 : 1] });
                     try {
                         await runInSections(scanSections(false), async () => {
                             for (let k = 0; k < modes.length; k++) {
@@ -1285,7 +1286,7 @@
                     }
                     settle(modes, b0);
                     for (const m of modes) sag.modes.add(m);
-                    progSet('sag', { frac: doDL ? 0.55 : 1 });
+                    progSet('sag', { frac: doDL ? 0.55 : 1, span: null });
                     // the regular results are on the map while the network runs
                     updateDetectionLegend(); updateExportButtons();
                 }
@@ -1299,6 +1300,7 @@
                     // the network's windows reach 60 m past the area, so a mound near its
                     // edge is scored whole; only peaks inside it are kept
                     const ext = 60, eLon = ext / mLon, eLat = ext / 111320;
+                    progSet('sag', { span: [doRegular ? 0.55 : 0.25, 1] });
                     window.__dlAreaOverride = { n: A.n + eLat, s: A.s - eLat, e: A.e + eLon, w: A.w - eLon, core: { n: A.n, s: A.s, e: A.e, w: A.w } }; window.__sagQuiet = true;
                     try { await dlScan(); } finally { window.__dlAreaOverride = null; window.__sagQuiet = false; }
                     settle([DL.RESULT_MODE], b0);
@@ -1725,7 +1727,10 @@
     // stripe where it can't), the time taken and the time left, and what it
     // is doing now (the status line's latest message). A Stop button stops
     // the outermost job that can be stopped. Jobs call progBegin(key, title,
-    // {cancel}), progSet(key, {frac, text}) and progEnd(key).
+    // {cancel}), progSet(key, {frac, text, span}) and progEnd(key). With
+    // span [a, b], a line runs from a to b as the job inside it progresses
+    // (a step taking that share of the whole), so its bar and time left
+    // move smoothly.
     const progLevels = [];
     let progRaf = 0, progStatusText = '', progLastEnd = 0;
     function progBegin(key, title, opts) {
@@ -1771,8 +1776,14 @@
         const now = Date.now(), inner = progLevels[progLevels.length - 1];
         const stopper = progLevels.find(l => l.cancel);
         const colors = ['#2563eb', '#7c3aed', '#0891b2', '#16a34a'];
+        // the share done of each line, innermost first (a span follows the line inside it)
+        const eff = new Array(progLevels.length).fill(null);
+        for (let i = progLevels.length - 1; i >= 0; i--) {
+            const l = progLevels[i], innerF = i + 1 < progLevels.length ? eff[i + 1] : null;
+            eff[i] = l.span && innerF != null ? l.span[0] + (l.span[1] - l.span[0]) * innerF : l.frac;
+        }
         const rows = progLevels.map((l, i) => {
-            const el = now - l.t0, f = l.frac;
+            const el = now - l.t0, f = eff[i];
             let left = '';
             if (f != null && f >= 0.03 && f < 1 && el > 3000) left = ` · about ${progTime(el * (1 - f) / f)} left`;
             const text = l.ownText ? l.text : (l === inner ? progStatusText : '');
@@ -2009,7 +2020,7 @@ onmessage = (e) => {
         progBegin('sections', `${secs.length} sections, ${km2.toFixed(1)} km² in all`);
         try {
         for (let i = 0; i < secs.length && !(stop && stop()); i++) {
-            progSet('sections', { frac: i / secs.length, title: `Section ${i + 1} of ${secs.length} (${km2.toFixed(1)} km² in all)` });
+            progSet('sections', { frac: i / secs.length, span: [i / secs.length, (i + 1) / secs.length], title: `Section ${i + 1} of ${secs.length} (${km2.toFixed(1)} km² in all)` });
             const sec = secs[i], before = new Set(detectedFeatures), beforeOv = new Set(last3DOverlays);
             await withStatusPrefix(`Section ${i + 1} of ${secs.length} (${km2.toFixed(1)} km² in all): `, () => withGrid(cropGrid(g, sec.r0, sec.c0, sec.r1, sec.c1), fn));
             done++;
@@ -12405,6 +12416,7 @@ onmessage = (e) => {
                 for (let idx = 0; idx < order.length && !scanAllCancel; idx++) {
                     const m = order[idx];
                     ptext.innerText = `Scan All: ${secs.length > 1 ? `section ${secNo} of ${secs.length}, ` : ''}${idx + 1} of ${order.length} - ${MODE_STYLE[m].label}...`;
+                    { const k0 = (secNo - 1) * order.length + idx, kt = secs.length * order.length; progSet('scanall', { span: [k0 / kt, (k0 + 1) / kt] }); }
                     progSet('scanall', { title: `Scan All: mode ${idx + 1} of ${order.length}${secs.length > 1 ? `, section ${secNo} of ${secs.length}` : ''}` });
                     scanModeEl.value = m;
                     onScanModeChange(); // loads this mode's thresholds into the sliders

@@ -74,6 +74,15 @@ The watch then works on its own:
 
 With Wi-Fi or LTE, it can also download a USGS hillshade around you. The installable APK is built by GitHub and published as the [watch-app release](https://github.com/evanrobinson1985/Advanced-Map-Scan/releases/tag/watch-app). [watch-app/README.md](watch-app/README.md) explains how to install it.
 
+**Progress.** While anything runs, a card on the map shows what is happening, just above the settings panel, so you see it with the panel folded away. It covers a download, a scan, Scan All, a deep-learning scan, the automatic settings, or scan as you go. The card has one line per job, outermost first; for example *Scan as you go · area 2*, then *Section 1 of 2*, then *Scanning: Mounds*.
+
+Each line has:
+- a bar with the percentage done. The download, the mound scan, the deep-learning scan, sections and Scan All are measured; the other scans show a moving stripe with their current step. An outer line moves on smoothly as the job inside it progresses;
+- the time taken, and roughly how long is left;
+- what it is doing now (for example *measuring 885 candidates*, or *Section 1 of 6: preparing the terrain*).
+
+Below the lines are the number of results on the map and a **Stop** button for the outermost job that can be stopped: a download, Scan All, a deep-learning scan, or scan as you go.
+
 **Smooth map while scanning.** The heavy number-crunching runs on background threads, so the map keeps panning and zooming smoothly during scans, downloads and scan as you go. That covers the drainage network, the terrain fill and trend surfaces, measuring every candidate bump, the effigy and shell midden searches, and the automatic settings for a new download. Collecting deep-learning samples from a new download (training items, background and look-alikes) is done in short steps, with breaks for the map between them. The deep-learning scan works out its openness views in the background, scores small batches and reads each back without holding up the page (on a GPU, the page stays free while the network runs). Measuring is shared over up to 4 threads, which also makes the mound scan about twice as fast. The results are exactly the same as before: the threads run the same code. Long loops that stay on the page take a short break every 25 ms to let the map redraw. If a browser can't start background threads, everything runs on the page as before.
 
 In testing on 1.5 km of 1 m LiDAR around Russell Cave, the longest freezes were:
