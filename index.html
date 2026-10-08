@@ -693,6 +693,11 @@
         <div class="slider-row">
             <label><input type="checkbox" id="excludeWaterways" checked onchange="syncWaterwayUI()" style="margin-right:6px;"> Exclude Waterways</label>
         </div>
+        <div class="slider-row">
+            <label title="Mountain roads, logging roads and trails, found in the terrain"><input type="checkbox" id="excludeRoads" checked style="margin-right:6px;"> Exclude Roads &amp; Trails</label>
+        </div>
+        <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem; margin:-2px 0 2px 22px;"><input type="checkbox" id="showRoads" onchange="roadOverlayToggle()"> Show the roads &amp; trails found</label>
+        <div style="font-size:0.68rem; color:#94a3b8; margin:0 0 6px; line-height:1.35;">Finds roads and trails cut into hillsides in the LiDAR itself, as waterways are found (most mountain and logging roads aren't on any map): long, narrow, level benches across steep ground. Small mounds beside them (spoil pushed off the road, berms, the noses between switchbacks) are skipped by the mound scan and the deep-learning scans; bigger ones are only flagged.</div>
         <div class="slider-row" id="waterwayThresholdRow">
             <label>Waterway Threshold</label>
             <input type="range" id="waterwayThreshold" min="0.1" max="20" step="0.1" value="1" oninput="updateThresholdVal('waterwayThreshold','ac',1)">
@@ -2036,7 +2041,9 @@
                      // the automatic settings
                      slidingExtreme1D, extremeFilter2D,
                      // the deep-learning scan's openness views
-                     dlOpenness];
+                     dlOpenness,
+                     // roads and trails cut into hillsides
+                     findRoadBenches];
         return `'use strict';
 const MOUND_MAX_ROUGH = ${MOUND_MAX_ROUGH}, MOUND_TILT_MIN = ${MOUND_TILT_MIN}, IMOUND_OFFSET = ${IMOUND_OFFSET};
 const BUILT_WHY = ${JSON.stringify(BUILT_WHY)}, EFFIGY_MAX_H = ${EFFIGY_MAX_H}, FT_TO_M = ${FT_TO_M};
@@ -2056,6 +2063,7 @@ const ops = {
         return { denoised, filled, filledEps, dir, accum };
     },
     moundTrend, iMoundHeights,
+    roads: findRoadBenches,
     sort(a) { return a.sort(); },
     openness: dlOpenness,
     hiLo(hiIn, loIn, W, H, R) { return { hi: extremeFilter2D(hiIn, W, H, R, true), lo: extremeFilter2D(loIn, W, H, R, false) }; },
@@ -6433,9 +6441,10 @@ onmessage = (e) => {
             const sections = dlSections(area, RW, RH, mLon), km2 = (RW * RH * DL.RES * DL.RES / 1e6);
             const effigyModel = DL.TRAIN_MODE !== 'mounds', shellModel = DL.TRAIN_MODE === 'shell';   // effigyModel: either traced (non-mound) model
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
-            let skippedRejected = 0, skippedBuilt = 0, skippedSteep = 0, hiddenDoubtLoop = 0;
+            let skippedRejected = 0, skippedBuilt = 0, skippedSteep = 0, skippedRoad = 0, hiddenDoubtLoop = 0;
             const results = [], kept = [];
             const dlBuildings = await builtBuildingsForScan(g);
+            const dlRoads = roadsOn() ? await roadDataFor(g) : null;
             // clear false alarms (a bump on steep ground, no closed rise, far
             // too small, a ridge) are hidden, and kept as look-alikes for the
             // next training so the network stops making the same mistake
@@ -6462,7 +6471,7 @@ onmessage = (e) => {
                     for (const o of clash) {
                         kept.splice(kept.indexOf(o), 1);
                         if (o._out === 'result') { const i = results.findIndex(r2 => r2.lat === o.lat && r2.lon === o.lon); if (i >= 0) results.splice(i, 1); }
-                        else if (o._out === 'rejected') skippedRejected--; else if (o._out === 'built') skippedBuilt--; else if (o._out === 'steep') skippedSteep--; else if (o._out === 'hidden') hiddenDoubtLoop--;
+                        else if (o._out === 'rejected') skippedRejected--; else if (o._out === 'built') skippedBuilt--; else if (o._out === 'steep') skippedSteep--; else if (o._out === 'road') skippedRoad--; else if (o._out === 'hidden') hiddenDoubtLoop--;
                         if (o._mined) { const i = mined.indexOf(o._mined); if (i >= 0) mined.splice(i, 1); }
                     }
                     kept.push(pk); curPk = pk;
@@ -6477,6 +6486,13 @@ onmessage = (e) => {
                         if (builtSettings().mapped && onMappedBuilding(dlBuildings, la, lo, 5)) { skippedBuilt++; pk._out = 'built'; continue; }
                         if (effigyModel && meas && meas.why && meas.why.includes(BUILT_WHY)) { skippedBuilt++; pk._out = 'built'; continue; }
                         if (!effigyModel && builtSettings().shape) { const bs = builtShapeAt(g, la, lo, meas ? meas.d : 15); if (bs && bs.verdict === 'built') { skippedBuilt++; pk._out = 'built'; continue; } if (bs && bs.verdict === 'maybe') pk.builtMaybe = bs; }
+                        // spoil, berms and switchback noses beside roads and trails: skipped, and
+                        // kept as look-alikes so the network learns not to flag them
+                        if (!effigyModel) {
+                            const rc = roadCheck(dlRoads, la, lo, meas ? meas.d : 15, meas ? meas.h : null);
+                            if (rc && rc.verdict === 'road') { skippedRoad++; pk._out = 'road'; if (DL.LOOK_PER_AREA) mine(la, lo, ROAD_WHY); continue; }
+                            if (rc) pk.roadMaybe = rc;
+                        }
                         // the mound scan's hillside rules: nothing on ground steeper
                         // than 20 degrees; above the Flat-ground slope setting only a
                         // clean mound shape counts (others are listed last, flagged)
@@ -6550,7 +6566,7 @@ onmessage = (e) => {
                     const keep = list.filter(r2 => r2.agree || r2.known || !(!r2.meas || r2.small || r2.hillside || (r2.groundSlope != null && r2.groundSlope > DL_LOOK_SLOPE)));
                     hidden = list.length - keep.length; list = keep;
                 }
-                list.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!a.hillside - !!b2.hillside) || (!!b2.meas - !!a.meas) || b2.p - a.p);
+                list.sort((a, b2) => ((b2.agree || b2.known) - (a.agree || a.known)) || (a.small - b2.small) || (!!a.hillside - !!b2.hillside) || (!!a.roadMaybe - !!b2.roadMaybe) || (!!b2.meas - !!a.meas) || b2.p - a.p);
                 const shownN = Math.min(list.length, maxResults), over = list.length - shownN;
                 list.length = shownN;
                 clearModeDetections(DL.RESULT_MODE);
@@ -6598,7 +6614,7 @@ onmessage = (e) => {
             }
             const final = showResults(), regular = final.regular, mergedDup = final.mergedDup, hiddenDoubt = hiddenDoubtLoop + final.hidden;
             const results2 = final.list;
-            const heldBack = final.over + Math.max(0, kept.length - skippedRejected - skippedBuilt - skippedSteep - hiddenDoubtLoop - results.length);
+            const heldBack = final.over + Math.max(0, kept.length - skippedRejected - skippedBuilt - skippedSteep - skippedRoad - hiddenDoubtLoop - results.length);
             const known = window.__dlFeats.filter(f => f.dlKnown).length, agreed = results2.filter(r2 => r2.agree).length;
             const scanName = shellModel ? 'shell midden scan' : effigyModel ? 'effigy & linear mound scan' : 'mound scan';
             const msg = `Deep-learning scan: ${results2.length} candidate${results2.length === 1 ? '' : 's'} at ${Math.round(thr * 100)}%+ confidence` +
@@ -6607,6 +6623,7 @@ onmessage = (e) => {
                 (regular.length ? `; the regular ${scanName} agrees on ${agreed}` : `; run the regular ${scanName} too, then this one again, to see where both agree`) +
                 (skippedRejected ? `; ${skippedRejected} skipped at spots you marked not real` : '') +
                 (skippedBuilt ? `; ${skippedBuilt} skipped as house pads, building foundations or mapped buildings` : '') +
+                (skippedRoad ? `; ${skippedRoad} skipped beside roads or trails cut into the hillsides (spoil, berms, switchback noses)` : '') +
                 (skippedSteep ? `; ${skippedSteep} skipped on ground steeper than ${MOUND_SLOPE_HARD_MAX}&deg;`.replace('&deg;', '°') : '') +
                 (mergedDup ? `; ${mergedDup} more hit${mergedDup === 1 ? '' : 's'} on the same ${DL.NOUNS} merged, so each is listed once` : '') +
                 (hiddenDoubt ? `; ${hiddenDoubt} doubtful hit${hiddenDoubt === 1 ? '' : 's'} hidden (a knob without a clean mound shape on a hillside, anything on ground steeper than 12°, no closed rise, smaller than a mound, or a ridge; tick Show doubtful hits to see them)` : '') +
@@ -6812,6 +6829,7 @@ onmessage = (e) => {
             ${res.small ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; ${DL.MIN_POS_D ? `Smaller than this model's ${Math.round(res.minD / FT_TO_M)} ft minimum: the Mounds model covers smaller mounds.` : `Smaller across than your smallest mound size setting (${Math.round(res.minD / FT_TO_M)} ft): could be a tree throw, boulder or natural knob.`}</div>` : ''}
             ${res.agree ? '<div style="margin:3px 0;color:#166534;background:#dcfce7;padding:3px 6px;border-radius:4px;font-size:0.8rem;"><b>&#10003; The regular mound scan found this too</b>: both methods agree.</div>' : ''}
             ${res.builtMaybe ? builtNote(res.builtMaybe) : ''}
+            ${res.roadMaybe ? roadNote(res.roadMaybe) : ''}
             ${res.hillside ? `<div style="margin:3px 0;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;font-size:0.8rem;">&#9888; On a ${Math.round(res.groundSlope)}&deg; hillside without a clean mound shape: often a natural knob or ridge nose (the regular scan would drop it). Listed last.</div>` : ''}
             ${res.groundSlope != null ? `<b>Ground slope:</b> ${res.groundSlope.toFixed(1)}&deg;<br>` : ''}
             ${m ? `<b>Height:</b> ${ft(m.h)}<br><b>Across:</b> ${ft(m.d)}<br><b>Roundness:</b> ${m.circ.toFixed(2)}, <b>stretch</b> ${m.elong.toFixed(2)}&times;<br>${m.rugged ? '<span style="color:#92400e;">&#9888; Rugged ground: measurements are rough.</span><br>' : ''}`
@@ -12103,6 +12121,118 @@ onmessage = (e) => {
     // Also caches filled/dir alongside accum, since HAND (below) needs those
     // same two intermediate rasters and there's no reason to recompute them.
     let cachedFlow = null, cachedFlowKey = '';
+    // Roads and trails cut into hillsides, found in the terrain the way the
+    // waterways are (most mountain roads, logging roads and trails aren't on
+    // any map). A road on a slope is a narrow flat bench: straight down the
+    // hillside the ground is nearly level for a metre (under 8 degrees, and
+    // under 45% of the hillside's slope) while the hillside across 14 m is
+    // steeper than 8.5 degrees, because it was cut into the slope above and
+    // filled out below. Such cells joined into long, narrow strips (at least
+    // 40 m long and on average under 10 m wide) are roads or trails;
+    // short or broad flat spots (a ledge, a mound's top, a terrace) aren't.
+    // The spoil pushed off a road, its berms and the noses between switchbacks
+    // are what look like mounds beside them. Returns a mask (1 = road).
+    function findRoadBenches(dem, W, H, nd, res) {
+        const n = W * H, mask = new Uint8Array(n);
+        const f = Math.max(1, Math.round(1 / res)), B = Math.max(2, Math.round(7 / res));
+        const tF = Math.tan(8 * Math.PI / 180), tC = Math.tan(8.5 * Math.PI / 180);
+        const ok = (i) => dem[i] > nd;
+        const bench = new Uint8Array(n);
+        // the height a step of (dx, dy) cells away, between cells
+        const at = (r, c, dy, dx) => {
+            const y = r + dy, x = c + dx, y0 = Math.floor(y), x0 = Math.floor(x), fy = y - y0, fx = x - x0, j = y0 * W + x0;
+            return (dem[j] * (1 - fx) + dem[j + 1] * fx) * (1 - fy) + (dem[j + W] * (1 - fx) + dem[j + W + 1] * fx) * fy;
+        };
+        for (let r = B + 1; r < H - B - 1; r++) for (let c = B + 1; c < W - B - 1; c++) {
+            const i = r * W + c;
+            if (!ok(i) || !ok(i - B) || !ok(i + B) || !ok(i - B * W) || !ok(i + B * W)) continue;
+            // the hillside: its slope across 14 m, and which way it falls
+            const Gx = (dem[i + B] - dem[i - B]) / (2 * B * res), Gy = (dem[i + B * W] - dem[i - B * W]) / (2 * B * res), G2 = Gx * Gx + Gy * Gy;
+            if (G2 <= tC * tC) continue;
+            // level down the fall line, to one side or the other (a road is level
+            // across however steeply it climbs; a trail 1-2 m wide still counts)
+            const G = Math.sqrt(G2), ux = Gx / G * f, uy = Gy / G * f;
+            if (!ok(i - f - f * W) || !ok(i + f + f * W) || !ok(i - f + f * W) || !ok(i + f - f * W)) continue;
+            const z0 = dem[i], d = Math.min(Math.abs(at(r, c, uy, ux) - z0), Math.abs(z0 - at(r, c, -uy, -ux))) / (f * res);
+            // much flatter than the hillside around it (under 45% of its slope)
+            if (d < tF && d * d < 0.2 * G2) bench[i] = 1;
+        }
+        // strips: bench cells joined across one-cell gaps (LiDAR noise, a culvert)
+        const lab = new Int32Array(n), q = new Int32Array(n);
+        let id = 0;
+        const minLen = 40 / res, maxW = 10 / res, minArea = 60 / (res * res);
+        for (let s = 0; s < n; s++) {
+            if (!bench[s] || lab[s]) continue;
+            id++; let qh = 0, qt = 0; q[qt++] = s; lab[s] = id;
+            let r0 = H, r1 = 0, c0 = W, c1 = 0, area = 0, edge = 0;
+            while (qh < qt) {
+                const i = q[qh++], r = (i / W) | 0, c = i - r * W;
+                area++;
+                if (r < r0) r0 = r; if (r > r1) r1 = r; if (c < c0) c0 = c; if (c > c1) c1 = c;
+                if (!bench[i - 1] || !bench[i + 1] || !bench[i - W] || !bench[i + W]) edge++;
+                for (let dr = -2; dr <= 2; dr++) for (let dc = -2; dc <= 2; dc++) {
+                    const rr = r + dr, cc = c + dc;
+                    if (rr < 0 || cc < 0 || rr >= H || cc >= W) continue;
+                    const j = rr * W + cc;
+                    if (bench[j] && !lab[j]) { lab[j] = id; q[qt++] = j; }
+                }
+            }
+            // a thin strip's outline runs down both sides: length ~ half the outline,
+            // width ~ area / length
+            const len = edge / 2, wid = area / Math.max(1, len), ext = Math.hypot(r1 - r0 + 1, c1 - c0 + 1);
+            if (area >= minArea && len >= minLen && ext >= 0.6 * minLen && wid <= maxW) for (let k = 0; k < qt; k++) mask[q[k]] = 1;
+        }
+        return mask;
+    }
+    // The roads in a grid ({data, w, h, res}) and each cell's distance to one
+    // (in cells), worked out once per grid in the background
+    const roadCache = new WeakMap();
+    async function roadDataFor(g) {
+        if (!g || !g.data) return null;
+        const hit = roadCache.get(g.data); if (hit && hit.w === g.w && hit.h === g.h) return hit;
+        const status = document.getElementById('status'); if (status) status.innerText = 'Finding roads and trails cut into the hillsides...';
+        const mask = await offThread('roads', [g.data, g.w, g.h, -100, g.res], () => findRoadBenches(g.data, g.w, g.h, -100, g.res));
+        let n = 0; for (let i = 0; i < mask.length; i++) n += mask[i];
+        const rd = { mask, dist: n ? distanceToMask(mask, g.w, g.h) : null, w: g.w, h: g.h, res: g.res, bounds: g.bounds, cells: n };
+        roadCache.set(g.data, rd);
+        if ((document.getElementById('showRoads') || {}).checked) roadOverlayDraw(rd);
+        return rd;
+    }
+    function roadsOn() { const e = document.getElementById('excludeRoads'); return !e || e.checked; }
+    // A feature dM across and hM tall at a spot: 'road' (small, right beside
+    // a road or trail: skipped), 'maybe' (bigger: only flagged) or null
+    function roadCheck(rd, lat, lon, dM, hM) {
+        if (!rd || !rd.dist) return null;
+        const b = rd.bounds, r = Math.floor((b.n - lat) / (b.n - b.s) * rd.h), c = Math.floor((lon - b.w) / (b.e - b.w) * rd.w);
+        if (r < 0 || c < 0 || r >= rd.h || c >= rd.w) return null;
+        const distM = rd.dist[r * rd.w + c] * rd.res;
+        if (!(distM <= 0.5 * (dM || 10) + 4)) return null;
+        return { verdict: (dM || 10) < 25 && !(hM >= 2) ? 'road' : 'maybe', distM };
+    }
+    const ROAD_WHY = 'beside a road or trail cut into the hillside: spoil, a berm or a switchback nose';
+    function roadNote(rc) {
+        return `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; ${rc.distM < 1 ? 'On' : metersToFeetInches(rc.distM) + ' from'} a road or trail cut into the hillside: could be spoil pushed off it, a berm or a switchback nose. Ranked lower.</div>`;
+    }
+    // the roads found, drawn orange over the map
+    let roadOverlay = null;
+    function roadOverlayDraw(rd) {
+        if (roadOverlay) { map.removeLayer(roadOverlay); roadOverlay = null; }
+        if (!rd) return;
+        const cv = document.createElement('canvas'); cv.width = rd.w; cv.height = rd.h;
+        const ctx = cv.getContext('2d'), im = ctx.createImageData(rd.w, rd.h);
+        for (let i = 0; i < rd.mask.length; i++) if (rd.mask[i]) { const o = i * 4; im.data[o] = 249; im.data[o + 1] = 115; im.data[o + 2] = 22; im.data[o + 3] = 230; }
+        ctx.putImageData(im, 0, 0);
+        roadOverlay = L.imageOverlay(cv.toDataURL(), [[rd.bounds.s, rd.bounds.w], [rd.bounds.n, rd.bounds.e]], { opacity: 0.85, interactive: false }).addTo(map);
+    }
+    async function roadOverlayToggle() {
+        if (!(document.getElementById('showRoads') || {}).checked) { roadOverlayDraw(null); return; }
+        const g = gridInfo(true);
+        if (!g.data) { document.getElementById('status').innerText = 'Download or load the terrain first, then tick this to see the roads and trails found in it.'; return; }
+        const rd = await roadDataFor(g);
+        roadOverlayDraw(rd);
+        document.getElementById('status').innerText = rd.cells ? `Roads and trails found: ${(rd.cells * rd.res * rd.res / 1e4).toFixed(2)} ha of road bench, shown in orange.` : 'No roads or trails cut into hillsides were found in the loaded terrain.';
+    }
+
     async function getFlowData() {
         const flowKey = `${demWidth}x${demHeight}@${demBounds.n},${demBounds.w},${demBounds.s},${demBounds.e}`; // a cropped scan grid is a different terrain
         if (cachedFlow && cachedFlowKey === flowKey) return cachedFlow;
@@ -13041,8 +13171,9 @@ onmessage = (e) => {
         //  4. show the top "Max results per mode".
         const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
         const spacingM = { basecamp: 60, huntcamp: 60, shelter: 40, mounds: 25, caves: 10, ceremonial: 15, entrance: 40 }[mode] || 20;
-        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0, resembledCount = 0, rejectionsLearned = 0, builtSkipped = 0, mappedSkipped = 0;
+        let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0, resembledCount = 0, rejectionsLearned = 0, builtSkipped = 0, mappedSkipped = 0, roadSkipped = 0;
         const scanBuildings = mode === 'mounds' ? await builtBuildingsForScan(gridInfo()) : null, scanGrid = gridInfo(true);
+        const scanRoads = mode === 'mounds' && roadsOn() ? await roadDataFor(scanGrid) : null;
         const ranked = [];
         // Spots you marked not real before features were recorded: learn what
         // is there now (first, so it applies to this whole scan)
@@ -13075,6 +13206,11 @@ onmessage = (e) => {
                 if (bc.why === 'mapped') { mappedSkipped++; continue; }
                 if (bc.why === 'built') { builtSkipped++; continue; }
                 if (bc.why === 'maybe') k._builtMaybe = bc.bs;
+                // spoil, berms and switchback noses beside roads and trails
+                k._roadMaybe = null;
+                const rc = roadCheck(scanRoads, lat, lon, diameter, k.maxMetric);
+                if (rc && rc.verdict === 'road') { roadSkipped++; continue; }
+                if (rc) k._roadMaybe = rc;
             }
             const waterDistM = waterwayDist
                 ? waterwayDist[Math.min(demHeight-1, Math.max(0, Math.round(k.centroidR))) * demWidth + Math.min(demWidth-1, Math.max(0, Math.round(k.centroidC)))] * effRes
@@ -13105,6 +13241,7 @@ onmessage = (e) => {
                 k._simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Resembles ${escapeHtml(sv.neg.kind)}${sv.neg.name ? ' ' + escapeHtml(sv.neg.name) : ''} (${Math.round(sv.neg.sim * 100)}% similar), so it is ranked lower</div>`;
             }
             if (k._builtMaybe) { base = Math.round(base * 0.7); k._simHtml += builtNote(k._builtMaybe); }
+            if (k._roadMaybe) { base = Math.round(base * 0.7); k._simHtml += roadNote(k._roadMaybe); }
             ranked.push({ k, lat, lon, diameter, base });
         }
         ranked.sort((x, y) => y.base - x.base || y.k.maxMetric - x.k.maxMetric);
@@ -13257,6 +13394,7 @@ onmessage = (e) => {
             (resembledCount > 0 ? `; ${resembledCount} closely resembled features you marked not real and were skipped` : '') +
             (builtSkipped ? `; ${builtSkipped} skipped as house pads or building foundations (straight sides, square corners)` : '') +
             (mappedSkipped ? `; ${mappedSkipped} skipped on buildings mapped in OpenStreetMap` : '') +
+            (roadSkipped ? `; ${roadSkipped} skipped beside roads or trails cut into the hillsides (spoil, berms, switchback noses)` : '') +
             (rejectionsLearned > 0 ? `; learned what ${rejectionsLearned} earlier "not real" mark(s) look like, so look-alikes are avoided from now on` : '') +
             (moundUnchecked ? `; ${moundUnchecked} weaker mound candidate(s) were not tested (only the best 400 get the LiDAR-error test; zoom in to scan a smaller area)` : '') + '.' +
             (modeCtx && modeCtx.summary ? ' ' + modeCtx.summary() : '') +
