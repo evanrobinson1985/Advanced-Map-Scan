@@ -102,6 +102,19 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
     LaunchedEffect(fix) { fix?.let { m.maybeFetchOnline(it) } }
 
     val pkg = m.pkg
+    // just received: open on the package's area (waypoints and map), zoomed to fit
+    LaunchedEffect(m.showPackageArea, size) {
+        val p = m.pkg
+        if (!m.showPackageArea || p == null || size == 0) return@LaunchedEffect
+        m.showPackageArea = false
+        val pts = p.waypoints.map { Pair(it.lat, it.lon) } + (p.image?.let { listOf(Pair(it.n, it.w), Pair(it.s, it.e)) } ?: emptyList())
+        if (pts.isEmpty()) return@LaunchedEffect
+        val n = pts.maxOf { it.first }; val s = pts.minOf { it.first }; val e = pts.maxOf { it.second }; val w = pts.minOf { it.second }
+        val l = Geo.Local((n + s) / 2, (e + w) / 2)
+        val span = max(l.north(n) - l.north(s), l.east(e) - l.east(w)).toFloat()
+        follow = false; panLat = (n + s) / 2; panLon = (e + w) / 2
+        mpp = (span / (size * 0.8f)).coerceIn(0.25f, 20f)
+    }
     val (cLat, cLon) = when {
         follow && fix != null -> Pair(fix!!.lat, fix!!.lon)
         !panLat.isNaN() -> Pair(panLat, panLon)
@@ -166,6 +179,12 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
                 m.locationDenied -> "Location is off for this app"
                 fix == null -> "Finding GPS..."
                 m.onlineNote.isNotEmpty() -> m.onlineNote
+                // none on screen: say where the nearest one is
+                pkg != null && pkg.waypoints.isNotEmpty() && pkg.waypoints.none { w -> val (x, y) = view.toScreen(w.lat, w.lon); x in 0f..(size.toFloat()) && y in 0f..(size.toFloat()) } -> {
+                    val f = fix!!
+                    val near = pkg.waypoints.minBy { Geo.distanceM(f.lat, f.lon, it.lat, it.lon) }
+                    "Nearest ${near.letter} " + Geo.distanceText(Geo.distanceM(f.lat, f.lon, near.lat, near.lon)) + " " + Geo.compassWord(Geo.bearingDeg(f.lat, f.lon, near.lat, near.lon))
+                }
                 pkg == null -> "☰ › Receive from phone"
                 else -> scaleText(mpp, size)
             }

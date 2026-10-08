@@ -103,12 +103,10 @@
 
     <div class="control-group">
         <h4>Scan as you go</h4>
-        <label style="display:flex; gap:6px; align-items:center; font-size:0.85rem;"><input type="checkbox" id="sagOn" onchange="sagToggle(this.checked)"> Download and scan the tiles around you as you move</label>
+        <label style="display:flex; gap:6px; align-items:center; font-size:0.85rem;"><input type="checkbox" id="sagOn" onchange="sagToggle(this.checked)"> Download and scan the map around you as you move</label>
         <div class="slider-row" style="margin:6px 0 0;"><label style="font-size:0.8rem; flex:1;">Scan with</label>
             <select id="sagWhat" style="flex:2;"><option value="regular">The selected scan mode</option><option value="dl">Deep learning (selected model)</option><option value="both">Both</option><option value="all">Scan All (every mode, slower)</option></select></div>
-        <div class="slider-row" style="margin:6px 0 0;"><label style="font-size:0.8rem; flex:1;">Tile size</label>
-            <select id="sagTile" style="flex:2;"><option value="500">0.5 km (walking)</option><option value="1000" selected>1 km</option><option value="2000">2 km (driving)</option></select></div>
-        <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Uses My location. When you get within a quarter of a tile of one not yet scanned, it is downloaded and scanned; earlier tiles' results stay on the map. Tiles show green when scanned, orange while in progress. Uses mobile data: about 6 MB per 1 km tile.</div>
+        <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Uses My location, and the map follows you. The whole map view around you is downloaded and scanned (at least 1 km, at most 14 km&sup2; so it stays at full 1 m detail); as you near the edge of the scanned ground, the next view-sized area ahead of you is. Earlier areas' results stay on the map. Areas show green when scanned, orange while in progress. Uses mobile data: roughly 4 MB per km&sup2;.</div>
         <div id="sagStatus" style="font-size:0.75rem; color:#075985; margin-top:4px; line-height:1.4;"></div>
     </div>
 
@@ -942,13 +940,43 @@
     // computer) and keeps following you: a blue dot with its accuracy circle
     // and, when the direction is known, a beam showing which way you face
     // (the phone's compass, or your direction of travel while moving). The
-    // first fix loads the terrain around it: a 1 km square of LiDAR (more
-    // when the position is rough), unless the loaded terrain already covers
-    // the spot. Pressing the button again returns the map to you; "Stop
-    // following" in the dot's popup turns it off.
-    const LOCATE_HALF_M = 500;
+    // map follows you (it pans when you near the edge of the view; dragging
+    // the map stops that until you press the button again). The first fix
+    // downloads the terrain of the whole map view around you (see
+    // viewRectAround), unless the loaded terrain already covers it. Pressing
+    // the button again returns the map to you; "Stop following" in the dot's
+    // popup turns it off.
+    const SAG_MAX_PX = 14e6;   // the largest area downloaded around you: one scan section at 1 m, with its margin
     const myLoc = { watchId: null, marker: null, circle: null, lat: null, lon: null, acc: null,
-                    compass: null, compassAt: 0, gpsHeading: null, listening: false };
+                    compass: null, compassAt: 0, gpsHeading: null, listening: false, follow: true };
+    // The map view's size, centred on a point (moved shiftE / shiftN metres):
+    // at least 1 km a side and at most SAG_MAX_PX cells at 1 m, so it can be
+    // downloaded and scanned at full 1 m detail
+    function viewRectAround(lat, lon, shiftE = 0, shiftN = 0) {
+        const b = map.getBounds(), cosL = Math.cos(lat * Math.PI / 180);
+        let w = Math.max(1000, (b.getEast() - b.getWest()) * 111320 * cosL), h = Math.max(1000, (b.getNorth() - b.getSouth()) * 111320);
+        if (w * h > SAG_MAX_PX) { const k = Math.sqrt(SAG_MAX_PX / (w * h)); w *= k; h *= k; }
+        const cLat = lat + shiftN / 111320, cLon = lon + shiftE / (111320 * cosL);
+        const dLat = h / 2 / 111320, dLon = w / 2 / (111320 * cosL);
+        return { n: cLat + dLat, s: cLat - dLat, e: cLon + dLon, w: cLon - dLon };
+    }
+    // the closest zoom out at which the whole view still downloads at 1 m
+    function myLocZoom(lat) {
+        const sz = map.getSize(), cosL = Math.cos(lat * Math.PI / 180);
+        let z = Math.round(map.getZoom());
+        for (let zz = 10; zz <= 19; zz++) {
+            const mpp = 156543.03392 * cosL / Math.pow(2, zz);
+            if (sz.x * mpp * sz.y * mpp <= SAG_MAX_PX) { z = Math.max(z, zz); break; }
+        }
+        return Math.min(z, 19);
+    }
+    // keeps you on the map: pans when the dot nears the edge of the view
+    function myLocFollow(now) {
+        if (!myLoc.follow || myLoc.lat == null) return;
+        const p = map.latLngToContainerPoint([myLoc.lat, myLoc.lon]), sz = map.getSize();
+        if (now || p.x < 0.2 * sz.x || p.x > 0.8 * sz.x || p.y < 0.2 * sz.y || p.y > 0.8 * sz.y) map.panTo([myLoc.lat, myLoc.lon], { animate: !now });
+    }
+    map.on('dragstart', () => { if (myLoc.watchId != null) myLoc.follow = false; });
     let myLocBusy = false;   // finding the first fix
     function myLocSay(t) {
         const status = document.getElementById('status'); if (status) status.innerText = t;
@@ -962,11 +990,13 @@
         myLocStartCompass();
         // on a phone, fold the settings panel away so the map is visible
         if (window.innerWidth < 700 && document.getElementById('panelContent').style.display !== 'none') togglePanel();
-        if (myLoc.watchId != null && myLoc.lat != null) {   // already following: back to you
-            map.setView([myLoc.lat, myLoc.lon], Math.max(map.getZoom(), 17));
+        if (myLoc.watchId != null && myLoc.lat != null) {   // already following: back to you, and following again
+            myLoc.follow = true;
+            map.setView([myLoc.lat, myLoc.lon], myLocZoom(myLoc.lat), { animate: false });
             myLocLoadTerrain(myLoc.lat, myLoc.lon, myLoc.acc).catch(e => console.warn(e));
             return;
         }
+        myLoc.follow = true;
         if (myLocBusy) return;
         myLocBusy = true;
         if (btn) btn.style.opacity = '0.5';
@@ -980,10 +1010,13 @@
             if (c.heading != null && isFinite(c.heading) && c.speed > 0.7) myLoc.gpsHeading = c.heading;
             else if (!(c.speed > 0.7)) myLoc.gpsHeading = null;
             myLocDraw();
+            const wasFirst = first;
+            // the map goes to you before anything is sized from the view
+            if (first) { first = false; map.setView([c.latitude, c.longitude], myLocZoom(c.latitude), { animate: false }); }
+            else myLocFollow();
             sagOnPosition();
-            if (!first) return;
-            first = false;
-            try { await myLocArrive(c.latitude, c.longitude, c.accuracy); }
+            if (!wasFirst) return;
+            try { await myLocLoadTerrain(c.latitude, c.longitude, c.accuracy); }
             catch (e) { console.warn(e); myLocSay('Found your location, but the terrain could not be loaded: ' + (e.message || e)); }
             finally { done(); }
         }, (err) => {
@@ -1078,161 +1111,150 @@
             }
         }
     }
-    // The first fix: the map goes to you and the terrain around you is loaded
-    async function myLocArrive(lat, lon, acc) {
-        const half = Math.min(1500, Math.max(LOCATE_HALF_M, acc));
-        const dLat = half / 111320, dLon = half / (111320 * Math.cos(lat * Math.PI / 180));
-        map.fitBounds([[lat - dLat, lon - dLon], [lat + dLat, lon + dLon]], { animate: false, maxZoom: 17 });
-        await myLocLoadTerrain(lat, lon, acc);
-    }
+    // The terrain of the whole map view around you
     async function myLocLoadTerrain(lat, lon, acc) {
         const ft = metersToFeetInches, rough = acc > 1500;
-        // a rough fix (a computer without GPS) covers more ground, up to ~3 km
-        const half = Math.min(1500, Math.max(LOCATE_HALF_M, acc));
-        const dLat = half / 111320, dLon = half / (111320 * Math.cos(lat * Math.PI / 180));
-        const bnd = { n: lat + dLat, s: lat - dLat, e: lon + dLon, w: lon - dLon };
+        const bnd = viewRectAround(lat, lon);
         const where = `Found you at ${lat.toFixed(5)}, ${lon.toFixed(5)} (accurate to about ${ft(acc)})${rough ? ': only a rough position, from your network' : ''}`;
-        if (sag.on) { myLocSay(where + '. Scan as you go downloads and scans the tiles around you.'); return; }
-        if (fullDemGrid && effRes <= 1.05 && dlInGrid(fullDemGrid, lat, lon, Math.min(half, 300))) { myLocSay(where + '. The terrain here is already loaded. The blue dot follows you.'); return; }
+        if (sag.on) { myLocSay(where + '. Scan as you go downloads and scans the map view around you.'); return; }
+        const covers = (g) => [[bnd.n, bnd.w], [bnd.n, bnd.e], [bnd.s, bnd.w], [bnd.s, bnd.e]].every(([la, lo]) => dlInGrid(g, la, lo, 0));
+        if (fullDemGrid && effRes <= 1.05 && covers(fullDemGrid)) { myLocSay(where + '. The terrain of this view is already loaded. The blue dot follows you.'); return; }
         if (downloadAbort || scanInProgress || tourBusy || dlBusy) { myLocSay(where + '. Wait for the current download, scan, tour or training to finish, then press Download to load the terrain here.'); return; }
         myLocSay(where + '. Downloading the terrain around you...');
         const before = fullDemGrid;
         window.__dlBoundsOverride = bnd;
         try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
-        if (myLoc.lat != null) map.fitBounds([[bnd.s, bnd.w], [bnd.n, bnd.e]], { animate: false, maxZoom: 17 });
         if (!fullDemGrid || fullDemGrid === before) myLocSay(where + '. No LiDAR terrain could be loaded here (the map is still shown); try Download, or a nearby spot.');
     }
     // ---- Scan as you go ----
-    // While My location follows you, the ground is cut into fixed square
-    // tiles (about 1 km). When you are inside a tile, or within a quarter of
-    // a tile of one, it is downloaded (with a margin, so a feature on its
-    // edge is seen whole) and scanned with what you chose; each result is
-    // kept only from the tile that holds it, so it is found once. A new
-    // download normally clears the map, so the earlier tiles' results are
-    // put back after each one. Tiles are drawn on the map: green scanned,
-    // orange in progress. Turning it off finishes the tile under way and
-    // adds the whole trip to the scan history.
+    // While My location follows you, the ground around you is downloaded and
+    // scanned an area at a time, each area the size of the map view (at
+    // least 1 km, at most SAG_MAX_PX cells at 1 m) and centred on you. When
+    // the ground within a quarter of an area around you isn't covered yet,
+    // the next area is downloaded, shifted towards the uncovered side, so it
+    // is ready before you get there. Each area is downloaded with a margin,
+    // so a feature on its edge is seen whole. A result inside ground an
+    // earlier area already covered isn't added again. A new download
+    // normally clears the map, so the earlier areas' results are put back
+    // after each one. Areas are drawn on the map: green scanned, orange in
+    // progress. Turning it off finishes the area under way and adds the whole
+    // trip to the scan history.
     const SAG_MARGIN_M = 120;
-    const sag = { on: false, busy: false, done: new Map(), cur: null, layer: null, retry: null, added: new Set(), modes: new Set(), lastNote: '' };
-    function sagTileM() { return parseFloat((document.getElementById('sagTile') || { value: 1000 }).value) || 1000; }
+    const sag = { on: false, busy: false, areas: [], cur: null, layer: null, retry: null, added: new Set(), modes: new Set() };
     function sagWhat() { return (document.getElementById('sagWhat') || { value: 'regular' }).value; }
     function sagSet(msg) { const el = document.getElementById('sagStatus'); if (el) el.innerText = msg; }
-    // the tile (row j, column i) holding a point; columns are sized for their row's latitude
-    function sagTile(j, i, T) {
-        const dLat = T / 111320, s = j * dLat, n = s + dLat;
-        const dLon = T / (111320 * Math.cos((s + n) / 2 * Math.PI / 180)), w = i * dLon;
-        return { key: `${T}:${j}:${i}`, j, i, n, s, w, e: w + dLon, dLon };
-    }
-    function sagTileAt(lat, lon, T) {
-        const j = Math.floor(lat / (T / 111320));
-        const t0 = sagTile(j, 0, T);
-        return sagTile(j, Math.floor(lon / t0.dLon), T);
-    }
-    // metres from a point to a tile (0 inside it)
-    function sagDistTo(t, lat, lon) {
-        const mLat = 111320, mLon = 111320 * Math.cos(lat * Math.PI / 180);
-        const dy = Math.max(t.s - lat, 0, lat - t.n) * mLat, dx = Math.max(t.w - lon, 0, lon - t.e) * mLon;
-        return Math.hypot(dx, dy);
-    }
-    // tiles to scan next from here, nearest first
-    function sagWanted(lat, lon) {
-        const T = sagTileM(), near = Math.max(150, T / 4), out = [];
-        const j0 = Math.floor(lat / (T / 111320));
-        for (let j = j0 - 1; j <= j0 + 1; j++) {
-            const c = Math.floor(lon / sagTile(j, 0, T).dLon);
-            for (let i = c - 1; i <= c + 1; i++) {
-                const t = sagTile(j, i, T), d = sagDistTo(t, lat, lon);
-                if (d <= near && !sag.done.has(t.key)) out.push({ t, d });
-            }
+    const inRect = (r, lat, lon, inset = 0) => {
+        const iLat = inset / 111320, iLon = inset / (111320 * Math.cos(lat * Math.PI / 180));
+        return lat <= r.n - iLat && lat > r.s + iLat && lon >= r.w + iLon && lon < r.e - iLon;
+    };
+    // Where the next area goes, or null while the ground around you is covered
+    function sagNeed(lat, lon) {
+        if (!sag.areas.length) return viewRectAround(lat, lon);
+        const probe = viewRectAround(lat, lon), mLon = 111320 * Math.cos(lat * Math.PI / 180);
+        const R = 0.25 * Math.min((probe.n - probe.s) * 111320, (probe.e - probe.w) * mLon);
+        const covered = (la, lo) => sag.areas.some(a => inRect(a.r, la, lo));
+        let ue = 0, un = 0, gaps = 0;
+        if (!covered(lat, lon)) gaps++;
+        for (let k = 0; k < 16; k++) {
+            const t = k * Math.PI / 8, de = Math.sin(t), dn = Math.cos(t);
+            if (!covered(lat + dn * R / 111320, lon + de * R / mLon)) { ue += de; un += dn; gaps++; }
         }
-        return out.sort((a, b) => a.d - b.d).map(x => x.t);
+        if (!gaps) return null;
+        // shifted towards the uncovered side, still with you inside it
+        const len = Math.hypot(ue, un), sh = len > 0.01 ? 0.3 * Math.min((probe.n - probe.s) * 111320, (probe.e - probe.w) * mLon) : 0;
+        return viewRectAround(lat, lon, len > 0.01 ? sh * ue / len : 0, len > 0.01 ? sh * un / len : 0);
     }
     function sagDraw() {
         if (!sag.layer) sag.layer = L.layerGroup();
         sag.layer.clearLayers();
-        const box = (t) => [[t.s, t.w], [t.n, t.e]];
-        for (const d of sag.done.values()) L.rectangle(box(d.t), { color: d.failed ? '#94a3b8' : '#16a34a', weight: 1.5, fill: false, dashArray: d.failed ? '4,4' : null, interactive: false }).addTo(sag.layer);
+        const box = (r) => [[r.s, r.w], [r.n, r.e]];
+        for (const a of sag.areas) L.rectangle(box(a.r), { color: a.failed ? '#94a3b8' : '#16a34a', weight: 1.5, fill: false, dashArray: a.failed ? '4,4' : null, interactive: false }).addTo(sag.layer);
         if (sag.cur) L.rectangle(box(sag.cur), { color: '#f59e0b', weight: 2.5, dashArray: '8,6', fillOpacity: 0.04, interactive: false }).addTo(sag.layer);
         if (sag.on && !map.hasLayer(sag.layer)) sag.layer.addTo(map);
     }
     function sagToggle(on) {
         sag.on = on;
         if (on) {
-            sag.done.clear(); sag.added.clear(); sag.modes.clear();
+            sag.areas = []; sag.added.clear(); sag.modes.clear();
             sagDraw();
             sagSet('Waiting for your location...');
-            if (myLoc.watchId == null) locateMe(); else sagOnPosition();
+            if (myLoc.watchId == null) locateMe();
+            else { myLoc.follow = true; myLocFollow(true); sagOnPosition(); }
         } else {
             clearTimeout(sag.retry);
-            sagSet(sag.busy ? 'Turning off after the tile under way...' : sagSummary());
+            sagSet(sag.busy ? 'Turning off after the area under way...' : sagSummary());
             if (!sag.busy) sagFinish();
         }
     }
     function sagSummary() {
-        const n = [...sag.done.values()].filter(d => !d.failed).length;
+        const n = sag.areas.filter(a => !a.failed).length;
         const found = [...sag.added].filter(f => detectedFeatures.includes(f)).length;
-        return n ? `${n} tile${n === 1 ? '' : 's'} scanned, ${found} result${found === 1 ? '' : 's'} on the map.` : 'No tiles scanned yet.';
+        return n ? `${n} area${n === 1 ? '' : 's'} scanned, ${found} result${found === 1 ? '' : 's'} on the map.` : 'Nothing scanned yet.';
     }
     // the trip goes in the scan history as one entry
     async function sagFinish() {
         if (sag.layer && map.hasLayer(sag.layer)) map.removeLayer(sag.layer);
-        const tiles = [...sag.done.values()].filter(d => !d.failed);
-        if (!tiles.length || !sag.modes.size) return;
-        const area = { n: Math.max(...tiles.map(d => d.t.n)), s: Math.min(...tiles.map(d => d.t.s)), e: Math.max(...tiles.map(d => d.t.e)), w: Math.min(...tiles.map(d => d.t.w)) };
-        await scanHistoryAdd('scan', [...sag.modes], area, `Scan as you go (${tiles.length} tile${tiles.length === 1 ? '' : 's'})`);
+        const done = sag.areas.filter(a => !a.failed);
+        if (!done.length || !sag.modes.size) return;
+        const area = { n: Math.max(...done.map(a => a.r.n)), s: Math.min(...done.map(a => a.r.s)), e: Math.max(...done.map(a => a.r.e)), w: Math.min(...done.map(a => a.r.w)) };
+        await scanHistoryAdd('scan', [...sag.modes], area, `Scan as you go (${done.length} area${done.length === 1 ? '' : 's'})`);
         sag.modes.clear();
     }
     function sagOnPosition() {
         if (!sag.on || sag.busy || myLoc.lat == null) return;
         clearTimeout(sag.retry);
-        const next = sagWanted(myLoc.lat, myLoc.lon)[0];
-        if (!next) { sagSet(`${sagSummary()} Waiting until you get near the next tile.`); return; }
+        const next = sagNeed(myLoc.lat, myLoc.lon);
+        if (!next) { sagSet(`${sagSummary()} The ground around you is covered; the next area downloads as you near its edge.`); return; }
         // something else is using the terrain: try again shortly
         if (downloadAbort || scanInProgress || tourBusy || dlBusy || autoTuneRunning) {
             sagSet('Waiting for the current download, scan, tour or training to finish...');
             sag.retry = setTimeout(sagOnPosition, 4000); return;
         }
-        sagRunTile(next).finally(() => {
+        sagRunArea(next).finally(() => {
             if (sag.on) setTimeout(sagOnPosition, 0);
             else { sagSet(sagSummary()); sagFinish(); }
         });
     }
     function sagRestore(kept) { restoreFeatures([...kept].filter(f => !detectedFeatures.includes(f))); }
-    async function sagRunTile(t) {
-        sag.busy = true; sag.cur = t; sagDraw();
-        const status = document.getElementById('status'), tileNo = sag.done.size + 1;
-        const say = (m) => { sagSet(`Tile ${tileNo}: ${m}`); };
+    async function sagRunArea(A) {
+        sag.busy = true; sag.cur = A; sagDraw();
+        const status = document.getElementById('status'), areaNo = sag.areas.length + 1;
+        const say = (m) => { sagSet(`Area ${areaNo}: ${m}`); };
+        const prev = sag.areas.filter(a => !a.failed).map(a => a.r);
         // everything on the map now stays (a download clears the map)
         const kept = new Set(detectedFeatures.filter(f => f.mode !== 'settlement'));
         let added = 0, note = '';
         try {
-            say('downloading...');
-            const mLon = 111320 * Math.cos((t.n + t.s) / 2 * Math.PI / 180);
-            const bnd = { n: t.n + SAG_MARGIN_M / 111320, s: t.s - SAG_MARGIN_M / 111320, e: t.e + SAG_MARGIN_M / mLon, w: t.w - SAG_MARGIN_M / mLon };
-            const view = { c: map.getCenter(), z: map.getZoom() }, before = fullDemGrid;
+            const km2 = ((A.n - A.s) * 111320 * (A.e - A.w) * 111320 * Math.cos((A.n + A.s) / 2 * Math.PI / 180) / 1e6).toFixed(1);
+            say(`downloading ${km2} km²...`);
+            const mLon = 111320 * Math.cos((A.n + A.s) / 2 * Math.PI / 180);
+            const bnd = { n: A.n + SAG_MARGIN_M / 111320, s: A.s - SAG_MARGIN_M / 111320, e: A.e + SAG_MARGIN_M / mLon, w: A.w - SAG_MARGIN_M / mLon };
+            const before = fullDemGrid;
             window.__dlBoundsOverride = bnd;
             try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
-            map.setView(view.c, view.z, { animate: false });   // the map stays where you had it
             sagRestore(kept);
-            if (!fullDemGrid || fullDemGrid === before) { sag.done.set(t.key, { t, failed: true, n: 0 }); say('no LiDAR terrain could be downloaded here; moving on.'); return; }
+            if (!fullDemGrid || fullDemGrid === before) { sag.areas.push({ r: A, failed: true, n: 0 }); say('no LiDAR terrain could be downloaded here; moving on.'); return; }
             // the automatic settings for the new area run first (when that option is on)
             await new Promise(r => setTimeout(r, 120));
             if (autoTuneRunning) { say('detecting settings for this area...'); await autoTuneRunning; }
-            const what = sagWhat(), inCore = (f) => f.lat == null || (f.lat <= t.n && f.lat > t.s && f.lon >= t.w && f.lon < t.e);
-            const tileOnly = (beforeSet) => {
-                // results from the margin belong to the neighbouring tile
-                const drop = detectedFeatures.filter(f => !beforeSet.has(f) && !kept.has(f) && !inCore(f));
-                for (const f of drop) removeFeatureLayers(f);
-                if (drop.length) detectedFeatures = detectedFeatures.filter(f => !drop.includes(f));
-            };
-            // after a scan of these modes: older results of the same kind inside
-            // this tile are replaced by the new ones (as a rescan would), the rest
-            // come back, and the new ones from the margin go
+            const what = sagWhat();
+            // this area's own ground: inside it, and not already covered by an
+            // earlier area (well inside one: right at an earlier area's edge a
+            // feature may have been cut off, so it may be found whole again)
+            const fresh = (f) => f.lat != null && inRect(A, f.lat, f.lon) && !prev.some(p => inRect(p, f.lat, f.lon, 60));
+            const same = (f, g) => g.mode === f.mode && approxMetersBetween(f.lat, f.lon, g.lat, g.lon) < Math.max(15, 0.5 * (f.diameter || 0));
             const settle = (modes, beforeSet) => {
-                const stale = [...kept].filter(f => modes.includes(f.mode) && f.lat != null && inCore(f));
+                // older results of these kinds on this area's new ground (from a
+                // scan before this trip) are replaced by the new ones, as a rescan would
+                const stale = [...kept].filter(f => modes.includes(f.mode) && !sag.added.has(f) && fresh(f));
                 for (const f of stale) { kept.delete(f); if (detectedFeatures.includes(f)) removeFeatureLayers(f); }
                 if (stale.length) detectedFeatures = detectedFeatures.filter(f => !stale.includes(f));
-                sagRestore(kept); tileOnly(beforeSet);
+                sagRestore(kept);
+                // the new results: only those on this area's own ground, and not one already on the map
+                const keptList = [...kept];
+                const drop = detectedFeatures.filter(f => !beforeSet.has(f) && !kept.has(f) && (!fresh(f) || keptList.some(g => same(f, g))));
+                for (const f of drop) removeFeatureLayers(f);
+                if (drop.length) detectedFeatures = detectedFeatures.filter(f => !drop.includes(f));
             };
             if (what !== 'dl') {
                 const mode0 = scanModeEl.value;
@@ -1263,10 +1285,10 @@
                 else {
                     say('deep-learning scan...');
                     const b0 = new Set(detectedFeatures);
-                    // the network's windows reach 60 m past the tile, so a mound near its
-                    // edge is scored whole; only peaks inside the tile are kept
+                    // the network's windows reach 60 m past the area, so a mound near its
+                    // edge is scored whole; only peaks inside it are kept
                     const ext = 60, eLon = ext / mLon, eLat = ext / 111320;
-                    window.__dlAreaOverride = { n: t.n + eLat, s: t.s - eLat, e: t.e + eLon, w: t.w - eLon, core: { n: t.n, s: t.s, e: t.e, w: t.w } }; window.__sagQuiet = true;
+                    window.__dlAreaOverride = { n: A.n + eLat, s: A.s - eLat, e: A.e + eLon, w: A.w - eLon, core: { n: A.n, s: A.s, e: A.e, w: A.w } }; window.__sagQuiet = true;
                     try { await dlScan(); } finally { window.__dlAreaOverride = null; window.__sagQuiet = false; }
                     settle([DL.RESULT_MODE], b0);
                     sag.modes.add(DL.RESULT_MODE);
@@ -1275,13 +1297,13 @@
             const mine = detectedFeatures.filter(f => !kept.has(f) && f.mode !== 'settlement');
             for (const f of mine) sag.added.add(f);
             added = mine.length;
-            sag.done.set(t.key, { t, n: added });
+            sag.areas.push({ r: A, n: added });
             updateDetectionLegend(); updateExportButtons();
-            const msg = `Scan as you go: tile ${tileNo} done, ${added} new result${added === 1 ? '' : 's'}. ${sagSummary()}${note}`;
+            const msg = `Scan as you go: area ${areaNo} done, ${added} new result${added === 1 ? '' : 's'}. ${sagSummary()}${note}`;
             sagSet(msg); status.innerText = msg;
         } catch (e) {
             console.error(e);
-            sag.done.set(t.key, { t, failed: true, n: 0 });
+            sag.areas.push({ r: A, failed: true, n: 0 });
             sagRestore(kept);
             say('failed: ' + (e.message || e));
         } finally {

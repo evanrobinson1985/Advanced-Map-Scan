@@ -92,6 +92,8 @@ class AppModel(private val ctx: Context) {
     var arriveM by mutableIntStateOf(Store.arriveM(ctx)); private set
     var onlineNote by mutableStateOf("")
     var locationDenied by mutableStateOf(false)
+    /** Set when a package arrives: the map then opens on its area rather than on you. */
+    var showPackageArea by mutableStateOf(false)
     private var onlineBusy = false
     private var onlineTriedAt = 0L
     private val main = Handler(Looper.getMainLooper())
@@ -116,7 +118,7 @@ class AppModel(private val ctx: Context) {
     fun receive(bytes: ByteArray): String {
         val p = WatchPackage.decode(bytes)
         Store.savePackage(ctx, bytes)
-        main.post { applyPackage(p) }
+        main.post { applyPackage(p); showPackageArea = true }
         return "${p.waypoints.size} waypoint${if (p.waypoints.size == 1) "" else "s"}" + if (p.image != null) " and the map" else ""
     }
 
