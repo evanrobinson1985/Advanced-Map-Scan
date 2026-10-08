@@ -1785,7 +1785,9 @@
         const rows = progLevels.map((l, i) => {
             const el = now - l.t0, f = eff[i];
             let left = '';
-            if (f != null && f >= 0.03 && f < 1 && el > 3000) left = ` · about ${progTime(el * (1 - f) / f)} left`;
+            // time left only where the share done is measured directly: an outer
+            // line made of steps of unequal length can't say it honestly
+            if (!l.span && f != null && f >= 0.03 && f < 1 && el > 3000) left = ` · about ${progTime(el * (1 - f) / f)} left`;
             const text = l.ownText ? l.text : (l === inner ? progStatusText : '');
             return `<div style="margin-top:${i ? 6 : 0}px;${i ? 'padding-left:' + Math.min(3, i) * 8 + 'px;' : ''}">
                 <div style="display:flex;gap:6px;align-items:baseline;"><b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(l.title)}</b>
