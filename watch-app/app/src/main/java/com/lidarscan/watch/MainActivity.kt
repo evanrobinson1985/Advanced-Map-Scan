@@ -94,23 +94,35 @@ class AppModel(private val ctx: Context) {
     var locationDenied by mutableStateOf(false)
     /** Set when a package arrives: the map then opens on its area rather than on you. */
     var showPackageArea by mutableStateOf(false)
+    /** The basemap under the hillshade, and the hillshade's opacity (as the web app's defaults: satellite, 70%). */
+    var basemap by mutableStateOf(Basemap.of(Store.basemap(ctx))); private set
+    var hillshadeOpacity by mutableStateOf(Store.hillshadeOpacity(ctx)); private set
+    /** The satellite picture sent with the package (works with no signal). */
+    var baseBitmap by mutableStateOf<Bitmap?>(null); private set
+    /** Counts the basemap tiles arriving, so the map redraws. */
+    var tileTick by mutableIntStateOf(0); private set
+    /** A short note on the map (the basemap just chosen), until this time. */
+    var mapNote by mutableStateOf(""); var mapNoteUntil = 0L
+    val tiles = TileLayer(ctx) { main.post { tileTick++ } }
     private var onlineBusy = false
     private var onlineTriedAt = 0L
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     init {
+        tiles.enabled = onlineMaps
         Store.loadPackage(ctx)?.let { applyPackage(it) }
         Store.loadOnline(ctx)?.let { (m, b) -> decodeMap(b)?.let { online = Pair(m, it) } }
     }
 
-    fun close() = scope.cancel()
+    fun close() { scope.cancel(); tiles.close() }
 
     val selected: Waypoint? get() = pkg?.waypoints?.firstOrNull { it.id == selectedId }
 
     private fun applyPackage(p: WatchPackage) {
         pkg = p
         pkgBitmap = p.imageBytes?.let { decodeMap(it) }
+        baseBitmap = p.baseBytes?.let { decodeMap(it) }
         if (p.waypoints.none { it.id == selectedId }) selectedId = null
     }
 
@@ -118,13 +130,23 @@ class AppModel(private val ctx: Context) {
     fun receive(bytes: ByteArray): String {
         val p = WatchPackage.decode(bytes)
         Store.savePackage(ctx, bytes)
-        main.post { applyPackage(p); showPackageArea = true }
-        return "${p.waypoints.size} waypoint${if (p.waypoints.size == 1) "" else "s"}" + if (p.image != null) " and the map" else ""
+        main.post {
+            applyPackage(p); showPackageArea = true
+            // the web app's map settings come with the waypoints (you can still change them here)
+            p.viewBase?.let { setBasemap(Basemap.of(it)) }
+            p.viewHillshadeOpacity?.let { setHillshadeOpacity(it) }
+        }
+        return "${p.waypoints.size} waypoint${if (p.waypoints.size == 1) "" else "s"}" + (if (p.image != null) ", the hillshade" else "") +
+            (if (p.baseBytes != null) " and the ${if (p.baseSrc == "topo") "topo map" else "satellite imagery"}" else "")
     }
 
     fun deletePackage() { Store.deletePackage(ctx); pkg = null; pkgBitmap = null; selectedId = null }
     fun toggleHeadingUp() { headingUp = !headingUp; Store.setHeadingUp(ctx, headingUp) }
-    fun toggleOnlineMaps() { onlineMaps = !onlineMaps; Store.setOnlineMaps(ctx, onlineMaps) }
+    fun toggleOnlineMaps() { onlineMaps = !onlineMaps; Store.setOnlineMaps(ctx, onlineMaps); tiles.enabled = onlineMaps }
+    fun setBasemap(b: Basemap) { basemap = b; Store.setBasemap(ctx, b.key) }
+    fun nextBasemap() { setBasemap(basemap.next()); mapNote = "Basemap: ${basemap.label}"; mapNoteUntil = System.currentTimeMillis() + 2500 }
+    fun setHillshadeOpacity(v: Float) { hillshadeOpacity = v.coerceIn(0f, 1f); Store.setHillshadeOpacity(ctx, hillshadeOpacity) }
+    fun nextHillshadeOpacity() { val o = floatArrayOf(0.4f, 0.55f, 0.7f, 0.85f, 1f); val i = o.indexOfFirst { kotlin.math.abs(it - hillshadeOpacity) < 0.03f }; setHillshadeOpacity(o[(i + 1) % o.size]) }
     fun nextArrive() { val opts = intArrayOf(5, 10, 20, 30); arriveM = opts[(opts.indexOf(arriveM) + 1) % opts.size]; Store.setArriveM(ctx, arriveM) }
 
     /**

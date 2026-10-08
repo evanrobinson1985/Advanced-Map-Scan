@@ -104,4 +104,21 @@ object Geo {
             return Pair(local.lat(-sDown * mPerPx), local.lon(e * mPerPx))
         }
     }
+
+    /** Web-map tiles (the usual z/x/y scheme): which tiles cover a place, and where a tile lies. */
+    object Tiles {
+        private const val MPP0 = 156543.03392   // metres per pixel at zoom 0 on the equator (256 px tiles)
+        fun x(lon: Double, z: Int) = (lon + 180.0) / 360.0 * (1 shl z)
+        fun y(lat: Double, z: Int): Double {
+            val r = rad(lat.coerceIn(-85.05112878, 85.05112878))
+            return (1.0 - Math.log(Math.tan(r) + 1.0 / cos(r)) / PI) / 2.0 * (1 shl z)
+        }
+        fun lon(x: Double, z: Int) = x / (1 shl z) * 360.0 - 180.0
+        fun lat(y: Double, z: Int) = deg(Math.atan(Math.sinh(PI * (1 - 2 * y / (1 shl z)))))
+        /** The zoom whose tiles are at least as sharp as the view (metres per screen pixel), up to maxZ. */
+        fun zoomFor(mPerPx: Double, lat: Double, maxZ: Int): Int {
+            val z = Math.ceil(Math.log(MPP0 * cos(rad(lat)) / mPerPx) / Math.log(2.0)).toInt()
+            return z.coerceIn(1, maxZ)
+        }
+    }
 }

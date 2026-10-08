@@ -116,6 +116,7 @@
             <select id="watchScope" style="flex:2;"><option value="all">All results on the map</option><option value="view">Results in view</option></select></div>
         <div class="slider-row" style="margin:6px 0 0;"><label style="font-size:0.8rem; flex:1;">Hillshade</label>
             <select id="watchDetail" style="flex:2;"><option value="1">1 m (sharpest)</option><option value="2" selected>2 m (faster to send)</option><option value="none">No map (waypoints only)</option></select></div>
+        <label style="display:flex; gap:6px; align-items:center; font-size:0.8rem; margin-top:6px;"><input type="checkbox" id="watchBasemap" checked> Include the basemap (satellite or topo, as shown here) so it works with no signal</label>
         <button id="watchSendBtn" onclick="sendToWatch()" style="margin-top:6px; background:#1e293b; color:#fff;">&#8986; Send to watch</button>
         <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">For the LiDAR Guide app on a Galaxy Watch (Wear OS). On the watch open LiDAR Guide &rsaquo; &#9776; &rsaquo; Receive from phone, then press Send here and pick the watch. Needs Chrome on Android. The watch then works on its own: the hillshade, your live position and heading, a guide arrow to the waypoint you pick and its details.</div>
         <div id="watchStatus" style="font-size:0.75rem; color:#075985; margin-top:4px; line-height:1.4;"></div>
@@ -1416,6 +1417,24 @@
         const blob = await new Promise(res2 => cv.toBlob(res2, 'image/jpeg', 0.72));
         return { bytes: new Uint8Array(await blob.arrayBuffer()), img: { n: a.n, s: a.s, e: a.e, w: a.w, pw: W, ph: H } };
     }
+    // The basemap shown now, and a picture of it over an area for the watch
+    // (satellite imagery or USGS Topo, as one image from the map server, the
+    // same edges as the hillshade so it lies under it exactly); null when it
+    // can't be had (no such picture for street maps, or offline)
+    function currentBasemapKey() { return map.hasLayer(satellite) ? 'satellite' : map.hasLayer(topo) ? 'topo' : map.hasLayer(street) ? 'street' : 'none'; }
+    async function watchBasemapPicture(key, a, pw, ph) {
+        const svc = key === 'satellite' ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
+                  : key === 'topo' ? 'https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer' : null;
+        if (!svc) return null;
+        const k = Math.min(1, 2048 / Math.max(pw, ph)), W = Math.max(8, Math.round(pw * k)), H = Math.max(8, Math.round(ph * k));
+        const url = `${svc}/export?bbox=${a.w},${a.s},${a.e},${a.n}&bboxSR=4326&imageSR=4326&size=${W},${H}&format=jpg&f=image`;
+        try {
+            const ctrl = new AbortController(), t = setTimeout(() => ctrl.abort(), 30000);
+            const r = await fetch(url, { signal: ctrl.signal }); clearTimeout(t);
+            if (!r.ok || !(r.headers.get('content-type') || '').startsWith('image')) return null;
+            return { bytes: new Uint8Array(await r.arrayBuffer()), img: { src: key, n: a.n, s: a.s, e: a.e, w: a.w, pw: W, ph: H } };
+        } catch (e) { console.warn('Basemap picture for the watch', e); return null; }
+    }
     async function buildWatchPackage() {
         const scope = (document.getElementById('watchScope') || { value: 'all' }).value;
         const det = (document.getElementById('watchDetail') || { value: '1' }).value;
@@ -1426,15 +1445,26 @@
         const wps = watchWaypoints(scope === 'view' ? view : null);
         let hs = null;
         if (det !== 'none' && g) { watchSay('Making the hillshade for the watch...'); hs = await watchHillshade(area, parseFloat(det), det === '1' ? 2400 : 1600); }
-        const json = { v: 1, name: (document.getElementById('watchName') || {}).value || `LiDAR scan ${new Date().toLocaleDateString()}`, made: Date.now(), wps };
-        if (hs) json.img = hs.img;
+        // the map settings here go with them, as the watch's defaults: the basemap and the hillshade's opacity
+        const baseKey = currentBasemapKey();
+        const viewSettings = { base: baseKey, hs: parseFloat(document.getElementById('opacity').value) };
+        // and a picture of the basemap under the hillshade, so it shows with no signal
+        let base = null;
+        if (hs && (document.getElementById('watchBasemap') || { checked: true }).checked) {
+            watchSay(`Getting the ${baseKey === 'topo' ? 'topo map' : 'satellite imagery'} for the watch...`);
+            base = await watchBasemapPicture(baseKey, hs.img, hs.img.pw, hs.img.ph);
+        }
+        const json = { v: 1, name: (document.getElementById('watchName') || {}).value || `LiDAR scan ${new Date().toLocaleDateString()}`, made: Date.now(), wps, view: viewSettings };
+        if (hs) json.img = { ...hs.img, len: hs.bytes.length };
+        if (base) json.base = { ...base.img, len: base.bytes.length };
         const jb = new TextEncoder().encode(JSON.stringify(json));
-        const out = new Uint8Array(8 + jb.length + (hs ? hs.bytes.length : 0));
+        const out = new Uint8Array(8 + jb.length + (hs ? hs.bytes.length : 0) + (base ? base.bytes.length : 0));
         out.set([76, 87, 80, 49], 0);   // "LWP1"
         new DataView(out.buffer).setUint32(4, jb.length, false);
         out.set(jb, 8);
         if (hs) out.set(hs.bytes, 8 + jb.length);
-        return { bytes: out, nWps: wps.length, hasMap: !!hs };
+        if (base) out.set(base.bytes, 8 + jb.length + (hs ? hs.bytes.length : 0));
+        return { bytes: out, nWps: wps.length, hasMap: !!hs, hasBase: !!base, baseKey };
     }
     async function sendToWatch() {
         if (watchBusy) return;

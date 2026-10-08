@@ -17,6 +17,16 @@ Once the waypoints are on the watch, it works on its own. It needs no phone and 
 - **Guide**. A large arrow pointing to the waypoint, relative to the way you face, so you just walk where it points. It also shows the distance, and "turn left 40°" or "straight ahead". The arrow turns blue when you're on course, and green with a buzz when you arrive (within 10 m; change this in Settings). The screen stays on while you're guided.
   - Without a compass reading, the direction comes from your GPS course while you walk. If there is neither, the arrow points relative to north, with N marked.
 
+## Basemap and hillshade
+
+The map shows a basemap under the LiDAR hillshade, with the hillshade see-through at **70%** by default: the same defaults as the web app (satellite imagery, 70%). When waypoints arrive from the phone, the watch takes the web app's current settings, its basemap and hillshade opacity. You can still change them on the watch:
+
+- **◧** at the top of the map switches the basemap: **Satellite → Topo → Street → None** (the bottom line names the one chosen).
+- **Settings › Basemap** does the same.
+- **Settings › Hillshade** steps the opacity through 40, 55, 70, 85 and 100%. With no basemap, the hillshade is solid.
+
+The satellite imagery (or topo map) for the sent area comes with the waypoints, so it works with no signal. Other basemaps, and ground outside the sent area, load as map tiles when the watch has Wi-Fi or LTE (with *Download map when needed* on). Tiles are kept on the watch, so places you've seen work offline later.
+
 ## Getting the waypoints onto the watch
 
 1. On the watch: **LiDAR Guide › ☰ › Receive from phone**. Allow *Nearby devices* the first time.
@@ -26,6 +36,7 @@ Once the waypoints are on the watch, it works on its own. It needs no phone and 
 Options in the web app's Watch box:
 - **Waypoints**: all results on the map, or only those in view.
 - **Hillshade**: 1 m (sharpest), 2 m (quicker to send), or none.
+- **Include the basemap**: sends the satellite imagery (or topo map) shown in the web app, so it works offline. On by default; it roughly doubles the size, so the transfer takes about twice as long.
 
 A 1.5 km area at 1 m is about 300 KB, which takes roughly half a minute to a minute over Bluetooth. Sending again replaces what is on the watch.
 
@@ -58,7 +69,7 @@ Open this folder in Android Studio, or run `./gradlew assembleRelease`. You need
 
 ## How the transfer works
 
-- **The package.** `LWP1`, then the JSON's length (4 bytes, big-endian), then the JSON, then the hillshade JPEG. The JSON holds `name`, `made`, `img` (the hillshade's edges `n s e w` in degrees and its size in pixels) and `wps`. Each waypoint in `wps` has `id lat lon kind letter color score d h conf notes ol`, where `ol` is the outline as `[lat, lon]` pairs.
+- **The package.** `LWP1`, then the JSON's length (4 bytes, big-endian), then the JSON, then the hillshade JPEG and the basemap JPEG, each with its length in the JSON (`img.len`, `base.len`). `base` has `src` (`satellite` or `topo`) and the same edges as `img`. `view` carries the web app's basemap and hillshade opacity (`base`, `hs`). The JSON holds `name`, `made`, `img` (the hillshade's edges `n s e w` in degrees and its size in pixels) and `wps`. Each waypoint in `wps` has `id lat lon kind letter color score d h conf notes ol`, where `ol` is the outline as `[lat, lon]` pairs.
 - **The Bluetooth service.** It is `7b1e0001-5a4c-4b8e-9d3a-2f6c1a9e4d10`, with two characteristics:
   - **RX** (`…0002`, write): the phone sends BEGIN (`1`, size, CRC-32), then DATA pieces (`2`, offset, up to 495 bytes), then END (`3`).
   - **STATUS** (`…0003`, notify): the watch answers `p received total` as pieces arrive, then `ok …` or `err …`.

@@ -128,12 +128,43 @@ class LogicTest {
         try { r2.end(); fail() } catch (e: IllegalStateException) { assertTrue(e.message!!.contains("damaged")) }
     }
 
+    @Test fun decodesBasemapAndViewSettings() {
+        val hs = byteArrayOf(9, 8, 7); val sat = byteArrayOf(1, 2, 3, 4)
+        val j = sample()
+        j.getJSONObject("img").put("len", hs.size)
+        j.put("base", JSONObject().put("src", "satellite").put("n", 34.98).put("s", 34.97).put("e", -85.80).put("w", -85.82).put("pw", 2).put("ph", 2).put("len", sat.size))
+        j.put("view", JSONObject().put("base", "satellite").put("hs", 0.7))
+        val p = WatchPackage.decode(pack(j, hs + sat))
+        assertTrue(hs.contentEquals(p.imageBytes)); assertTrue(sat.contentEquals(p.baseBytes))
+        assertEquals("satellite", p.baseSrc); assertNotNull(p.baseImage)
+        assertEquals("satellite", p.viewBase); assertEquals(0.7f, p.viewHillshadeOpacity!!, 1e-6f)
+        // an older package (hillshade only, no lengths) still reads
+        val old = WatchPackage.decode(pack(sample(), hs))
+        assertTrue(hs.contentEquals(old.imageBytes)); assertNull(old.baseBytes); assertNull(old.viewBase)
+    }
+
+    @Test fun tileMaths() {
+        assertEquals(1.0, Geo.Tiles.x(0.0, 1), 1e-12); assertEquals(1.0, Geo.Tiles.y(0.0, 1), 1e-12)
+        for (z in listOf(5, 12, 17)) {
+            val x = Geo.Tiles.x(-85.8099, z); val y = Geo.Tiles.y(34.9780, z)
+            assertEquals(-85.8099, Geo.Tiles.lon(x, z), 1e-9); assertEquals(34.9780, Geo.Tiles.lat(y, z), 1e-9)
+        }
+        // the grid's fixed points: 180W / 180E at its edges, the equator in the middle,
+        // the web map's +-85.0511 degree limits at the top and bottom
+        val n = (1 shl 14).toDouble()
+        assertEquals(0.0, Geo.Tiles.x(-180.0, 14), 1e-9); assertEquals(n, Geo.Tiles.x(180.0, 14), 1e-9)
+        assertEquals(n / 2, Geo.Tiles.y(0.0, 14), 1e-9)
+        assertEquals(0.0, Geo.Tiles.y(85.05112878, 14), 0.01); assertEquals(n, Geo.Tiles.y(-85.05112878, 14), 0.01)
+        // a 1.2 m/px view needs tiles at least that sharp: zoom 17 at this latitude (0.98 m/px), capped by the source
+        assertEquals(17, Geo.Tiles.zoomFor(1.2, 34.978, 19)); assertEquals(16, Geo.Tiles.zoomFor(1.2, 34.978, 16))
+    }
+
     /** A package made by the web app (written by its test), when present. */
     @Test fun decodesWebAppPackage() {
         val f = File(System.getProperty("webPackage") ?: System.getenv("WEB_PACKAGE") ?: return)
         if (!f.exists()) return
         val p = WatchPackage.decode(f.readBytes())
-        println("web package: ${p.name}, ${p.waypoints.size} waypoints, image ${p.image?.widthPx}x${p.image?.heightPx} (${p.imageBytes?.size} bytes)")
+        println("web package: ${p.name}, ${p.waypoints.size} waypoints, image ${p.image?.widthPx}x${p.image?.heightPx} (${p.imageBytes?.size} bytes), basemap ${p.baseSrc} ${p.baseImage?.widthPx}x${p.baseImage?.heightPx} (${p.baseBytes?.size} bytes), view ${p.viewBase} ${p.viewHillshadeOpacity}")
         assertTrue(p.waypoints.isNotEmpty())
         for (w in p.waypoints) { assertTrue(w.lat in -90.0..90.0); assertTrue(w.lon in -180.0..180.0) }
     }

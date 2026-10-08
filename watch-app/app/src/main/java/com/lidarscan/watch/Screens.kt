@@ -161,12 +161,16 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
                 }
         ) {
             size = min(this.size.width, this.size.height).toInt()
+            m.tileTick   // (redraws as basemap tiles arrive)
             drawIntoCanvas { c -> drawMap(c.nativeCanvas, m, view, fix, heading, paints) }
         }
 
         // top: the list; sides: zoom; bottom: heading-up and follow-me
-        CompactButton(onClick = onList, modifier = Modifier.align(Alignment.TopCenter).padding(top = 6.dp),
-            colors = ButtonDefaults.secondaryButtonColors()) { Text("☰", fontSize = 14.sp) }
+        Row(Modifier.align(Alignment.TopCenter).padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            CompactButton(onClick = onList, colors = ButtonDefaults.secondaryButtonColors()) { Text("☰", fontSize = 14.sp) }
+            // the basemap: Satellite, Topo, Street, None
+            CompactButton(onClick = { m.nextBasemap() }, colors = ButtonDefaults.secondaryButtonColors()) { Text("◧", fontSize = 14.sp) }
+        }
         CompactButton(onClick = { mpp = min(20f, mpp * 2f) }, modifier = Modifier.align(Alignment.CenterStart).padding(start = 2.dp),
             colors = ButtonDefaults.secondaryButtonColors()) { Text("−", fontSize = 16.sp) }
         CompactButton(onClick = { mpp = max(0.25f, mpp / 2f) }, modifier = Modifier.align(Alignment.CenterEnd).padding(end = 2.dp),
@@ -174,6 +178,7 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
         Column(Modifier.align(Alignment.BottomCenter).padding(bottom = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             val sel = m.selected
             val line = when {
+                System.currentTimeMillis() < m.mapNoteUntil -> m.mapNote
                 sel != null && fix != null -> "${sel.letter} " + Geo.distanceText(Geo.distanceM(fix!!.lat, fix!!.lon, sel.lat, sel.lon)) + " " +
                     Geo.compassWord(Geo.bearingDeg(fix!!.lat, fix!!.lon, sel.lat, sel.lon))
                 m.locationDenied -> "Location is off for this app"
@@ -212,6 +217,7 @@ private fun scaleText(mpp: Float, size: Int): String {
 
 class MapPaints {
     val image = Paint(Paint.FILTER_BITMAP_FLAG).apply { isAntiAlias = true }
+    val base = Paint(Paint.FILTER_BITMAP_FLAG).apply { isAntiAlias = true }
     val marker = Paint(Paint.ANTI_ALIAS_FLAG)
     val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 3f; color = android.graphics.Color.WHITE }
     val letter = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = android.graphics.Color.WHITE; textAlign = Paint.Align.CENTER; textSize = 16f; typeface = Typeface.DEFAULT_BOLD }
@@ -238,9 +244,18 @@ private fun drawImage(nc: android.graphics.Canvas, bmp: android.graphics.Bitmap,
 }
 
 private fun drawMap(nc: android.graphics.Canvas, m: AppModel, view: Geo.View, fix: Fix?, heading: Heading?, p: MapPaints) {
-    // the online map first, the received LiDAR hillshade over it
-    m.online?.let { (img, bmp) -> drawImage(nc, bmp, img, view, p.image) }
     val pkg = m.pkg
+    // the basemap: its tiles (when the watch is online), then the satellite
+    // picture sent from the phone over them (it works with no signal)
+    val b = m.basemap
+    if (b != Basemap.NONE) {
+        if (m.onlineMaps) m.tiles.draw(nc, view, b, p.base)
+        val bb = m.baseBitmap; val bi = pkg?.baseImage
+        if (bb != null && bi != null && pkg?.baseSrc == b.key) drawImage(nc, bb, bi, view, p.base)
+    }
+    // the hillshade over it, see-through as set (solid with no basemap)
+    p.image.alpha = if (b == Basemap.NONE) 255 else (m.hillshadeOpacity * 255).roundToInt().coerceIn(0, 255)
+    m.online?.let { (img, bmp) -> drawImage(nc, bmp, img, view, p.image) }
     val pb = m.pkgBitmap
     if (pkg?.image != null && pb != null) drawImage(nc, pb, pkg.image, view, p.image)
 
@@ -470,6 +485,14 @@ fun SettingsScreen(act: MainActivity) {
         item {
             ToggleChip(checked = m.onlineMaps, onCheckedChange = { m.toggleOnlineMaps() }, label = { Text("Download map when needed") },
                 secondaryLabel = { Text("USGS hillshade, Wi-Fi / LTE") }, toggleControl = { Switch(checked = m.onlineMaps) }, modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            Chip(onClick = { m.nextBasemap() }, label = { Text("Basemap: ${m.basemap.label}") },
+                secondaryLabel = { Text("Tap to change") }, colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            Chip(onClick = { m.nextHillshadeOpacity() }, label = { Text("Hillshade: ${(m.hillshadeOpacity * 100).roundToInt()}%") },
+                secondaryLabel = { Text("Opacity over the basemap") }, colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
         }
         item {
             Chip(onClick = { m.nextArrive() }, label = { Text("Arrival buzz: ${Geo.lengthText(m.arriveM.toDouble())}") },

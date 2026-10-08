@@ -65,7 +65,7 @@ A summary lists what was detected and every value set, and all sliders stay adju
 - **Ending a trip.** Turning it off (or Stop following my location) finishes the area under way and adds the whole trip to the scan history as one entry.
 - **Mobile data:** roughly 4 MB per km² (a phone's view at street level is a few km²).
 
-**Galaxy Watch.** The *Watch* box sends your results to **LiDAR Guide**, a companion app for the Samsung Galaxy Watch Ultra 2 and other Wear OS watches (in [`watch-app/`](watch-app/README.md)). It sends either all results on the map or those in view, with a hillshade of the loaded LiDAR at 1 m or 2 m. On the watch, open *LiDAR Guide › ☰ › Receive from phone*, then press **⌚ Send to watch** in Chrome on the Android phone and pick the watch; the transfer goes over Bluetooth.
+**Galaxy Watch.** The *Watch* box sends your results to **LiDAR Guide**, a companion app for the Samsung Galaxy Watch Ultra 2 and other Wear OS watches (in [`watch-app/`](watch-app/README.md)). It sends either all results on the map or those in view, with a hillshade of the loaded LiDAR at 1 m or 2 m. It also sends your map settings (the basemap and the hillshade opacity), which the watch takes as its defaults. With *Include the basemap* on, it adds a picture of the satellite imagery or topo map under it, so the watch shows the same map with no signal. You can still change the basemap on the watch. On the watch, open *LiDAR Guide › ☰ › Receive from phone*, then press **⌚ Send to watch** in Chrome on the Android phone and pick the watch; the transfer goes over Bluetooth.
 
 The watch then works on its own:
 - the waypoints over the hillshade, with your live GPS position and compass heading;

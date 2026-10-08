@@ -29,13 +29,23 @@ data class WatchPackage(
     val image: MapImage?,
     val waypoints: List<Waypoint>,
     val imageBytes: ByteArray?,
+    /** A basemap picture of the same kind of area (satellite imagery from the phone), if sent. */
+    val baseImage: MapImage? = null,
+    val baseBytes: ByteArray? = null,
+    val baseSrc: String? = null,
+    /** The web app's map settings when it was sent: its basemap and hillshade opacity. */
+    val viewBase: String? = null,
+    val viewHillshadeOpacity: Float? = null,
 ) {
     companion object {
         private val MAGIC = byteArrayOf('L'.code.toByte(), 'W'.code.toByte(), 'P'.code.toByte(), '1'.code.toByte())
 
         /**
          * The package the web app sends: "LWP1", the JSON's length (4 bytes,
-         * big-endian), the JSON (UTF-8), then the hillshade image (JPEG or PNG).
+         * big-endian), the JSON (UTF-8), then the pictures it lists, one after
+         * the other: the hillshade ("img"), then the basemap ("base"), each
+         * with its byte length ("len"; an older package has only the
+         * hillshade, with no length, filling the rest).
          */
         fun decode(bytes: ByteArray): WatchPackage {
             require(bytes.size >= 8) { "too short" }
@@ -43,16 +53,25 @@ data class WatchPackage(
             val jsonLen = ByteBuffer.wrap(bytes, 4, 4).int
             require(jsonLen in 2..(bytes.size - 8)) { "bad header" }
             val json = JSONObject(String(bytes, 8, jsonLen, Charsets.UTF_8))
-            val img = json.optJSONObject("img")
-            val imageBytes = if (img != null && bytes.size > 8 + jsonLen) bytes.copyOfRange(8 + jsonLen, bytes.size) else null
-            return fromJson(json, imageBytes)
+            var off = 8 + jsonLen
+            fun take(o: JSONObject?): ByteArray? {
+                if (o == null || off >= bytes.size) return null
+                val n = o.optInt("len", bytes.size - off)
+                require(n >= 0 && off + n <= bytes.size) { "a picture runs past the end of the package" }
+                return bytes.copyOfRange(off, off + n).also { off += n }
+            }
+            val imageBytes = take(json.optJSONObject("img"))
+            val baseBytes = take(json.optJSONObject("base"))
+            return fromJson(json, imageBytes, baseBytes)
         }
 
-        fun fromJson(json: JSONObject, imageBytes: ByteArray?): WatchPackage {
+        private fun mapImage(o: JSONObject) = MapImage(o.getDouble("n"), o.getDouble("s"), o.getDouble("e"), o.getDouble("w"), o.optInt("pw"), o.optInt("ph"))
+
+        fun fromJson(json: JSONObject, imageBytes: ByteArray?, baseBytes: ByteArray? = null): WatchPackage {
             val img = json.optJSONObject("img")
-            val image = img?.let {
-                MapImage(it.getDouble("n"), it.getDouble("s"), it.getDouble("e"), it.getDouble("w"), it.optInt("pw"), it.optInt("ph"))
-            }
+            val image = img?.let { mapImage(it) }
+            val base = json.optJSONObject("base")
+            val view = json.optJSONObject("view")
             val arr = json.optJSONArray("wps")
             val wps = ArrayList<Waypoint>()
             if (arr != null) for (i in 0 until arr.length()) {
@@ -78,7 +97,14 @@ data class WatchPackage(
                     )
                 )
             }
-            return WatchPackage(json.optString("name", "LiDAR scan"), json.optLong("made", 0L), image, wps, imageBytes)
+            return WatchPackage(
+                json.optString("name", "LiDAR scan"), json.optLong("made", 0L), image, wps, imageBytes,
+                baseImage = if (base != null && baseBytes != null) mapImage(base) else null,
+                baseBytes = if (base != null) baseBytes else null,
+                baseSrc = base?.optString("src", "satellite"),
+                viewBase = view?.optString("base")?.takeIf { it.isNotEmpty() },
+                viewHillshadeOpacity = view?.let { if (it.has("hs")) it.getDouble("hs").toFloat() else null },
+            )
         }
 
         /** "#rrggbb" (or "#aarrggbb") to ARGB; slate grey if unreadable. */

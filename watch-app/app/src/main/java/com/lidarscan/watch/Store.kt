@@ -33,6 +33,10 @@ object Store {
     fun setHeadingUp(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("headingUp", v).apply()
     fun onlineMaps(ctx: Context) = prefs(ctx).getBoolean("onlineMaps", true)
     fun setOnlineMaps(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("onlineMaps", v).apply()
+    fun basemap(ctx: Context) = prefs(ctx).getString("basemap", "satellite") ?: "satellite"
+    fun setBasemap(ctx: Context, v: String) = prefs(ctx).edit().putString("basemap", v).apply()
+    fun hillshadeOpacity(ctx: Context) = prefs(ctx).getFloat("hillshadeOpacity", 0.7f)
+    fun setHillshadeOpacity(ctx: Context, v: Float) = prefs(ctx).edit().putFloat("hillshadeOpacity", v).apply()
     fun arriveM(ctx: Context) = prefs(ctx).getInt("arriveM", 10)
     fun setArriveM(ctx: Context, v: Int) = prefs(ctx).edit().putInt("arriveM", v).apply()
 
