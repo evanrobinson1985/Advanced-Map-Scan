@@ -821,8 +821,8 @@
             <button id="tdOpenBtn" onclick="tdOpenFolder()" style="font-size:0.8rem;background:#dbeafe;color:#1e3a8a;">&#128193; Open training data folder</button>
         </div>
         <div id="tdFolderNote" style="font-size:0.72rem; color:#475569; margin:2px 0 4px; line-height:1.4;"></div>
-        <input type="file" id="dlLoadInput" multiple accept=".gz,.json,application/gzip,application/json" style="display:none" onchange="dlLoadFromFile(this)">
-        <div style="font-size:0.72rem; color:#64748b; margin:4px 0; line-height:1.4;">Save deep-learning model saves the selected model: one file with the trained network, its terrain samples and your training data. Save all models saves every model's file plus a training data backup in one go. Load (several files at once) restores everything here or on another device; loading adds to what is already here.</div>
+        <input type="file" id="dlLoadInput" multiple accept=".zip,.gz,.json,application/zip,application/gzip,application/json" style="display:none" onchange="dlLoadFromFile(this)">
+        <div style="font-size:0.72rem; color:#64748b; margin:4px 0; line-height:1.4;">Save deep-learning model saves the selected model: one file with the trained network, its terrain samples and your training data. Save all models saves every model's file plus a training data backup in one zip file. Load (several files at once) restores everything here or on another device; loading adds to what is already here.</div>
         <button id="dlDeleteBtn" onclick="dlDeleteAll()" style="font-size:0.75rem;background:#f1f5f9;color:#64748b;">Delete model and samples</button>
     </div>
 
@@ -6913,7 +6913,20 @@ onmessage = (e) => {
     // after another; returns the messages
     async function dlLoadFiles(files) {
         const msgs = [];
+        // a zip (Save all models) is opened and the files in it loaded in turn
+        const all = [];
         for (const f of files) {
+            const head = new Uint8Array(await f.slice(0, 4).arrayBuffer());
+            if (head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04) {
+                try {
+                    dlSetStatus('Opening ' + f.name + '...');
+                    const inside = (await readZipBlob(f)).filter(e => /\.(gz|json)$/i.test(e.name) && !/(^|\/)(__MACOSX\/|\.)/.test(e.name));
+                    if (!inside.length) msgs.push(`${f.name} holds no model or training data files.`);
+                    for (const e of inside) all.push(new File([e.blob], e.name.split('/').pop()));
+                } catch (e) { console.error(e); msgs.push(`Could not open ${f.name}: ${e.message || e}`); }
+            } else all.push(f);
+        }
+        for (const f of all) {
             dlSetBusy(true);
             try { msgs.push(await dlLoadOneFile(f)); }
             catch (e) { console.error(e); msgs.push(`Could not load ${f.name}: ${e.message || e}`); }
@@ -7015,7 +7028,7 @@ onmessage = (e) => {
         if (dlBusy || tourBusy || (typeof tourTraining !== 'undefined' && tourTraining)) { dlSetStatus('Wait for the current scan, tour or training to finish.'); return; }
         const folder = await tdFolderReady();
         if (window.showDirectoryPicker && !folder) { dlSetStatus('Save all models needs a folder: none was chosen.'); return; }
-        const keep = DL.key, saved = [], skipped = [];
+        const keep = DL.key, saved = [], skipped = [], parts = [];
         dlSetBusy(true);
         try {
             for (const k of Object.keys(DL_PROFILES)) {
@@ -7024,20 +7037,83 @@ onmessage = (e) => {
                 if (!dlPrefs().model && !Object.keys(dlPatches.items).length && !dlPatches.bg.length) { skipped.push(DL_PROFILES[k].label); continue; }
                 dlSetStatus(`Saving ${DL_PROFILES[k].label} (${saved.length + 1} of ${Object.keys(DL_PROFILES).length})...`);
                 const r = await dlBuildModelFile();
-                if (folder) { const fh = await folder.getFileHandle(r.name, { create: true }), w = await fh.createWritable(); await w.write(r.blob); await w.close(); }
-                else { tdPlainDownload(r.blob, r.name); await new Promise(res => setTimeout(res, 800)); }
+                parts.push({ name: r.name, blob: r.blob });
                 saved.push(`${r.name} (${(r.blob.size / 1e6).toFixed(1)} MB${r.hasModel ? '' : ', no trained model yet'})`);
             }
             // the training data on its own too (Import Training Data reads it)
             const td = JSON.parse(JSON.stringify(trainingData)); delete td._undo;
             const tdBlob = new Blob([JSON.stringify(td)], { type: 'application/json' }), tdName = 'lidar-training-data-' + new Date().toISOString().slice(0, 10) + '.json';
-            if (folder) { const fh = await folder.getFileHandle(tdName, { create: true }), w = await fh.createWritable(); await w.write(tdBlob); await w.close(); }
-            else tdPlainDownload(tdBlob, tdName);
+            parts.push({ name: tdName, blob: tdBlob });
             saved.push(tdName);
+            // all of it in one zip file (Load models reads the zip as it is)
+            dlSetStatus('Putting the files in one zip...');
+            const zip = await buildZipBlob(parts), zipName = 'lidar-models-' + new Date().toISOString().slice(0, 10) + '.zip';
+            if (folder) { const fh = await folder.getFileHandle(zipName, { create: true }), w = await fh.createWritable(); await w.write(zip); await w.close(); }
+            else tdPlainDownload(zip, zipName);
             trainingData._unbackedUp = 0; trainingData._lastBackupAt = Date.now(); saveTrainingData(); updateBackupNote();
-            dlSetStatus(`Saved ${saved.length} file${saved.length === 1 ? '' : 's'} ${folder ? `in the folder "${folder.name}"` : 'to your Downloads folder'}: ${saved.join('; ')}.` + (skipped.length ? ` Nothing to save yet for: ${skipped.join(', ')}.` : ''));
+            dlSetStatus(`Saved ${zipName} (${(zip.size / 1e6).toFixed(1)} MB) ${folder ? `in the folder "${folder.name}"` : 'to your Downloads folder'}, with ${saved.length} file${saved.length === 1 ? '' : 's'}: ${saved.join('; ')}.` + (skipped.length ? ` Nothing to save yet for: ${skipped.join(', ')}.` : '') + ' Load it with Load models.');
         } catch (e) { console.error(e); dlSetStatus('Could not save all models: ' + (e.message || e)); }
         finally { dlSelectProfile(keep, false); dlSetBusy(false); updateDLSummary().catch(() => {}); }
+    }
+    // A zip file of {name, blob} parts, stored as they are (the model files are
+    // already compressed), built as a Blob so large files aren't copied
+    async function buildZipBlob(files) {
+        const out = [], central = [], enc = new TextEncoder();
+        const d = new Date(), dosTime = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
+              dosDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+        let offset = 0;
+        for (const { name, blob } of files) {
+            const data = new Uint8Array(await blob.arrayBuffer()), crc = crc32(data), nm = enc.encode(name);
+            const h = new DataView(new ArrayBuffer(30));
+            h.setUint32(0, 0x04034b50, true); h.setUint16(4, 20, true); h.setUint16(6, 0x0800, true); h.setUint16(8, 0, true);
+            h.setUint16(10, dosTime, true); h.setUint16(12, dosDate, true);
+            h.setUint32(14, crc, true); h.setUint32(18, data.length, true); h.setUint32(22, data.length, true);
+            h.setUint16(26, nm.length, true); h.setUint16(28, 0, true);
+            out.push(h.buffer, nm, blob);
+            central.push({ nm, crc, size: data.length, offset });
+            offset += 30 + nm.length + data.length;
+            const y = uiYield(); if (y) await y;
+        }
+        let cdSize = 0;
+        for (const e of central) {
+            const c = new DataView(new ArrayBuffer(46));
+            c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true); c.setUint16(10, 0, true);
+            c.setUint16(12, dosTime, true); c.setUint16(14, dosDate, true);
+            c.setUint32(16, e.crc, true); c.setUint32(20, e.size, true); c.setUint32(24, e.size, true);
+            c.setUint16(28, e.nm.length, true); c.setUint32(42, e.offset, true);
+            out.push(c.buffer, e.nm); cdSize += 46 + e.nm.length;
+        }
+        const end = new DataView(new ArrayBuffer(22));
+        end.setUint32(0, 0x06054b50, true); end.setUint16(8, central.length, true); end.setUint16(10, central.length, true);
+        end.setUint32(12, cdSize, true); end.setUint32(16, offset, true);
+        out.push(end.buffer);
+        return new Blob(out, { type: 'application/zip' });
+    }
+    // The files in a zip, as [{name, blob}]: stored ones (as Save all models
+    // writes them) and compressed ones (a zip made again by the computer)
+    async function readZipBlob(f) {
+        const tail = new DataView(await f.slice(Math.max(0, f.size - 65558)).arrayBuffer());
+        let eo = -1;
+        for (let i = tail.byteLength - 22; i >= 0; i--) if (tail.getUint32(i, true) === 0x06054b50) { eo = i; break; }
+        if (eo < 0) throw new Error('not a zip file, or a damaged one');
+        const n = tail.getUint16(eo + 10, true), cdSize = tail.getUint32(eo + 12, true), cdOff = tail.getUint32(eo + 16, true);
+        const cd = new DataView(await f.slice(cdOff, cdOff + cdSize).arrayBuffer()), dec = new TextDecoder(), out = [];
+        for (let i = 0, p = 0; i < n; i++) {
+            if (cd.getUint32(p, true) !== 0x02014b50) throw new Error('damaged zip directory');
+            const method = cd.getUint16(p + 10, true), csize = cd.getUint32(p + 20, true), nl = cd.getUint16(p + 28, true),
+                  xl = cd.getUint16(p + 30, true), cl = cd.getUint16(p + 32, true), lo = cd.getUint32(p + 42, true);
+            const name = dec.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nl));
+            p += 46 + nl + xl + cl;
+            if (name.endsWith('/')) continue;
+            const lh = new DataView(await f.slice(lo, lo + 30).arrayBuffer());
+            const start = lo + 30 + lh.getUint16(26, true) + lh.getUint16(28, true), raw = f.slice(start, start + csize);
+            if (method === 0) out.push({ name, blob: raw });
+            else if (method === 8) {
+                if (!window.DecompressionStream) throw new Error('this browser cannot open compressed zips; update it');
+                out.push({ name, blob: await new Response(raw.stream().pipeThrough(new DecompressionStream('deflate-raw'))).blob() });
+            } else throw new Error(`${name} is packed in a way this page can't read`);
+        }
+        return out;
     }
     function tdPlainDownload(blob, name) {
         const url = URL.createObjectURL(blob), a = document.createElement('a');
@@ -7054,7 +7130,7 @@ onmessage = (e) => {
         }
         if (!tdFolder && !(await tdChooseFolder())) return;
         try {
-            const hs = await window.showOpenFilePicker({ startIn: tdFolder, multiple: true, types: [{ description: 'Models and training data', accept: { 'application/gzip': ['.gz'], 'application/json': ['.json'] } }] });
+            const hs = await window.showOpenFilePicker({ startIn: tdFolder, multiple: true, types: [{ description: 'Models and training data', accept: { 'application/zip': ['.zip'], 'application/gzip': ['.gz'], 'application/json': ['.json'] } }] });
             const files = []; for (const fh of hs) files.push(await fh.getFile());
             if (files.length) await dlLoadFiles(files);
         } catch (e) { if (e.name !== 'AbortError') dlSetStatus('Could not open the folder: ' + (e.message || e)); }
