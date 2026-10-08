@@ -10,22 +10,71 @@ import kotlin.math.cos
 
 /** The received package, the online map and the settings, kept on the watch. */
 object Store {
-    private fun pkgFile(ctx: Context) = File(ctx.filesDir, "package.lwp")
+    private fun pkgFile(ctx: Context) = File(ctx.filesDir, "package.lwp")   // (before the history: moved into it)
     private fun onlineImg(ctx: Context) = File(ctx.filesDir, "online.jpg")
     private fun onlineMeta(ctx: Context) = File(ctx.filesDir, "online.json")
 
-    fun savePackage(ctx: Context, bytes: ByteArray) {
-        val tmp = File(ctx.filesDir, "package.tmp")
+    // ---- the history of received packages ----
+    // Every package received is kept (history/<id>.lwp, with a summary in
+    // <id>.json), so an earlier one can be put back on the map or deleted.
+    // The one on the map is remembered by its id.
+    private fun histDir(ctx: Context) = File(ctx.filesDir, "history").apply { mkdirs() }
+    private fun histFile(ctx: Context, id: Long) = File(histDir(ctx), "$id.lwp")
+    private fun histMeta(ctx: Context, id: Long) = File(histDir(ctx), "$id.json")
+
+    /** Keeps a received package in the history and makes it the one on the map; returns its id. */
+    fun addToHistory(ctx: Context, bytes: ByteArray, p: WatchPackage, receivedAt: Long = System.currentTimeMillis()): Long {
+        var id = receivedAt
+        while (histFile(ctx, id).exists()) id++
+        val tmp = File(histDir(ctx), "$id.tmp")
         tmp.writeBytes(bytes)
-        tmp.renameTo(pkgFile(ctx))
+        tmp.renameTo(histFile(ctx, id))
+        histMeta(ctx, id).writeText(JSONObject()
+            .put("id", id).put("name", p.name).put("made", p.madeAt).put("received", receivedAt)
+            .put("wps", p.waypoints.size).put("hillshade", p.imageBytes != null)
+            .put("base", p.baseSrc ?: JSONObject.NULL).put("hasBase", p.baseBytes != null).put("bytes", bytes.size).toString())
+        setCurrentId(ctx, id)
+        return id
     }
 
-    fun loadPackage(ctx: Context): WatchPackage? = try {
-        val f = pkgFile(ctx)
+    fun history(ctx: Context): List<HistoryEntry> {
+        migrateOld(ctx)
+        return (histDir(ctx).listFiles { f -> f.name.endsWith(".json") } ?: emptyArray()).mapNotNull { f ->
+            try {
+                val o = JSONObject(f.readText())
+                HistoryEntry(o.getLong("id"), o.optString("name", "LiDAR scan"), o.optLong("made"), o.optLong("received"), o.optInt("wps"),
+                    o.optBoolean("hillshade"), o.optBoolean("hasBase"), if (o.isNull("base")) null else o.optString("base"), o.optInt("bytes"))
+            } catch (e: Exception) { null }
+        }.sortedByDescending { it.receivedAt }
+    }
+
+    fun loadEntry(ctx: Context, id: Long): WatchPackage? = try {
+        val f = histFile(ctx, id)
         if (f.exists()) WatchPackage.decode(f.readBytes()) else null
     } catch (e: Exception) { null }
 
-    fun deletePackage(ctx: Context) { pkgFile(ctx).delete() }
+    fun deleteEntry(ctx: Context, id: Long) {
+        histFile(ctx, id).delete(); histMeta(ctx, id).delete()
+        if (currentId(ctx) == id) setCurrentId(ctx, -1L)
+    }
+
+    fun currentId(ctx: Context) = prefs(ctx).getLong("currentPkg", -1L)
+    fun setCurrentId(ctx: Context, id: Long) = prefs(ctx).edit().putLong("currentPkg", id).apply()
+
+    /** The package on the map (the current history entry). */
+    fun loadPackage(ctx: Context): WatchPackage? { migrateOld(ctx); val id = currentId(ctx); return if (id >= 0) loadEntry(ctx, id) else null }
+
+    // a package kept by the version before the history becomes its first entry
+    private fun migrateOld(ctx: Context) {
+        val old = pkgFile(ctx)
+        if (!old.exists()) return
+        try {
+            val bytes = old.readBytes()
+            val p = WatchPackage.decode(bytes)
+            addToHistory(ctx, bytes, p, old.lastModified())
+        } catch (e: Exception) { /* unreadable: dropped */ }
+        old.delete()
+    }
 
     // ---- settings ----
     private fun prefs(ctx: Context) = ctx.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -37,6 +86,12 @@ object Store {
     fun setBasemap(ctx: Context, v: String) = prefs(ctx).edit().putString("basemap", v).apply()
     fun hillshadeOpacity(ctx: Context) = prefs(ctx).getFloat("hillshadeOpacity", 0.7f)
     fun setHillshadeOpacity(ctx: Context, v: Float) = prefs(ctx).edit().putFloat("hillshadeOpacity", v).apply()
+    fun hiddenKinds(ctx: Context): Set<String> = prefs(ctx).getStringSet("hiddenKinds", emptySet())?.toSet() ?: emptySet()
+    fun setHiddenKinds(ctx: Context, v: Set<String>) = prefs(ctx).edit().putStringSet("hiddenKinds", HashSet(v)).apply()
+    fun keepAwake(ctx: Context) = prefs(ctx).getBoolean("keepAwake", false)
+    fun setKeepAwake(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("keepAwake", v).apply()
+    fun dimWhenDown(ctx: Context) = prefs(ctx).getBoolean("dimWhenDown", true)
+    fun setDimWhenDown(ctx: Context, v: Boolean) = prefs(ctx).edit().putBoolean("dimWhenDown", v).apply()
     fun arriveM(ctx: Context) = prefs(ctx).getInt("arriveM", 10)
     fun setArriveM(ctx: Context, v: Int) = prefs(ctx).edit().putInt("arriveM", v).apply()
 
@@ -74,3 +129,9 @@ object Store {
         } finally { conn.disconnect() }
     }
 }
+
+/** One package kept in the history. */
+data class HistoryEntry(
+    val id: Long, val name: String, val madeAt: Long, val receivedAt: Long, val waypoints: Int,
+    val hasHillshade: Boolean, val hasBase: Boolean, val baseSrc: String?, val bytes: Int,
+)

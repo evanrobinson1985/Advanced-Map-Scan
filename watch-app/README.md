@@ -12,7 +12,9 @@ Once the waypoints are on the watch, it works on its own. It needs no phone and 
   - **N** / **▲** switches between north up and the map turned to face your heading.
   - Tap a waypoint for its details.
   - Once you have chosen a waypoint, a dashed line runs to it, the bottom line gives its distance and direction, and **➤** starts guiding.
-- **List** (☰ at the top of the map). The waypoints, nearest first, with distance, direction and confidence. Also here: *Receive from phone* and *Settings*.
+- **List** (☰ at the top of the map). **Settings** comes first, then *Receive from phone*, *Filter waypoints* and *History*, then the waypoints, nearest first, with distance, direction and confidence.
+- **Filter waypoints.** A switch for each group of waypoints, for example *Mounds*, *Mounds (deep learning)* or *Effigies*, with how many each holds. Hidden groups leave the map, the list and the "nearest" line. *Show all* brings them back, and the choice is remembered.
+- **History.** Every package received from the phone (its waypoints, hillshade and satellite imagery) is kept, newest first, with when it came and what it holds. The one on the map has a ✓. Tap one to **Load it on the map** or **Delete** it (tap twice to confirm).
 - **Details**. The feature type, distance and bearing from you, confidence, size, height, coordinates, and the notes from the web app's result (shape measures, borrow pits, slope and so on). **➤** guides you to it; **Map** shows it on the map.
 - **Guide**. A large arrow pointing to the waypoint, relative to the way you face, so you just walk where it points. It also shows the distance, and "turn left 40°" or "straight ahead". The arrow turns blue when you're on course, and green with a buzz when you arrive (within 10 m; change this in Settings). The screen stays on while you're guided.
   - Without a compass reading, the direction comes from your GPS course while you walk. If there is neither, the arrow points relative to north, with N marked.
@@ -26,6 +28,14 @@ The map shows a basemap under the LiDAR hillshade, with the hillshade see-throug
 - **Settings › Hillshade** steps the opacity through 40, 55, 70, 85 and 100%. With no basemap, the hillshade is solid.
 
 The satellite imagery (or topo map) for the sent area comes with the waypoints, so it works with no signal. Other basemaps, and ground outside the sent area, load as map tiles when the watch has Wi-Fi or LTE (with *Download map when needed* on). Tiles are kept on the watch, so places you've seen work offline later.
+
+## Keeping the screen on, and dimming when your arm is down
+
+**Settings › Keep screen on** keeps the display on and LiDAR Guide open, rather than going back to the watch face. Your position keeps updating while it's open.
+
+**Settings › Dim when arm is down** (on by default; it needs *Keep screen on*) saves battery. When your arm hangs at your side, the watch's motion sensor notices: the screen has tipped more than about 70° from facing up for 1.5 seconds. The brightness then goes right down and the map is darkened. Raise your wrist to look and it brightens at once; a tap on the dimmed screen also brings it back.
+
+Keeping the screen on uses more battery than letting the watch sleep, even dimmed. Turn it off when you don't need the map in view.
 
 ## Getting the waypoints onto the watch
 

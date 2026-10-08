@@ -36,7 +36,10 @@ import kotlinx.coroutines.withContext
 class MainActivity : ComponentActivity() {
     lateinit var model: AppModel
     lateinit var tracker: Tracker
+    lateinit var wrist: WristDim
     private var locationAsked = false
+    private var resumed = false
+    private var screenOnHolds = 0   // screens that keep it on while open (guide, receive)
 
     private val askLocation = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { r ->
         if (r.values.any { it }) tracker.start() else model.locationDenied = true
@@ -46,11 +49,15 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         model = AppModel(applicationContext)
         tracker = Tracker(applicationContext)
+        wrist = WristDim(applicationContext) { down -> setDimmed(down) }
+        model.onAwakeChanged = { applyAwake() }
         setContent { WatchApp(this) }
     }
 
     override fun onResume() {
         super.onResume()
+        resumed = true
+        applyAwake()
         if (hasLocation()) { tracker.start(); model.locationDenied = false }
         else if (!locationAsked) {
             locationAsked = true
@@ -58,14 +65,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onPause() { super.onPause(); tracker.stop() }
+    override fun onPause() { super.onPause(); resumed = false; tracker.stop(); wrist.stop(); setDimmed(false) }
     override fun onDestroy() { super.onDestroy(); model.close() }
 
     private fun hasLocation() = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
         ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
-    fun keepScreenOn(on: Boolean) {
+    /** A screen that needs the display on while it's open (guide, receive) holds it with on = true, then lets go. */
+    fun keepScreenOn(on: Boolean) { screenOnHolds = maxOf(0, screenOnHolds + if (on) 1 else -1); applyAwake() }
+
+    /**
+     * Keep awake (Settings): the screen stays on and the app open, instead of
+     * going back to the watch face. With "dim when arm is down" the screen is
+     * turned right down while your arm hangs at your side and comes back up
+     * when you raise your wrist (or tap it).
+     */
+    private fun applyAwake() {
+        val on = model.keepAwake || screenOnHolds > 0
         if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        if (resumed && model.keepAwake && model.dimWhenDown && wrist.available) wrist.start() else { wrist.stop(); setDimmed(false) }
+    }
+
+    fun setDimmed(dim: Boolean) {
+        if (model.dimmed == dim) return
+        model.dimmed = dim
+        val lp = window.attributes
+        lp.screenBrightness = if (dim) 0.01f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        window.attributes = lp
     }
 
     fun buzz(pattern: LongArray) {
@@ -103,6 +129,16 @@ class AppModel(private val ctx: Context) {
     var tileTick by mutableIntStateOf(0); private set
     /** A short note on the map (the basemap just chosen), until this time. */
     var mapNote by mutableStateOf(""); var mapNoteUntil = 0L
+    /** Waypoint groups (their kind) hidden from the map and the list. */
+    var hiddenKinds by mutableStateOf(Store.hiddenKinds(ctx)); private set
+    /** Keep the screen on and the app open; dim it while the arm is down. */
+    var keepAwake by mutableStateOf(Store.keepAwake(ctx)); private set
+    var dimWhenDown by mutableStateOf(Store.dimWhenDown(ctx)); private set
+    var dimmed by mutableStateOf(false)
+    var onAwakeChanged: () -> Unit = {}
+    /** The packages received, newest first, and which one is on the map. */
+    var history by mutableStateOf<List<HistoryEntry>>(emptyList()); private set
+    var currentId by mutableStateOf(-1L); private set
     val tiles = TileLayer(ctx) { main.post { tileTick++ } }
     private var onlineBusy = false
     private var onlineTriedAt = 0L
@@ -112,12 +148,38 @@ class AppModel(private val ctx: Context) {
     init {
         tiles.enabled = onlineMaps
         Store.loadPackage(ctx)?.let { applyPackage(it) }
+        currentId = Store.currentId(ctx)
+        history = Store.history(ctx)
         Store.loadOnline(ctx)?.let { (m, b) -> decodeMap(b)?.let { online = Pair(m, it) } }
     }
 
     fun close() { scope.cancel(); tiles.close() }
 
     val selected: Waypoint? get() = pkg?.waypoints?.firstOrNull { it.id == selectedId }
+
+    /** The waypoints shown: those in groups not hidden by the filter. */
+    val visibleWaypoints: List<Waypoint> get() = pkg?.waypoints?.filter { it.kind !in hiddenKinds } ?: emptyList()
+    /** The groups in the package on the map, with how many waypoints each. */
+    val kinds: List<Pair<Waypoint, Int>> get() = (pkg?.waypoints ?: emptyList()).groupBy { it.kind }.map { (_, l) -> Pair(l[0], l.size) }.sortedByDescending { it.second }
+    fun setKindShown(kind: String, shown: Boolean) { hiddenKinds = if (shown) hiddenKinds - kind else hiddenKinds + kind; Store.setHiddenKinds(ctx, hiddenKinds); if (!shown && selected?.kind == kind) selectedId = null }
+    fun showAllKinds() { hiddenKinds = emptySet(); Store.setHiddenKinds(ctx, hiddenKinds) }
+
+    fun toggleKeepAwake() { keepAwake = !keepAwake; Store.setKeepAwake(ctx, keepAwake); onAwakeChanged() }
+    fun toggleDimWhenDown() { dimWhenDown = !dimWhenDown; Store.setDimWhenDown(ctx, dimWhenDown); onAwakeChanged() }
+
+    /** Puts a package from the history back on the map. */
+    fun loadFromHistory(id: Long) {
+        scope.launch {
+            val p = withContext(Dispatchers.IO) { Store.loadEntry(ctx, id) } ?: return@launch
+            Store.setCurrentId(ctx, id); currentId = id
+            applyPackage(p); showPackageArea = true
+        }
+    }
+    fun deleteFromHistory(id: Long) {
+        Store.deleteEntry(ctx, id)
+        if (id == currentId) { pkg = null; pkgBitmap = null; baseBitmap = null; selectedId = null; currentId = -1L }
+        history = Store.history(ctx)
+    }
 
     private fun applyPackage(p: WatchPackage) {
         pkg = p
@@ -129,9 +191,10 @@ class AppModel(private val ctx: Context) {
     /** Called from the Bluetooth thread with a complete package: checked, kept, shown. */
     fun receive(bytes: ByteArray): String {
         val p = WatchPackage.decode(bytes)
-        Store.savePackage(ctx, bytes)
+        val id = Store.addToHistory(ctx, bytes, p)
         main.post {
             applyPackage(p); showPackageArea = true
+            currentId = id; history = Store.history(ctx)
             // the web app's map settings come with the waypoints (you can still change them here)
             p.viewBase?.let { chooseBasemap(Basemap.of(it)) }
             p.viewHillshadeOpacity?.let { chooseHillshadeOpacity(it) }
@@ -140,7 +203,6 @@ class AppModel(private val ctx: Context) {
             (if (p.baseBytes != null) " and the ${if (p.baseSrc == "topo") "topo map" else "satellite imagery"}" else "")
     }
 
-    fun deletePackage() { Store.deletePackage(ctx); pkg = null; pkgBitmap = null; selectedId = null }
     fun toggleHeadingUp() { headingUp = !headingUp; Store.setHeadingUp(ctx, headingUp) }
     fun toggleOnlineMaps() { onlineMaps = !onlineMaps; Store.setOnlineMaps(ctx, onlineMaps); tiles.enabled = onlineMaps }
     fun chooseBasemap(b: Basemap) { basemap = b; Store.setBasemap(ctx, b.key) }

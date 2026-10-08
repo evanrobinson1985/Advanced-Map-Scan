@@ -73,9 +73,17 @@ private val Accent = Color(0xFF38BDF8)
 fun WatchApp(act: MainActivity) {
     val nav = rememberSwipeDismissableNavController()
     MaterialTheme {
+      Box(Modifier.fillMaxSize()) {
         SwipeDismissableNavHost(navController = nav, startDestination = "map") {
             composable("map") { MapScreen(act, onList = { nav.navigate("list") }, onWaypoint = { nav.navigate("detail/$it") }, onGuide = { nav.navigate("guide/$it") }) }
-            composable("list") { ListScreen(act, onWaypoint = { nav.navigate("detail/$it") }, onReceive = { nav.navigate("receive") }, onSettings = { nav.navigate("settings") }) }
+            composable("list") { ListScreen(act, onWaypoint = { nav.navigate("detail/$it") }, onReceive = { nav.navigate("receive") }, onSettings = { nav.navigate("settings") },
+                onFilter = { nav.navigate("filter") }, onHistory = { nav.navigate("history") }) }
+            composable("filter") { FilterScreen(act) }
+            composable("history") { HistoryScreen(act, onEntry = { nav.navigate("history/$it") }) }
+            composable("history/{id}") { e ->
+                val id = e.arguments?.getString("id")?.toLongOrNull() ?: -1L
+                HistoryEntryScreen(act, id, onLoaded = { nav.popBackStack("map", false) }, onDeleted = { nav.popBackStack() })
+            }
             composable("detail/{id}") { e ->
                 val id = e.arguments?.getString("id") ?: ""
                 DetailScreen(act, id, onGuide = { nav.navigate("guide/$id") }, onMap = { act.model.selectedId = id; nav.popBackStack("map", false) })
@@ -84,6 +92,13 @@ fun WatchApp(act: MainActivity) {
             composable("receive") { ReceiveScreen(act, onDone = { nav.popBackStack("map", false) }) }
             composable("settings") { SettingsScreen(act) }
         }
+        // dimmed while the arm is down: the screen is turned right down and the
+        // map darkened; raising the wrist (or a tap) brings it back
+        if (act.model.dimmed) Box(
+            Modifier.fillMaxSize().background(Color(0xE6000000)).pointerInput(Unit) { detectTapGestures { act.setDimmed(false) } },
+            contentAlignment = Alignment.Center,
+        ) { Text("Raise your wrist", fontSize = 11.sp, color = Color(0xFF475569)) }
+      }
     }
 }
 
@@ -148,9 +163,8 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
                     detectTapGestures(
                         onTap = { p ->
                             val view = latest[0] as Geo.View
-                            val pkg = latest[1] as WatchPackage?
                             // the waypoint under your finger (within ~30 px)
-                            val hit = pkg?.waypoints?.minByOrNull { w -> val (x, y) = view.toScreen(w.lat, w.lon); hypot(x - p.x, y - p.y) }
+                            val hit = m.visibleWaypoints.minByOrNull { w -> val (x, y) = view.toScreen(w.lat, w.lon); hypot(x - p.x, y - p.y) }
                             if (hit != null) {
                                 val (x, y) = view.toScreen(hit.lat, hit.lon)
                                 if (hypot(x - p.x, y - p.y) < 30f) { m.selectedId = hit.id; onWaypoint(hit.id) }
@@ -185,9 +199,9 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
                 fix == null -> "Finding GPS..."
                 m.onlineNote.isNotEmpty() -> m.onlineNote
                 // none on screen: say where the nearest one is
-                pkg != null && pkg.waypoints.isNotEmpty() && pkg.waypoints.none { w -> val (x, y) = view.toScreen(w.lat, w.lon); x in 0f..(size.toFloat()) && y in 0f..(size.toFloat()) } -> {
+                m.visibleWaypoints.isNotEmpty() && m.visibleWaypoints.none { w -> val (x, y) = view.toScreen(w.lat, w.lon); x in 0f..(size.toFloat()) && y in 0f..(size.toFloat()) } -> {
                     val f = fix!!
-                    val near = pkg.waypoints.minBy { Geo.distanceM(f.lat, f.lon, it.lat, it.lon) }
+                    val near = m.visibleWaypoints.minBy { Geo.distanceM(f.lat, f.lon, it.lat, it.lon) }
                     "Nearest ${near.letter} " + Geo.distanceText(Geo.distanceM(f.lat, f.lon, near.lat, near.lon)) + " " + Geo.compassWord(Geo.bearingDeg(f.lat, f.lon, near.lat, near.lon))
                 }
                 pkg == null -> "☰ › Receive from phone"
@@ -259,7 +273,7 @@ private fun drawMap(nc: android.graphics.Canvas, m: AppModel, view: Geo.View, fi
     val pb = m.pkgBitmap
     if (pkg?.image != null && pb != null) drawImage(nc, pb, pkg.image, view, p.image)
 
-    val wps = pkg?.waypoints ?: emptyList()
+    val wps = m.visibleWaypoints
     // outlines when zoomed in enough to see them
     if (view.mPerPx <= 3.0) for (w in wps) if (w.outline.size >= 3) {
         val path = Path()
@@ -309,21 +323,35 @@ private fun drawMap(nc: android.graphics.Canvas, m: AppModel, view: Geo.View, fi
 
 // ---------------------------------------------------------------- the list
 @Composable
-fun ListScreen(act: MainActivity, onWaypoint: (String) -> Unit, onReceive: () -> Unit, onSettings: () -> Unit) {
+fun ListScreen(act: MainActivity, onWaypoint: (String) -> Unit, onReceive: () -> Unit, onSettings: () -> Unit, onFilter: () -> Unit, onHistory: () -> Unit) {
     val m = act.model
     val fix by act.tracker.fix.collectAsState()
     val state = rememberScalingLazyListState()
-    val wps = (m.pkg?.waypoints ?: emptyList()).let { list ->
+    val wps = m.visibleWaypoints.let { list ->
         val f = fix
         if (f != null) list.sortedBy { Geo.distanceM(f.lat, f.lon, it.lat, it.lon) } else list.sortedByDescending { it.score ?: 0 }
     }
     ScalingLazyColumn(Modifier.fillMaxSize(), state = state) {
         item { ListHeader { Text(m.pkg?.name ?: "LiDAR Guide", maxLines = 1) } }
+        item { Chip(onClick = onSettings, label = { Text("Settings") }, colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth()) }
         item {
             Chip(onClick = onReceive, label = { Text("Receive from phone") }, secondaryLabel = { Text("Waypoints and map") },
                 colors = ChipDefaults.primaryChipColors(), modifier = Modifier.fillMaxWidth())
         }
-        if (wps.isEmpty()) item { Text("No waypoints yet. Send them from the LiDAR web app (⌚ Send to watch).", fontSize = 12.sp, textAlign = TextAlign.Center) }
+        if (m.pkg != null) item {
+            val hidden = m.kinds.count { it.first.kind in m.hiddenKinds }
+            Chip(onClick = onFilter, label = { Text("Filter waypoints") },
+                secondaryLabel = { Text(if (hidden == 0) "All ${m.kinds.size} groups shown" else "$hidden of ${m.kinds.size} groups hidden") },
+                colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            Chip(onClick = onHistory, label = { Text("History") }, secondaryLabel = { Text("${m.history.size} received") },
+                colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
+        }
+        if (wps.isEmpty()) item {
+            Text(if (m.pkg?.waypoints?.isNotEmpty() == true) "Every group is hidden: Filter waypoints to show them." else "No waypoints yet. Send them from the LiDAR web app (⌚ Send to watch).",
+                fontSize = 12.sp, textAlign = TextAlign.Center)
+        }
         items(wps) { w ->
             val f = fix
             val where = if (f != null) Geo.distanceText(Geo.distanceM(f.lat, f.lon, w.lat, w.lon)) + " " + Geo.compassWord(Geo.bearingDeg(f.lat, f.lon, w.lat, w.lon)) else ""
@@ -336,7 +364,6 @@ fun ListScreen(act: MainActivity, onWaypoint: (String) -> Unit, onReceive: () ->
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        item { Chip(onClick = onSettings, label = { Text("Settings") }, colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth()) }
     }
 }
 
@@ -479,6 +506,15 @@ fun SettingsScreen(act: MainActivity) {
     ScalingLazyColumn(Modifier.fillMaxSize()) {
         item { ListHeader { Text("Settings") } }
         item {
+            ToggleChip(checked = m.keepAwake, onCheckedChange = { m.toggleKeepAwake() }, label = { Text("Keep screen on") },
+                secondaryLabel = { Text("The app stays open") }, toggleControl = { Switch(checked = m.keepAwake) }, modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            ToggleChip(checked = m.dimWhenDown, onCheckedChange = { m.toggleDimWhenDown() }, enabled = m.keepAwake,
+                label = { Text("Dim when arm is down") }, secondaryLabel = { Text(if (m.keepAwake) "Brightens when you raise it" else "With Keep screen on") },
+                toggleControl = { Switch(checked = m.dimWhenDown, enabled = m.keepAwake) }, modifier = Modifier.fillMaxWidth())
+        }
+        item {
             ToggleChip(checked = m.headingUp, onCheckedChange = { m.toggleHeadingUp() }, label = { Text("Map faces your heading") },
                 toggleControl = { Switch(checked = m.headingUp) }, modifier = Modifier.fillMaxWidth())
         }
@@ -498,9 +534,72 @@ fun SettingsScreen(act: MainActivity) {
             Chip(onClick = { m.nextArrive() }, label = { Text("Arrival buzz: ${Geo.lengthText(m.arriveM.toDouble())}") },
                 secondaryLabel = { Text("Tap to change") }, colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
         }
-        if (m.pkg != null) item {
-            Chip(onClick = { m.deletePackage() }, label = { Text("Delete waypoints") },
-                secondaryLabel = { Text(m.pkg?.name ?: "") }, colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
+
+    }
+}
+
+// ---------------------------------------------------------------- filter
+@Composable
+fun FilterScreen(act: MainActivity) {
+    val m = act.model
+    ScalingLazyColumn(Modifier.fillMaxSize()) {
+        item { ListHeader { Text("Show waypoints") } }
+        if (m.kinds.isEmpty()) item { Text("No waypoints on the map.", fontSize = 12.sp, textAlign = TextAlign.Center) }
+        items(m.kinds) { (w, n) ->
+            val shown = w.kind !in m.hiddenKinds
+            ToggleChip(checked = shown, onCheckedChange = { m.setKindShown(w.kind, it) },
+                label = { Text(w.kind, maxLines = 2) }, secondaryLabel = { Text("$n waypoint${if (n == 1) "" else "s"}") },
+                appIcon = { Letter(w) }, toggleControl = { Switch(checked = shown) }, modifier = Modifier.fillMaxWidth())
+        }
+        if (m.hiddenKinds.isNotEmpty()) item {
+            Chip(onClick = { m.showAllKinds() }, label = { Text("Show all") }, colors = ChipDefaults.primaryChipColors(), modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+// ---------------------------------------------------------------- history
+private fun historyWhen(ms: Long): String = if (ms <= 0) "" else
+    java.text.SimpleDateFormat("MMM d, h:mm a", java.util.Locale.getDefault()).format(java.util.Date(ms))
+
+private fun historyWhat(e: HistoryEntry): String = listOfNotNull(
+    "${e.waypoints} waypoint${if (e.waypoints == 1) "" else "s"}",
+    if (e.hasHillshade) "hillshade" else null,
+    if (e.hasBase) (if (e.baseSrc == "topo") "topo" else "satellite") else null,
+).joinToString(", ")
+
+@Composable
+fun HistoryScreen(act: MainActivity, onEntry: (Long) -> Unit) {
+    val m = act.model
+    ScalingLazyColumn(Modifier.fillMaxSize()) {
+        item { ListHeader { Text("History") } }
+        if (m.history.isEmpty()) item { Text("Nothing received yet.", fontSize = 12.sp, textAlign = TextAlign.Center) }
+        items(m.history) { e ->
+            val current = e.id == m.currentId
+            Chip(onClick = { onEntry(e.id) },
+                label = { Text((if (current) "\u2713 " else "") + e.name, maxLines = 1) },
+                secondaryLabel = { Text("${historyWhen(e.receivedAt)} \u00B7 ${historyWhat(e)}", maxLines = 2) },
+                colors = if (current) ChipDefaults.primaryChipColors() else ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+fun HistoryEntryScreen(act: MainActivity, id: Long, onLoaded: () -> Unit, onDeleted: () -> Unit) {
+    val m = act.model
+    val e = m.history.firstOrNull { it.id == id } ?: run { Text("This one is gone."); return }
+    var confirm by remember { mutableStateOf(false) }
+    ScalingLazyColumn(Modifier.fillMaxSize()) {
+        item { Text(e.name, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center, maxLines = 2) }
+        item { Text("Received ${historyWhen(e.receivedAt)}", fontSize = 12.sp, color = Color(0xFFCBD5E1)) }
+        item { Text(historyWhat(e) + " \u00B7 ${e.bytes / 1024} KB", fontSize = 12.sp, color = Color(0xFFCBD5E1), textAlign = TextAlign.Center) }
+        item {
+            if (e.id == m.currentId) Chip(onClick = onLoaded, label = { Text("On the map now") }, colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
+            else Chip(onClick = { m.loadFromHistory(e.id); onLoaded() }, label = { Text("Load on the map") }, colors = ChipDefaults.primaryChipColors(), modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            Chip(onClick = { if (confirm) { m.deleteFromHistory(e.id); onDeleted() } else confirm = true },
+                label = { Text(if (confirm) "Tap again to delete" else "Delete") },
+                colors = ChipDefaults.chipColors(backgroundColor = Color(if (confirm) 0xFFB91C1C else 0xFF7F1D1D)), modifier = Modifier.fillMaxWidth())
         }
     }
 }
