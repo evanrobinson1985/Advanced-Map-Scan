@@ -45,6 +45,29 @@ A summary lists what was detected and every value set, and all sliders stay adju
 
 Pressing the button again brings the map back to you. **Stop following my location**, in the dot's popup, turns it off.
 
+**Scan as you go.** Tick **Download and scan the tiles around you as you move** in the *Scan as you go* box (under Search) to have the app download and scan the ground around you while My location follows you. It starts My location if it isn't on.
+
+- The ground is cut into fixed square tiles: 0.5 km (walking), 1 km or 2 km (driving). When you are inside a tile, or within a quarter of a tile of one, that you haven't scanned yet, it is downloaded and scanned, nearest first. One tile is done at a time.
+- Each tile is downloaded with a 120 m margin, so a feature on its edge is seen whole. The deep-learning scan's windows reach 60 m past the tile for the same reason. A result is kept only from the tile that holds it, so nothing is listed twice.
+- Results of the same kind from an earlier scan inside a tile are replaced by the tile's new ones, as a rescan would.
+- **Scan with** chooses the scan: the scan mode selected in the panel, deep learning (the selected model), both, or Scan All (every mode, slower). Settlement likelihood is a heat map for one area, so it isn't scanned as you go.
+- A new download normally clears the map, but here the results from earlier tiles are kept and stay on the map, with Yes / Not real working as usual.
+- Tiles are drawn on the map: green when scanned, orange while in progress, grey dashed where no LiDAR could be downloaded.
+- The map stays where you have it while tiles download, so it doesn't jump around under you.
+- Turning it off (or Stop following my location) finishes the tile under way and adds the whole trip to the scan history as one entry.
+- It uses mobile data: up to about 6 MB per 1 km tile.
+
+**Smooth map while scanning.** The heavy number-crunching runs on background threads, so the map keeps panning and zooming smoothly during scans, downloads and scan as you go. That covers the drainage network, the terrain fill and trend surfaces, measuring every candidate bump, the effigy and shell midden searches, and the automatic settings for a new download. Collecting deep-learning samples from a new download (training items, background and look-alikes) is done in short steps, with breaks for the map between them. Measuring is shared over up to 4 threads, which also makes the mound scan about twice as fast. The results are exactly the same as before: the threads run the same code. Long loops that stay on the page take a short break every 25 ms to let the map redraw. If a browser can't start background threads, everything runs on the page as before.
+
+In testing on 1.5 km of 1 m LiDAR around Russell Cave, the longest freezes were:
+
+| | Before | After |
+|---|---|---|
+| Mound scan | 17 s | 0.3 s |
+| Effigy scan | 3.9 s | 0.13 s |
+| Automatic settings after a download | 0.85 s | 0.05 s |
+| A whole scan-as-you-go walk (7 tiles) | — | 0.18 s |
+
 It needs the page opened over https or as a local file. If access is blocked, allow location for the page in the browser's site settings (and turn on Location Services on a phone). Your position is used only in your browser; it is not sent anywhere except as the area of the terrain download.
 
 **Go to a location.** The search box at the top right of the map (a 🔍 button on a phone) and the Search box in the panel take coordinates or an address. The Search box in the panel works the same way. Coordinates are read in any common form:

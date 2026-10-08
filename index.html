@@ -102,6 +102,17 @@
     </div>
 
     <div class="control-group">
+        <h4>Scan as you go</h4>
+        <label style="display:flex; gap:6px; align-items:center; font-size:0.85rem;"><input type="checkbox" id="sagOn" onchange="sagToggle(this.checked)"> Download and scan the tiles around you as you move</label>
+        <div class="slider-row" style="margin:6px 0 0;"><label style="font-size:0.8rem; flex:1;">Scan with</label>
+            <select id="sagWhat" style="flex:2;"><option value="regular">The selected scan mode</option><option value="dl">Deep learning (selected model)</option><option value="both">Both</option><option value="all">Scan All (every mode, slower)</option></select></div>
+        <div class="slider-row" style="margin:6px 0 0;"><label style="font-size:0.8rem; flex:1;">Tile size</label>
+            <select id="sagTile" style="flex:2;"><option value="500">0.5 km (walking)</option><option value="1000" selected>1 km</option><option value="2000">2 km (driving)</option></select></div>
+        <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Uses My location. When you get within a quarter of a tile of one not yet scanned, it is downloaded and scanned; earlier tiles' results stay on the map. Tiles show green when scanned, orange while in progress. Uses mobile data: about 6 MB per 1 km tile.</div>
+        <div id="sagStatus" style="font-size:0.75rem; color:#075985; margin-top:4px; line-height:1.4;"></div>
+    </div>
+
+    <div class="control-group">
         <h4>1. Data Pipeline &mdash; Bare-Earth LiDAR DTM</h4>
         <div style="font-size:0.72rem; color:#475569; margin-bottom:6px; line-height:1.4;">Source: USGS 3DEP bare-earth Digital Terrain Model (ground-classified LiDAR returns, forest canopy stripped) &mdash; not a canopy-top surface model. <b>1-meter resolution is the absolute minimum</b> for detecting human-scale anomalies like middens or small cave vestibules.</div>
         <div class="slider-row">
@@ -958,6 +969,7 @@
             if (c.heading != null && isFinite(c.heading) && c.speed > 0.7) myLoc.gpsHeading = c.heading;
             else if (!(c.speed > 0.7)) myLoc.gpsHeading = null;
             myLocDraw();
+            sagOnPosition();
             if (!first) return;
             first = false;
             try { await myLocArrive(c.latitude, c.longitude, c.accuracy); }
@@ -973,6 +985,7 @@
         }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 5000 });
     }
     function myLocStop(quiet) {
+        if (sag.on) { const cb = document.getElementById('sagOn'); if (cb) cb.checked = false; sagToggle(false); }
         if (myLoc.watchId != null) navigator.geolocation.clearWatch(myLoc.watchId);
         myLoc.watchId = null;
         if (myLoc.listening) {
@@ -1068,6 +1081,7 @@
         const dLat = half / 111320, dLon = half / (111320 * Math.cos(lat * Math.PI / 180));
         const bnd = { n: lat + dLat, s: lat - dLat, e: lon + dLon, w: lon - dLon };
         const where = `Found you at ${lat.toFixed(5)}, ${lon.toFixed(5)} (accurate to about ${ft(acc)})${rough ? ': only a rough position, from your network' : ''}`;
+        if (sag.on) { myLocSay(where + '. Scan as you go downloads and scans the tiles around you.'); return; }
         if (fullDemGrid && effRes <= 1.05 && dlInGrid(fullDemGrid, lat, lon, Math.min(half, 300))) { myLocSay(where + '. The terrain here is already loaded. The blue dot follows you.'); return; }
         if (downloadAbort || scanInProgress || tourBusy || dlBusy) { myLocSay(where + '. Wait for the current download, scan, tour or training to finish, then press Download to load the terrain here.'); return; }
         myLocSay(where + '. Downloading the terrain around you...');
@@ -1076,6 +1090,192 @@
         try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
         if (myLoc.lat != null) map.fitBounds([[bnd.s, bnd.w], [bnd.n, bnd.e]], { animate: false, maxZoom: 17 });
         if (!fullDemGrid || fullDemGrid === before) myLocSay(where + '. No LiDAR terrain could be loaded here (the map is still shown); try Download, or a nearby spot.');
+    }
+    // ---- Scan as you go ----
+    // While My location follows you, the ground is cut into fixed square
+    // tiles (about 1 km). When you are inside a tile, or within a quarter of
+    // a tile of one, it is downloaded (with a margin, so a feature on its
+    // edge is seen whole) and scanned with what you chose; each result is
+    // kept only from the tile that holds it, so it is found once. A new
+    // download normally clears the map, so the earlier tiles' results are
+    // put back after each one. Tiles are drawn on the map: green scanned,
+    // orange in progress. Turning it off finishes the tile under way and
+    // adds the whole trip to the scan history.
+    const SAG_MARGIN_M = 120;
+    const sag = { on: false, busy: false, done: new Map(), cur: null, layer: null, retry: null, added: new Set(), modes: new Set(), lastNote: '' };
+    function sagTileM() { return parseFloat((document.getElementById('sagTile') || { value: 1000 }).value) || 1000; }
+    function sagWhat() { return (document.getElementById('sagWhat') || { value: 'regular' }).value; }
+    function sagSet(msg) { const el = document.getElementById('sagStatus'); if (el) el.innerText = msg; }
+    // the tile (row j, column i) holding a point; columns are sized for their row's latitude
+    function sagTile(j, i, T) {
+        const dLat = T / 111320, s = j * dLat, n = s + dLat;
+        const dLon = T / (111320 * Math.cos((s + n) / 2 * Math.PI / 180)), w = i * dLon;
+        return { key: `${T}:${j}:${i}`, j, i, n, s, w, e: w + dLon, dLon };
+    }
+    function sagTileAt(lat, lon, T) {
+        const j = Math.floor(lat / (T / 111320));
+        const t0 = sagTile(j, 0, T);
+        return sagTile(j, Math.floor(lon / t0.dLon), T);
+    }
+    // metres from a point to a tile (0 inside it)
+    function sagDistTo(t, lat, lon) {
+        const mLat = 111320, mLon = 111320 * Math.cos(lat * Math.PI / 180);
+        const dy = Math.max(t.s - lat, 0, lat - t.n) * mLat, dx = Math.max(t.w - lon, 0, lon - t.e) * mLon;
+        return Math.hypot(dx, dy);
+    }
+    // tiles to scan next from here, nearest first
+    function sagWanted(lat, lon) {
+        const T = sagTileM(), near = Math.max(150, T / 4), out = [];
+        const j0 = Math.floor(lat / (T / 111320));
+        for (let j = j0 - 1; j <= j0 + 1; j++) {
+            const c = Math.floor(lon / sagTile(j, 0, T).dLon);
+            for (let i = c - 1; i <= c + 1; i++) {
+                const t = sagTile(j, i, T), d = sagDistTo(t, lat, lon);
+                if (d <= near && !sag.done.has(t.key)) out.push({ t, d });
+            }
+        }
+        return out.sort((a, b) => a.d - b.d).map(x => x.t);
+    }
+    function sagDraw() {
+        if (!sag.layer) sag.layer = L.layerGroup();
+        sag.layer.clearLayers();
+        const box = (t) => [[t.s, t.w], [t.n, t.e]];
+        for (const d of sag.done.values()) L.rectangle(box(d.t), { color: d.failed ? '#94a3b8' : '#16a34a', weight: 1.5, fill: false, dashArray: d.failed ? '4,4' : null, interactive: false }).addTo(sag.layer);
+        if (sag.cur) L.rectangle(box(sag.cur), { color: '#f59e0b', weight: 2.5, dashArray: '8,6', fillOpacity: 0.04, interactive: false }).addTo(sag.layer);
+        if (sag.on && !map.hasLayer(sag.layer)) sag.layer.addTo(map);
+    }
+    function sagToggle(on) {
+        sag.on = on;
+        if (on) {
+            sag.done.clear(); sag.added.clear(); sag.modes.clear();
+            sagDraw();
+            sagSet('Waiting for your location...');
+            if (myLoc.watchId == null) locateMe(); else sagOnPosition();
+        } else {
+            clearTimeout(sag.retry);
+            sagSet(sag.busy ? 'Turning off after the tile under way...' : sagSummary());
+            if (!sag.busy) sagFinish();
+        }
+    }
+    function sagSummary() {
+        const n = [...sag.done.values()].filter(d => !d.failed).length;
+        const found = [...sag.added].filter(f => detectedFeatures.includes(f)).length;
+        return n ? `${n} tile${n === 1 ? '' : 's'} scanned, ${found} result${found === 1 ? '' : 's'} on the map.` : 'No tiles scanned yet.';
+    }
+    // the trip goes in the scan history as one entry
+    async function sagFinish() {
+        if (sag.layer && map.hasLayer(sag.layer)) map.removeLayer(sag.layer);
+        const tiles = [...sag.done.values()].filter(d => !d.failed);
+        if (!tiles.length || !sag.modes.size) return;
+        const area = { n: Math.max(...tiles.map(d => d.t.n)), s: Math.min(...tiles.map(d => d.t.s)), e: Math.max(...tiles.map(d => d.t.e)), w: Math.min(...tiles.map(d => d.t.w)) };
+        await scanHistoryAdd('scan', [...sag.modes], area, `Scan as you go (${tiles.length} tile${tiles.length === 1 ? '' : 's'})`);
+        sag.modes.clear();
+    }
+    function sagOnPosition() {
+        if (!sag.on || sag.busy || myLoc.lat == null) return;
+        clearTimeout(sag.retry);
+        const next = sagWanted(myLoc.lat, myLoc.lon)[0];
+        if (!next) { sagSet(`${sagSummary()} Waiting until you get near the next tile.`); return; }
+        // something else is using the terrain: try again shortly
+        if (downloadAbort || scanInProgress || tourBusy || dlBusy || autoTuneRunning) {
+            sagSet('Waiting for the current download, scan, tour or training to finish...');
+            sag.retry = setTimeout(sagOnPosition, 4000); return;
+        }
+        sagRunTile(next).finally(() => {
+            if (sag.on) setTimeout(sagOnPosition, 0);
+            else { sagSet(sagSummary()); sagFinish(); }
+        });
+    }
+    function sagRestore(kept) { restoreFeatures([...kept].filter(f => !detectedFeatures.includes(f))); }
+    async function sagRunTile(t) {
+        sag.busy = true; sag.cur = t; sagDraw();
+        const status = document.getElementById('status'), tileNo = sag.done.size + 1;
+        const say = (m) => { sagSet(`Tile ${tileNo}: ${m}`); };
+        // everything on the map now stays (a download clears the map)
+        const kept = new Set(detectedFeatures.filter(f => f.mode !== 'settlement'));
+        let added = 0, note = '';
+        try {
+            say('downloading...');
+            const mLon = 111320 * Math.cos((t.n + t.s) / 2 * Math.PI / 180);
+            const bnd = { n: t.n + SAG_MARGIN_M / 111320, s: t.s - SAG_MARGIN_M / 111320, e: t.e + SAG_MARGIN_M / mLon, w: t.w - SAG_MARGIN_M / mLon };
+            const view = { c: map.getCenter(), z: map.getZoom() }, before = fullDemGrid;
+            window.__dlBoundsOverride = bnd;
+            try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
+            map.setView(view.c, view.z, { animate: false });   // the map stays where you had it
+            sagRestore(kept);
+            if (!fullDemGrid || fullDemGrid === before) { sag.done.set(t.key, { t, failed: true, n: 0 }); say('no LiDAR terrain could be downloaded here; moving on.'); return; }
+            // the automatic settings for the new area run first (when that option is on)
+            await new Promise(r => setTimeout(r, 120));
+            if (autoTuneRunning) { say('detecting settings for this area...'); await autoTuneRunning; }
+            const what = sagWhat(), inCore = (f) => f.lat == null || (f.lat <= t.n && f.lat > t.s && f.lon >= t.w && f.lon < t.e);
+            const tileOnly = (beforeSet) => {
+                // results from the margin belong to the neighbouring tile
+                const drop = detectedFeatures.filter(f => !beforeSet.has(f) && !kept.has(f) && !inCore(f));
+                for (const f of drop) removeFeatureLayers(f);
+                if (drop.length) detectedFeatures = detectedFeatures.filter(f => !drop.includes(f));
+            };
+            // after a scan of these modes: older results of the same kind inside
+            // this tile are replaced by the new ones (as a rescan would), the rest
+            // come back, and the new ones from the margin go
+            const settle = (modes, beforeSet) => {
+                const stale = [...kept].filter(f => modes.includes(f.mode) && f.lat != null && inCore(f));
+                for (const f of stale) { kept.delete(f); if (detectedFeatures.includes(f)) removeFeatureLayers(f); }
+                if (stale.length) detectedFeatures = detectedFeatures.filter(f => !stale.includes(f));
+                sagRestore(kept); tileOnly(beforeSet);
+            };
+            if (what !== 'dl') {
+                const mode0 = scanModeEl.value;
+                const modes = what === 'all' ? SCAN_ALL_ORDER.filter(m => m !== 'settlement') : [mode0];
+                if (modes[0] === 'settlement') note = ' Settlement likelihood is a heat map for one area, so it is not scanned as you go: choose another scan mode.';
+                else if (!checkDTMResolution()) note = ' The terrain here is coarser than 1 m, so the regular scan was skipped (see the status line).';
+                else {
+                    const b0 = new Set(detectedFeatures);
+                    scanInProgress = true;
+                    try {
+                        await runInSections(scanSections(false), async () => {
+                            for (let k = 0; k < modes.length; k++) {
+                                say(`scanning${modes.length > 1 ? ` (${k + 1} of ${modes.length}: ${MODE_STYLE[modes[k]].label})` : ''}...`);
+                                if (modes.length > 1) { scanModeEl.value = modes[k]; onScanModeChange(); }
+                                await runScannerOnGrid();
+                            }
+                        });
+                    } finally {
+                        scanInProgress = false;
+                        if (modes.length > 1) { scanModeEl.value = mode0; onScanModeChange(); }
+                    }
+                    settle(modes, b0);
+                    for (const m of modes) sag.modes.add(m);
+                }
+            }
+            if (what === 'dl' || what === 'both') {
+                if (!dlPrefs().model || dlModelOutdated()) note += ' No trained deep-learning model is selected, so the deep-learning scan was skipped.';
+                else {
+                    say('deep-learning scan...');
+                    const b0 = new Set(detectedFeatures);
+                    // the network's windows reach 60 m past the tile, so a mound near its
+                    // edge is scored whole; only peaks inside the tile are kept
+                    const ext = 60, eLon = ext / mLon, eLat = ext / 111320;
+                    window.__dlAreaOverride = { n: t.n + eLat, s: t.s - eLat, e: t.e + eLon, w: t.w - eLon, core: { n: t.n, s: t.s, e: t.e, w: t.w } }; window.__sagQuiet = true;
+                    try { await dlScan(); } finally { window.__dlAreaOverride = null; window.__sagQuiet = false; }
+                    settle([DL.RESULT_MODE], b0);
+                    sag.modes.add(DL.RESULT_MODE);
+                }
+            }
+            const mine = detectedFeatures.filter(f => !kept.has(f) && f.mode !== 'settlement');
+            for (const f of mine) sag.added.add(f);
+            added = mine.length;
+            sag.done.set(t.key, { t, n: added });
+            updateDetectionLegend(); updateExportButtons();
+            const msg = `Scan as you go: tile ${tileNo} done, ${added} new result${added === 1 ? '' : 's'}. ${sagSummary()}${note}`;
+            sagSet(msg); status.innerText = msg;
+        } catch (e) {
+            console.error(e);
+            sag.done.set(t.key, { t, failed: true, n: 0 });
+            sagRestore(kept);
+            say('failed: ' + (e.message || e));
+        } finally {
+            sag.busy = false; sag.cur = null; sagDraw();
+        }
     }
     async function geocodeAddress(q) {
         const out = [];
@@ -1312,6 +1512,159 @@
         const c0 = Math.max(0, Math.floor((mb.getWest() - b.w) / (b.e - b.w) * g.w)), c1 = Math.min(g.w, Math.ceil((mb.getEast() - b.w) / (b.e - b.w) * g.w));
         const r0 = Math.max(0, Math.floor((b.n - mb.getNorth()) / (b.n - b.s) * g.h)), r1 = Math.min(g.h, Math.ceil((b.n - mb.getSouth()) / (b.n - b.s) * g.h));
         return (c1 - c0 < 8 || r1 - r0 < 8) ? null : { r0, r1, c0, c1 };
+    }
+
+    // ---- Keeping the map smooth during scans ----
+    // A scan runs on the page's one thread, so a long stretch of work
+    // freezes panning and zooming. Long loops call uiYield(): once ~25 ms
+    // have passed since the last break it lets the browser draw the map
+    // and handle your touches, then carries on (null otherwise, so it costs
+    // nothing in between).
+    let uiYieldAt = 0;
+    function uiYield(budgetMs = 25) {
+        if (performance.now() - uiYieldAt < budgetMs) return null;
+        return new Promise(r => setTimeout(() => { uiYieldAt = performance.now(); r(); }, 0));
+    }
+
+    // ---- Background scan workers ----
+    // The heaviest number-crunching of a scan (the drainage network, the
+    // terrain fill, the trend surfaces and measuring every candidate bump)
+    // runs on background threads built from these same functions, so the
+    // map stays smooth and the results are exactly the same. Measuring is
+    // shared out over up to 4 threads, which also makes scans faster. If
+    // the browser can't start them, everything runs here as before.
+    let scanWorkers = null, scanWorkerSeq = 0;
+    const scanDemKeys = new WeakMap();
+    function scanWorkerSource() {
+        const fns = [MinHeap, buildSAT, boxSmooth, quadTrend, moundTrend, fillDepressions, fillDepressionsEps, invertForFill, iMoundHeights,
+                     flowDirectionD8, flowAccumulation, moundRingPlane, moundMeasure,
+                     // the effigy and shell midden searches
+                     computeSlopeDegrees, vhFilter, topHat, thinZS, thinCorners, skeletonGraph, pathLenPx, effigyDescribe, effigyChecks, effigyFind,
+                     shellDescribe, shellFind, builtShapeAt, effigyLatLon, gridInfo,
+                     // the automatic settings
+                     slidingExtreme1D, extremeFilter2D];
+        return `'use strict';
+const MOUND_MAX_ROUGH = ${MOUND_MAX_ROUGH}, MOUND_TILT_MIN = ${MOUND_TILT_MIN}, IMOUND_OFFSET = ${IMOUND_OFFSET};
+const BUILT_WHY = ${JSON.stringify(BUILT_WHY)}, EFFIGY_MAX_H = ${EFFIGY_MAX_H}, FT_TO_M = ${FT_TO_M};
+let ringPlaneStamp = null, ringPlaneGen = 0;
+// the terrain the effigy / shell searches read, as on the page
+let currentDEM = null, demWidth = 0, demHeight = 0, demBounds = null, effRes = 1, builtFlags = { shape: true, mapped: true };
+function builtSettings() { return builtFlags; }
+${fns.map(f => f.toString()).join('\n')}
+const dems = new Map();
+const ops = {
+    flowData(dem, W, H, nd, r) {
+        const denoised = boxSmooth(dem, W, H, r, nd);
+        const filled = fillDepressions(denoised, W, H, nd);
+        const filledEps = fillDepressionsEps(denoised, W, H, nd);
+        const dir = flowDirectionD8(filledEps, W, H, nd);
+        const accum = flowAccumulation(dir, filledEps, W, H, nd);
+        return { denoised, filled, filledEps, dir, accum };
+    },
+    moundTrend, iMoundHeights,
+    sort(a) { return a.sort(); },
+    hiLo(hiIn, loIn, W, H, R) { return { hi: extremeFilter2D(hiIn, W, H, R, true), lo: extremeFilter2D(loIn, W, H, R, false) }; },
+    drain(d, W, H, nd) {
+        const filled = fillDepressionsEps(boxSmooth(d, W, H, 1, nd), W, H, nd);
+        const dir = flowDirectionD8(filled, W, H, nd);
+        return { dir, acc: flowAccumulation(dir, filled, W, H, nd) };
+    },
+    find(which, S, dem, W, H, bounds, res, built) {
+        currentDEM = dem; demWidth = W; demHeight = H; demBounds = bounds; effRes = res; builtFlags = built;
+        // (the effigy search's tallNear helper is a function, which can't be sent back; the scan doesn't use it)
+        try { const r = which === 'effigy' ? effigyFind(S) : shellFind(S); return { resid: r.resid, feats: r.feats }; } finally { currentDEM = null; }
+    },
+    setDem(key, dem) { dems.clear(); dems.set(key, dem); return true; },
+    free() { dems.clear(); ringPlaneStamp = null; return true; },
+    measure(key, W, H, cellM, nd, flatMax, jobs) {
+        const dem = dems.get(key);
+        return jobs.map(j => {
+            const m = moundMeasure(j.k, j.d, j.gs, flatMax, dem, W, H, cellM, nd);
+            // footprint cells as a typed array: handed over at no cost, where a
+            // long plain list takes the page a long time to unpack
+            if (m && m.plane && m.plane.cells) m.plane.cells = Int32Array.from(m.plane.cells);
+            return m;
+        });
+    },
+};
+const buffers = (r, out = []) => {
+    if (!r || typeof r !== 'object') return out;
+    if (ArrayBuffer.isView(r)) { if (!out.includes(r.buffer)) out.push(r.buffer); return out; }
+    if (!Array.isArray(r)) for (const k in r) buffers(r[k], out);
+    return out;
+};
+onmessage = (e) => {
+    const { id, op, args } = e.data;
+    try { const r = ops[op](...args); postMessage({ id, r }, buffers(r)); }
+    catch (err) { postMessage({ id, err: String((err && err.stack) || err) }); }
+};`;
+    }
+    function scanWorkerPool() {
+        if (scanWorkers) return scanWorkers;
+        scanWorkers = [];
+        try {
+            const url = URL.createObjectURL(new Blob([scanWorkerSource()], { type: 'text/javascript' }));
+            const n = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 2) - 1));
+            for (let i = 0; i < n; i++) {
+                const w = new Worker(url);
+                w._pending = new Map(); w._dem = null;
+                w.onmessage = (e) => { const p = w._pending.get(e.data.id); if (!p) return; w._pending.delete(e.data.id); if (e.data.err) p.reject(new Error(e.data.err)); else p.resolve(e.data.r); };
+                w.onerror = (e) => { e.preventDefault && e.preventDefault(); for (const p of w._pending.values()) p.reject(new Error(e.message || 'background thread failed')); w._pending.clear(); scanWorkersBroken = true; };
+                scanWorkers.push(w);
+            }
+        } catch (e) { console.warn('Background scan threads unavailable; scanning on the page', e); scanWorkers = []; }
+        return scanWorkers;
+    }
+    let scanWorkersBroken = false;
+    function scanWorkerCall(w, op, args) {
+        return new Promise((resolve, reject) => { const id = ++scanWorkerSeq; w._pending.set(id, { resolve, reject }); w.postMessage({ id, op, args }); });
+    }
+    // op in the background; local() here when that isn't possible
+    async function offThread(op, args, local) {
+        const pool = scanWorkersBroken ? [] : scanWorkerPool();
+        if (pool.length) {
+            // the least busy thread
+            const w = pool.reduce((a, b) => (b._pending.size < a._pending.size ? b : a));
+            try { return await scanWorkerCall(w, op, args); } catch (e) { console.warn('Background thread failed; running on the page', e); }
+        }
+        return local();
+    }
+    // each thread's copy of the terrain is let go once the measuring is done
+    function scanWorkersFree() {
+        for (const w of scanWorkers || []) if (w._dem) { w._dem = null; scanWorkerCall(w, 'free', []).catch(() => {}); }
+    }
+    // The effigy or shell midden search over the loaded terrain, in the background
+    function findOffThread(which, S, local) {
+        return offThread('find', [which, S, currentDEM, demWidth, demHeight, demBounds, effRes, builtSettings()], local);
+    }
+    // moundMeasure for many candidates at once, shared over the threads.
+    // jobs: [{ k, d, gs }]; returns the results in the same order
+    async function measureMoundsOffThread(jobs, dem, W, H, cellM, nd, flatMax) {
+        const local = () => jobs.map(j => moundMeasure(j.k, j.d, j.gs, flatMax, dem, W, H, cellM, nd));
+        const pool0 = scanWorkersBroken ? [] : scanWorkerPool();
+        // each thread keeps its own copy of the terrain: fewer threads on a big grid
+        const pool = pool0.slice(0, W * H > 6e6 ? Math.min(2, pool0.length) : pool0.length);
+        if (!pool.length || jobs.length < 4) return local();
+        try {
+            if (!scanDemKeys.has(dem)) scanDemKeys.set(dem, 'dem' + (++scanWorkerSeq));
+            const key = scanDemKeys.get(dem);
+            await Promise.all(pool.map(w => w._dem === key ? null : scanWorkerCall(w, 'setDem', [key, dem]).then(() => { w._dem = key; })));
+            // only what the measurer reads goes over (a component carries its cells too)
+            const slim = jobs.map(j => ({ k: { area: j.k.area, centroidR: j.k.centroidR, centroidC: j.k.centroidC, maxMetric: j.k.maxMetric, circularity: j.k.circularity, elongation: j.k.elongation }, d: j.d, gs: j.gs }));
+            const chunks = [];
+            const per = Math.max(4, Math.ceil(slim.length / (pool.length * 6)));
+            for (let i = 0; i < slim.length; i += per) chunks.push(i);
+            const out = new Array(jobs.length);
+            let next = 0;
+            await Promise.all(pool.map(async (w) => {
+                while (next < chunks.length) {
+                    const i0 = chunks[next++], part = slim.slice(i0, i0 + per);
+                    const r = await scanWorkerCall(w, 'measure', [key, W, H, cellM, nd, flatMax, part]);
+                    for (let j = 0; j < r.length; j++) out[i0 + j] = r[j];
+                }
+            }));
+            return out;
+        } catch (e) { console.warn('Background measuring failed; measuring on the page', e); return local(); }
     }
 
     // ---- Big areas: scanned in sections ----
@@ -3745,7 +4098,7 @@
             const S = effigySettings();
             status.innerText = 'Effigy & linear mounds: finding narrow raised features...';
             await new Promise(r => setTimeout(r, 0));
-            const { resid, feats } = effigyFind(S);
+            const { resid, feats } = await findOffThread('effigy', S, () => effigyFind(S));
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
             const blds = await builtBuildingsForScan(gridInfo());
             let skipped = 0, resembled = 0, onBld = 0;
@@ -4070,7 +4423,7 @@
             const S = shellSettings();
             status.innerText = 'Shell middens & rings: finding raised features...';
             await new Promise(r => setTimeout(r, 0));
-            const { resid, feats } = shellFind(S);
+            const { resid, feats } = await findOffThread('shell', S, () => shellFind(S));
             const maxResults = parseInt(document.getElementById('maxResults').value) || 40;
             const blds = await builtBuildingsForScan(gridInfo());
             let skipped = 0, resembled = 0, onBld = 0;
@@ -4581,14 +4934,30 @@
     // Takes terrain samples from a loaded DTM: every training item on it that
     // has none yet (or has moved since), and, once per area, random ground
     async function dlHarvest(g, withBackground) { return dlHarvestFor(DL.key, g, withBackground); }
-    async function dlHarvestFor(key, g, withBackground) {
-        if (!g || !g.data) return { items: 0, bg: 0 };
-        await dlLoadPatchesFor(key);
-        const r = dlWithProfile(key, () => dlHarvestSync(g, withBackground));
-        if (r.items || r.bg || r.lookTried) await dlSavePatchesFor(key);
-        return r;
+    // Collecting samples measures many spots, so it is done in steps with a
+    // short break for the map between them (each step with this profile
+    // switched in, so nothing running in a break sees it). One collection
+    // at a time.
+    let dlHarvestChain = Promise.resolve();
+    function dlHarvestFor(key, g, withBackground) {
+        const run = async () => {
+            if (!g || !g.data) return { items: 0, bg: 0 };
+            await dlLoadPatchesFor(key);
+            const it = dlHarvestGen(g, withBackground);
+            let step;
+            while (!(step = dlWithProfile(key, () => it.next())).done) { const y = uiYield(); if (y) await y; }
+            const r = step.value;
+            if (r.items || r.bg || r.lookTried) await dlSavePatchesFor(key);
+            return r;
+        };
+        const p = dlHarvestChain.then(run, run);
+        dlHarvestChain = p.catch(() => {});
+        return p;
     }
-    function dlHarvestSync(g, withBackground) {
+    // runs a step-by-step job (a generator) straight through
+    function dlRunGen(it) { let s; while (!(s = it.next()).done); return s.value; }
+    function dlHarvestSync(g, withBackground) { return dlRunGen(dlHarvestGen(g, withBackground)); }
+    function* dlHarvestGen(g, withBackground) {
         const sample = dlSampler(g), margin = DL.PATCH * DL.RES / 2 + 1;
         let nItems = 0, nBg = 0;
         for (const it of dlTrainingItems()) {
@@ -4596,7 +4965,7 @@
             if (have && approxMetersBetween(have.lat, have.lon, it.lat, it.lon) < 2) continue;
             if (!dlInGrid(g, it.lat, it.lon, margin)) continue;
             const cm = dlExtractPatch(sample, it.lat, it.lon);
-            if (cm) { dlPatches.items[it.key] = { lat: it.lat, lon: it.lon, cm }; nItems++; }
+            if (cm) { dlPatches.items[it.key] = { lat: it.lat, lon: it.lon, cm }; nItems++; yield; }
         }
         const b = g.bounds, areaKey = [b.n, b.s, b.e, b.w].map(v => v.toFixed(4)).join(',');
         // an area counts as done while its background is kept (older versions
@@ -4612,7 +4981,7 @@
                     const lat = b.s + mLat + rnd() * (b.n - b.s - 2 * mLat), lon = b.w + mLon + rnd() * (b.e - b.w - 2 * mLon);
                     if (avoid.some(a => approxMetersBetween(a.lat, a.lon, lat, lon) < DL.AVOID_M)) continue;
                     const cm = dlExtractPatch(sample, lat, lon);
-                    if (cm) { dlPatches.bg.push({ lat, lon, cm, area: areaKey }); nBg++; }
+                    if (cm) { dlPatches.bg.push({ lat, lon, cm, area: areaKey }); nBg++; yield; }
                 }
                 if (!dlPatches.areas.includes(areaKey)) dlPatches.areas.push(areaKey);
                 dlTrimBackground();
@@ -4625,7 +4994,7 @@
         if (withBackground && DL.LOOK_PER_AREA && !dlPatches.look.some(x => x.area === areaKey)) {
             lookTried = true;
             const avoid = [...dlTrainingItems().filter(i => i.label === 1), ...knownMounds(), ...(window.__dlExtraAvoid || [])];
-            for (const la of dlFindLookalikes(g, DL.LOOK_PER_AREA, avoid)) {
+            for (const la of (yield* dlLookalikesGen(g, DL.LOOK_PER_AREA, avoid))) {
                 const cm = dlExtractPatch(sample, la.lat, la.lon);
                 if (cm) { dlPatches.look.push({ lat: la.lat, lon: la.lon, cm, area: areaKey, why: la.why, v: DL_LOOK_VERSION }); nLook++; }
             }
@@ -4667,7 +5036,8 @@
         return null;
     }
     // raised spots in grid g that clearly aren't mounds, up to want, away from avoid
-    function dlFindLookalikes(g, want, avoid) {
+    function dlFindLookalikes(g, want, avoid) { return dlRunGen(dlLookalikesGen(g, want, avoid)); }
+    function* dlLookalikesGen(g, want, avoid) {
         const b = g.bounds, lat0 = (b.n + b.s) / 2, mLat = 1 / 111320, mLon = 1 / (111320 * Math.cos(lat0 * Math.PI / 180));
         const wM = (b.e - b.w) / mLon, hM = (b.n - b.s) / mLat, res = Math.max(DL.RES, Math.sqrt(wM * hM / 3e6));
         const W = Math.floor(wM / res), H = Math.floor(hM / res), span = DL.PATCH * DL.RES;
@@ -4699,6 +5069,7 @@
             const p = peaks[i];
             if (avoid.some(a => approxMetersBetween(a.lat, a.lon, p.lat, p.lon) < DL.AVOID_M)) continue;
             if (out.some(o => approxMetersBetween(o.lat, o.lon, p.lat, p.lon) < 0.3 * span)) continue;
+            yield;   // (a break for the map before each measurement)
             const meas = dlMeasure(g, p.lat, p.lon), gs = dlGroundSlopeAt(g, p.lat, p.lon, DL.key === 'large' ? 60 : 25);
             const why = dlClearlyNotMound(meas, gs, minD);
             if (why) out.push({ lat: p.lat, lon: p.lon, why });
@@ -5528,10 +5899,12 @@
             await dlUseBackend(tf, 'scan');
             const model = await dlGetModel(tf);
             if (!model) { dlSetStatus(dlModelOutdated() ? 'The deep-learning method was upgraded since this model was trained: press Train model again (your samples are kept).' : 'Train the model first.'); return; }
-            const g = fullDemGrid, v = visibleWindow(g);
+            // (scan as you go names its tile instead of the view)
+            const g = fullDemGrid, ov = window.__dlAreaOverride, v = ov ? true : visibleWindow(g);
             if (!v) { dlSetStatus('The map view is outside the loaded DTM.'); return; }
             const b = g.bounds, dLat = (b.n - b.s) / g.h, dLon = (b.e - b.w) / g.w;
-            const area = { n: b.n - v.r0 * dLat, s: b.n - v.r1 * dLat, w: b.w + v.c0 * dLon, e: b.w + v.c1 * dLon };
+            const area = ov ? { n: Math.min(ov.n, b.n), s: Math.max(ov.s, b.s), w: Math.max(ov.w, b.w), e: Math.min(ov.e, b.e) }
+                            : { n: b.n - v.r0 * dLat, s: b.n - v.r1 * dLat, w: b.w + v.c0 * dLon, e: b.w + v.c1 * dLon };
             const t0 = Date.now(), thr = dlThreshold();
             const lat0 = (area.n + area.s) / 2, mLat = 1 / 111320, mLon = 1 / (111320 * Math.cos(lat0 * Math.PI / 180));
             const RW = Math.floor((area.e - area.w) / mLon / DL.RES), RH = Math.floor((area.n - area.s) / mLat / DL.RES);
@@ -5679,7 +6052,10 @@
                     else dlSetStatus('Scan stopped.');
                     return;
                 }
-                await processPeaks(got.filter(pk => pk.lat <= c.n && pk.lat > c.s && pk.lon >= c.w && pk.lon < c.e), label);
+                // (scan as you go: windows reach past its tile, peaks are kept inside it)
+                const oc = ov && ov.core;
+                await processPeaks(got.filter(pk => pk.lat <= c.n && pk.lat > c.s && pk.lon >= c.w && pk.lon < c.e &&
+                    (!oc || (pk.lat <= oc.n && pk.lat > oc.s && pk.lon >= oc.w && pk.lon < oc.e))), label);
                 if (sections.length > 1 && si < sections.length - 1) {
                     const sh = showResults();
                     const m2 = `Section ${si + 1} of ${sections.length} done: ${sh.list.length} candidate${sh.list.length === 1 ? '' : 's'} so far are on the map (${Math.round((Date.now() - t0) / 1000)} s). Scanning the next section; the list is re-ranked as each one finishes.`;
@@ -5716,7 +6092,7 @@
                 (heldBack ? `; ${heldBack} more held back by Max results` : '') +
                 ` (${Math.round((Date.now() - t0) / 1000)} s). They're ${shellModel ? 'teal "O" diamonds' : effigyModel ? 'olive "F" diamonds' : DL.key === 'large' ? 'violet "P" diamonds' : 'purple "D" markers'}; answer Yes / Not real on each to teach it more, then train again.`;
             dlSetStatus(msg); status.innerText = msg;
-            await scanHistoryAdd('dl', [DL.RESULT_MODE], { n: area.n, s: area.s, e: area.e, w: area.w }, `Deep-learning scan (${DL.label}, ${Math.round(thr * 100)}%+)`);
+            if (!window.__sagQuiet) await scanHistoryAdd('dl', [DL.RESULT_MODE], { n: area.n, s: area.s, e: area.e, w: area.w }, `Deep-learning scan (${DL.label}, ${Math.round(thr * 100)}%+)`);
         } catch (e) {
             console.error(e);
             dlSetStatus('Deep-learning scan failed: ' + (e.message || e));
@@ -10324,6 +10700,7 @@
     // slope sits on a smooth hillside, while boulders, ledge knobs and
     // colluvium bumps on a rugged mountainside sit on broken ground.
     // Returns { relief, rough, diameter, centroidR, centroidC } (metres / cells).
+    let ringPlaneStamp = null, ringPlaneGen = 0;
     function moundRingPlane(dem, W, H, k, cellM, nd) {
         const R = Math.max(2, Math.sqrt(k.area / Math.PI) / cellM);
         const r0 = k.centroidR, c0 = k.centroidC;
@@ -10344,18 +10721,21 @@
         const fit = (fIn, fOut) => {
             const Ro = Math.ceil(fOut * R);
             const A = Array.from({ length: 6 }, () => new Float64Array(7));
-            const ring = [];
+            const ring = [], f6 = new Float64Array(6); f6[0] = 1;
             for (let r = Math.max(0, pr - Ro); r <= Math.min(H - 1, pr + Ro); r++)
                 for (let c = Math.max(0, pc - Ro); c <= Math.min(W - 1, pc + Ro); c++) {
                     const z = dem[r * W + c];
                     if (z < nd) continue;
                     const x = (c - pc) / R, y = (r - pr) / R, d = Math.hypot(x, y);
                     if (d < fIn || d > fOut) continue;
-                    const zz = z - peak, f6 = [1, x, y, x * x, y * y, x * y];
-                    for (let i = 0; i < 6; i++) { for (let j = 0; j < 6; j++) A[i][j] += f6[i] * f6[j]; A[i][6] += f6[i] * zz; }
+                    const zz = z - peak;
+                    f6[1] = x; f6[2] = y; f6[3] = x * x; f6[4] = y * y; f6[5] = x * y;
+                    // the normal equations are symmetric: each product once, mirrored after
+                    for (let i = 0; i < 6; i++) { const Ai = A[i], fi = f6[i]; for (let j = i; j < 6; j++) Ai[j] += fi * f6[j]; Ai[6] += fi * zz; }
                     ring.push(x, y, zz);
                 }
             if (ring.length < 3 * 16) return null;
+            for (let i = 1; i < 6; i++) for (let j = 0; j < i; j++) A[i][j] = A[j][i];
             for (let i = 0; i < 6; i++) {                    // Gaussian elimination with partial pivoting
                 let m = i; for (let j = i + 1; j < 6; j++) if (Math.abs(A[j][i]) > Math.abs(A[m][i])) m = j;
                 [A[i], A[m]] = [A[m], A[i]];
@@ -10375,36 +10755,42 @@
             // toe: 5% of the height, but never below the hillside's own lumpiness
             // (the fit's scatter), or the outline leaks downhill over ordinary ground
             const thrZ = Math.max(frac * fitRes.relief, fitRes.rough, 0.03), Rl = Math.ceil(lim);
-            const seen = new Set([pr * W + pc]), stack = [pr * W + pc];
+            // cells taken: a reused stamp buffer (a Set was the slowest part of a scan)
+            if (!ringPlaneStamp || ringPlaneStamp.length !== W * H) { ringPlaneStamp = new Int32Array(W * H); ringPlaneGen = 0; }
+            if (++ringPlaneGen > 2e9) { ringPlaneStamp.fill(0); ringPlaneGen = 1; }
+            const stamp = ringPlaneStamp, gen = ringPlaneGen;
+            const seenList = [pr * W + pc], stack = [pr * W + pc];
+            stamp[pr * W + pc] = gen;
+            const has = (j) => stamp[j] === gen;
             let foot = 0, sr = 0, sc = 0, maxD = 0;
             while (stack.length) {
                 const i = stack.pop(), r = (i / W) | 0, c = i % W;
                 foot++; sr += r; sc += c; maxD = Math.max(maxD, Math.hypot(r - pr, c - pc));
                 for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
                     const rr = r + dr, cc = c + dc, j = rr * W + cc;
-                    if (rr < 0 || rr >= H || cc < 0 || cc >= W || seen.has(j)) continue;
+                    if (rr < 0 || rr >= H || cc < 0 || cc >= W || stamp[j] === gen) continue;
                     const x = cc - pc, y = rr - pr;
                     if (Math.abs(x) > Rl || Math.abs(y) > Rl || Math.hypot(x, y) > lim) continue;
                     const z = dem[j];
-                    if (z >= nd && z - fitRes.surf(x / R, y / R) >= thrZ) { seen.add(j); stack.push(j); }
+                    if (z >= nd && z - fitRes.surf(x / R, y / R) >= thrZ) { stamp[j] = gen; seenList.push(j); stack.push(j); }
                 }
             }
             // shape of the footprint, measured like traceOneComponent does
             // (4-neighbour exposed edges; second moments for elongation)
             let exposed = 0, srr = 0, scc = 0, src = 0;
-            for (const i of seen) {
+            for (const i of seenList) {
                 const r = (i / W) | 0, c = i % W;
                 srr += r * r; scc += c * c; src += r * c;
-                if (r === 0 || !seen.has(i - W)) exposed++;
-                if (r === H - 1 || !seen.has(i + W)) exposed++;
-                if (c === 0 || !seen.has(i - 1)) exposed++;
-                if (c === W - 1 || !seen.has(i + 1)) exposed++;
+                if (r === 0 || !has(i - W)) exposed++;
+                if (r === H - 1 || !has(i + W)) exposed++;
+                if (c === 0 || !has(i - 1)) exposed++;
+                if (c === W - 1 || !has(i + 1)) exposed++;
             }
             const mr = sr / foot, mc = sc / foot;
             const vrr = srr / foot - mr * mr, vcc = scc / foot - mc * mc, vrc = src / foot - mr * mc;
             const tr = vrr + vcc, dt = Math.sqrt(Math.max(0, (vrr - vcc) ** 2 / 4 + vrc * vrc));
             const l1 = tr / 2 + dt, l2 = Math.max(1e-9, tr / 2 - dt);
-            return { foot, sr, sc, eqR: Math.sqrt(foot / Math.PI), maxD, cells: [...seen],
+            return { foot, sr, sc, eqR: Math.sqrt(foot / Math.PI), maxD, cells: seenList,
                      circularity: Math.min(1, 4 * Math.PI * foot / (exposed * exposed)), elongation: Math.sqrt(l1 / l2) };
         };
         // Start with a ring just outside the detected top; then keep moving
@@ -11127,11 +11513,17 @@
         await new Promise(r => setTimeout(r, 0));
         const nodataThresh = -100;
         const denoiseRadius = Math.max(1, Math.round(1.0 / effRes)); // same ~1m real-world footprint fix as computeMetricRasterForMode
-        const denoised = boxSmooth(currentDEM, demWidth, demHeight, denoiseRadius, nodataThresh);
-        const filled = fillDepressions(denoised, demWidth, demHeight, nodataThresh);        // level fill: depression depths
-        const filledEps = fillDepressionsEps(denoised, demWidth, demHeight, nodataThresh);  // routed fill: flow crosses pools
-        const dir = flowDirectionD8(filledEps, demWidth, demHeight, nodataThresh);
-        const accum = flowAccumulation(dir, filledEps, demWidth, demHeight, nodataThresh);
+        const W = demWidth, H = demHeight, dem = currentDEM;
+        const { denoised, filled, filledEps, dir, accum } = await offThread('flowData', [dem, W, H, nodataThresh, denoiseRadius], () => {
+            const denoised = boxSmooth(dem, W, H, denoiseRadius, nodataThresh);
+            const filled = fillDepressions(denoised, W, H, nodataThresh);        // level fill: depression depths
+            const filledEps = fillDepressionsEps(denoised, W, H, nodataThresh);  // routed fill: flow crosses pools
+            const dir = flowDirectionD8(filledEps, W, H, nodataThresh);
+            const accum = flowAccumulation(dir, filledEps, W, H, nodataThresh);
+            return { denoised, filled, filledEps, dir, accum };
+        });
+        // (the terrain may have been replaced meanwhile: then this isn't kept)
+        if (dem !== currentDEM) return { denoised, filled, filledEps, dir, accum };
         cachedFlow = { denoised, filled, filledEps, dir, accum }; cachedFlowKey = flowKey;
         return cachedFlow;
     }
@@ -11820,33 +12212,52 @@
             // 30 m surface: at the coarse scales the hillside is averaged over
             // up to ~200 m, so a mound on a 25 degree slope could read 15
             const r30 = Math.max(2, Math.round(30 / effRes));
-            if (!trendCache.has(r30)) trendCache.set(r30, moundTrend(denoised, W, H, r30, nodataThresh, effRes));
+            const trendOff = (R) => offThread('moundTrend', [denoised, W, H, R, nodataThresh, effRes], () => moundTrend(denoised, W, H, R, nodataThresh, effRes));
+            if (!trendCache.has(r30)) trendCache.set(r30, await trendOff(r30));
             const fineSlope = trendCache.get(r30).slopeDeg;
             let fineHost = null;   // closed highs of the finest normal pass: what a spot looks like close up
             for (const preset of presetsToRun) for (const scaleM of moundScalesM(preset)) {
                 await tick0(`Mounds (${preset.name}, ${Math.round(scaleM)} m scale): detrending and iMound inverted-DEM fill...`);
                 const trendR = Math.max(2, Math.round(scaleM / effRes));
-                if (!trendCache.has(trendR)) trendCache.set(trendR, moundTrend(denoised, W, H, trendR, nodataThresh, effRes));
+                if (!trendCache.has(trendR)) trendCache.set(trendR, await trendOff(trendR));
                 const { trend: baseTrend, quad } = trendCache.get(trendR);
                 let hostDiam = null;
                 for (const pass of ['normal', 'spur']) {
                 const trend = pass === 'normal' ? baseTrend : quad;
                 const resid = new Float32Array(n);
                 for (let i = 0; i < n; i++) resid[i] = (denoised[i] < nodataThresh || trend[i] < nodataThresh) ? -9999 : denoised[i] - trend[i];
-                const height = iMoundHeights(resid, W, H, nodataThresh);
+                const height = await offThread('iMoundHeights', [resid, W, H, nodataThresh], () => iMoundHeights(resid, W, H, nodataThresh));
                 const mask = new Uint8Array(n);
                 for (let i = 0; i < n; i++) if (height[i] > candidateThreshold) mask[i] = 1;
                 if (pass === 'normal') hostDiam = componentDiameters(mask, W, H, effRes);
                 if (pass === 'normal' && !fineHost) fineHost = hostDiam;
                 const raw = traceComponents(mask, height, denoised, W, H, effRes, nodataThresh, waterwayMask, moundSlopeDegRaster);
+                // every candidate that gets as far as being measured is measured
+                // up front, in the background (the same checks as below)
+                const toMeasure = [];
                 for (const k of raw) {
+                    if (k.incomplete) continue;
+                    const d0 = 2 * Math.sqrt(k.area / Math.PI);
+                    if (pass === 'spur' && !moundHostOk(hostDiam[rcIndex(k)], d0)) continue;
+                    const gs0 = fineSlope[rcIndex(k)];
+                    if (gs0 > MOUND_SLOPE_HARD_MAX || k.fillRatio < 0.6) continue;
+                    toMeasure.push({ k, d: d0, gs: gs0 });
+                }
+                if (toMeasure.length > 20) await tick0(`Mounds (${preset.name}, ${Math.round(scaleM)} m scale): measuring ${toMeasure.length} candidates...`);
+                const measured = new Map();
+                {
+                    const ms = await measureMoundsOffThread(toMeasure, denoised, W, H, effRes, nodataThresh, maxGroundSlope);
+                    toMeasure.forEach((j, i) => measured.set(j.k, ms[i]));
+                }
+                for (const k of raw) {
+                    { const y = uiYield(); if (y) await y; }
                     if (k.incomplete) continue;
                     let diameter = 2 * Math.sqrt(k.area / Math.PI);
                     if (pass === 'spur' && !moundHostOk(hostDiam[rcIndex(k)], diameter)) continue;   // one knob of a natural cluster
                     const gsDeg = fineSlope[rcIndex(k)];
                     if (gsDeg > MOUND_SLOPE_HARD_MAX) continue;               // cliff / steep hillside
                     if (k.fillRatio < 0.6) continue;                         // several natural bumps merged
-                    let meas = moundMeasure(k, diameter, gsDeg, maxGroundSlope, denoised, W, H, effRes, nodataThresh);
+                    let meas = measured.has(k) ? measured.get(k) : moundMeasure(k, diameter, gsDeg, maxGroundSlope, denoised, W, H, effRes, nodataThresh);
                     if (!meas) continue;                                     // bump on broken, rugged hillside
                     const dTop = diameter;                                   // detected top, for the cluster checks
                     // One knob among several of its size: on a hillside that's a knob
@@ -11883,6 +12294,7 @@
                 }
                 }
             }
+            scanWorkersFree();
             // Merge detections of the same mound across scales (keep the best-shaped, tallest)
             pre.sort((x, y) => y.tm.score * y.k.maxMetric - x.tm.score * x.k.maxMetric);
             const merged = [];
@@ -11897,6 +12309,7 @@
             for (const c of merged) {
                 const k = c.k;
                 if (runs > 0 && persistChecked >= 400) { moundUnchecked = merged.length - merged.indexOf(c); break; } // keeps very large scans responsive
+                { const y = uiYield(); if (y) await y; }
                 if (runs > 0 && persistChecked % 10 === 0) await tick0(`Mounds: stochastic persistence test ${persistChecked + 1}-${Math.min(merged.length, persistChecked + 10)} of ${Math.min(merged.length, 400)}...`);
                 // peak cell of this candidate
                 const rad = Math.ceil(Math.sqrt(k.count / Math.PI) * Math.max(1, k.elongation));
@@ -12490,6 +12903,19 @@
         const a = Float64Array.from(values).sort();
         return a[Math.min(a.length - 1, Math.floor(p / 100 * a.length))];
     }
+    // The same, sorting in the background, and only once per list however
+    // many percentiles are taken from it (a list must be complete by then)
+    const sortedLists = new WeakMap();
+    async function percentileOff(values, p) {
+        if (!values.length) return NaN;
+        let a = sortedLists.get(values);
+        if (!a || a.length !== values.length) {
+            const arr = Float64Array.from(values);
+            a = await offThread('sort', [arr], () => arr.sort());
+            sortedLists.set(values, a);
+        }
+        return a[Math.min(a.length - 1, Math.floor(p / 100 * a.length))];
+    }
 
     // One run at a time; a scan started meanwhile waits for it (runScanner).
     let autoTuneRunning = null;
@@ -12534,8 +12960,8 @@
             if (slopes.length < 1000) throw new Error('too little valid elevation data in this area');
             // residual of white noise vs its 3x3 mean has std 0.943 sigma; the
             // median absolute value is 0.6745 std
-            const noiseSigma = percentile(noise, 50) / 0.6745 / 0.943;
-            const slopeP50 = percentile(slopes, 50), slopeP95 = percentile(slopes, 95), slopeP98 = percentile(slopes, 98);
+            const noiseSigma = await percentileOff(noise, 50) / 0.6745 / 0.943;
+            const slopeP50 = await percentileOff(slopes, 50), slopeP95 = await percentileOff(slopes, 95), slopeP98 = await percentileOff(slopes, 98);
 
             // 2. Block-averaged analysis grid
             status.innerText = 'Auto-detect: analysing relief and drainage...';
@@ -12561,7 +12987,7 @@
                 const R = Math.max(1, Math.round(25 / dres));
                 const hiIn = new Float32Array(n), loIn = new Float32Array(n);
                 for (let i = 0; i < n; i++) { const ok = d[i] >= nd; hiIn[i] = ok ? d[i] : -Infinity; loIn[i] = ok ? d[i] : Infinity; }
-                const hi = extremeFilter2D(hiIn, dw, dh, R, true), lo = extremeFilter2D(loIn, dw, dh, R, false);
+                const { hi, lo } = await offThread('hiLo', [hiIn, loIn, dw, dh, R], () => ({ hi: extremeFilter2D(hiIn, dw, dh, R, true), lo: extremeFilter2D(loIn, dw, dh, R, false) }));
                 const steepRelief = [], allRelief = [], elev = [];
                 for (let i = 0; i < n; i++) {
                     if (d[i] < nd || !isFinite(hi[i]) || !isFinite(lo[i])) continue;
@@ -12569,23 +12995,25 @@
                     allRelief.push(rel); elev.push(d[i]);
                     if (slope[i] >= 20) steepRelief.push(rel);
                 }
-                const bluffH = steepRelief.length >= 50 ? percentile(steepRelief, 50) : 0.5 * percentile(allRelief, 90);
+                const bluffH = steepRelief.length >= 50 ? await percentileOff(steepRelief, 50) : 0.5 * await percentileOff(allRelief, 90);
                 // Drainage network
-                const filled = fillDepressionsEps(boxSmooth(d, dw, dh, 1, nd), dw, dh, nd);
-                const dir = flowDirectionD8(filled, dw, dh, nd);
-                const acc = flowAccumulation(dir, filled, dw, dh, nd);
+                const { dir, acc } = await offThread('drain', [d, dw, dh, nd], () => {
+                    const filled = fillDepressionsEps(boxSmooth(d, dw, dh, 1, nd), dw, dh, nd);
+                    const dir = flowDirectionD8(filled, dw, dh, nd);
+                    return { dir, acc: flowAccumulation(dir, filled, dw, dh, nd) };
+                });
                 const cellAc = dres * dres / 4046.86;
                 const accAc = [];
                 let maxAc = 0;
                 for (let i = 0; i < n; i++) if (d[i] >= nd) { const a = acc[i] * cellAc; accAc.push(a); if (a > maxAc) maxAc = a; }
-                const channelAc = Math.min(20, Math.max(0.5, percentile(accAc, 97)));
+                const channelAc = Math.min(20, Math.max(0.5, await percentileOff(accAc, 97)));
                 const chan = new Uint8Array(n);
                 for (let i = 0; i < n; i++) if (acc[i] * cellAc >= channelAc) chan[i] = 1;
                 const dist = distanceToMask(chan, dw, dh);
                 const gentleDist = [];
                 for (let i = 0; i < n; i++) if (d[i] >= nd && slope[i] < 10 && isFinite(dist[i])) gentleDist.push(dist[i] * dres);
-                return { bluffH, maxAc, channelAc, gentleDistMed: percentile(gentleDist, 50),
-                         elevRange: percentile(elev, 99) - percentile(elev, 1),
+                return { bluffH, maxAc, channelAc, gentleDistMed: await percentileOff(gentleDist, 50),
+                         elevRange: await percentileOff(elev, 99) - await percentileOff(elev, 1),
                          widthM: dw * dres, heightM: dh * dres, steepFrac: steepRelief.length / Math.max(1, allRelief.length) };
             });
 
