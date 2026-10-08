@@ -1,0 +1,68 @@
+# Builds the LiDAR Guide app for Wear OS (Galaxy Watch) and publishes the
+# APK as the "watch-app" release, ready to install on the watch.
+name: Watch app
+
+on:
+  push:
+    paths:
+      - 'watch-app/**'
+      - '.github/workflows/watch-app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # the signing key is kept between builds (never in the repository), so
+      # each new version installs over the one already on the watch
+      - name: Signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.lidar-guide-key
+          key: lidar-guide-signing-key-v1
+
+      - name: Make the signing key if there isn't one yet
+        run: |
+          mkdir -p ~/.lidar-guide-key
+          if [ ! -f ~/.lidar-guide-key/key.jks ]; then
+            keytool -genkeypair -keystore ~/.lidar-guide-key/key.jks -alias lidarguide -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass lidarguide -keypass lidarguide -dname "CN=LiDAR Guide"
+          fi
+
+      - name: Test and build
+        working-directory: watch-app
+        run: |
+          chmod +x gradlew
+          export SIGNING_STORE="$HOME/.lidar-guide-key/key.jks"
+          ./gradlew --no-daemon testDebugUnitTest assembleRelease
+
+      - name: Keep the APK with this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: LiDAR-Guide-watch-app
+          path: watch-app/app/build/outputs/apk/release/app-release.apk
+
+      - name: Publish it as the "watch-app" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp watch-app/app/build/outputs/apk/release/app-release.apk LiDAR-Guide.apk
+          NOTES="LiDAR Guide for Galaxy Watch (Wear OS). Built from ${GITHUB_SHA::7} on $(date -u +'%Y-%m-%d %H:%M UTC'). Install LiDAR-Guide.apk on the watch: see watch-app/README.md."
+          if gh release view watch-app >/dev/null 2>&1; then
+            gh release edit watch-app --notes "$NOTES"
+          else
+            gh release create watch-app --title "LiDAR Guide (Galaxy Watch app)" --notes "$NOTES" --target "$GITHUB_SHA"
+          fi
+          gh release upload watch-app LiDAR-Guide.apk --clobber

@@ -113,6 +113,17 @@
     </div>
 
     <div class="control-group">
+        <h4>Watch</h4>
+        <div class="slider-row" style="margin:0;"><label style="font-size:0.8rem; flex:1;">Waypoints</label>
+            <select id="watchScope" style="flex:2;"><option value="all">All results on the map</option><option value="view">Results in view</option></select></div>
+        <div class="slider-row" style="margin:6px 0 0;"><label style="font-size:0.8rem; flex:1;">Hillshade</label>
+            <select id="watchDetail" style="flex:2;"><option value="1">1 m (sharpest)</option><option value="2" selected>2 m (faster to send)</option><option value="none">No map (waypoints only)</option></select></div>
+        <button id="watchSendBtn" onclick="sendToWatch()" style="margin-top:6px; background:#1e293b; color:#fff;">&#8986; Send to watch</button>
+        <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">For the LiDAR Guide app on a Galaxy Watch (Wear OS). On the watch open LiDAR Guide &rsaquo; &#9776; &rsaquo; Receive from phone, then press Send here and pick the watch. Needs Chrome on Android. The watch then works on its own: the hillshade, your live position and heading, a guide arrow to the waypoint you pick and its details.</div>
+        <div id="watchStatus" style="font-size:0.75rem; color:#075985; margin-top:4px; line-height:1.4;"></div>
+    </div>
+
+    <div class="control-group">
         <h4>1. Data Pipeline &mdash; Bare-Earth LiDAR DTM</h4>
         <div style="font-size:0.72rem; color:#475569; margin-bottom:6px; line-height:1.4;">Source: USGS 3DEP bare-earth Digital Terrain Model (ground-classified LiDAR returns, forest canopy stripped) &mdash; not a canopy-top surface model. <b>1-meter resolution is the absolute minimum</b> for detecting human-scale anomalies like middens or small cave vestibules.</div>
         <div class="slider-row">
@@ -1275,6 +1286,164 @@
             say('failed: ' + (e.message || e));
         } finally {
             sag.busy = false; sag.cur = null; sagDraw();
+        }
+    }
+    // ---- Send to watch ----
+    // Sends the results on the map, with a hillshade of the loaded LiDAR, to
+    // the LiDAR Guide app on a Wear OS watch (Galaxy Watch) over Bluetooth
+    // (Web Bluetooth: Chrome on Android). The watch then works on its own:
+    // it shows them over the hillshade with your live position and heading,
+    // guides you to the one you pick and shows its details.
+    // The package: "LWP1", the JSON's length (4 bytes, big-endian), the JSON,
+    // then the hillshade as a JPEG. Sent in pieces of up to 500 bytes:
+    // BEGIN (1, size, CRC-32), DATA (2, offset, bytes), END (3).
+    const WATCH_SVC = '7b1e0001-5a4c-4b8e-9d3a-2f6c1a9e4d10', WATCH_RX = '7b1e0002-5a4c-4b8e-9d3a-2f6c1a9e4d10', WATCH_STATUS = '7b1e0003-5a4c-4b8e-9d3a-2f6c1a9e4d10';
+    const WATCH_MAX_WPS = 500;
+    let watchBusy = false;
+    function watchSay(t) { const el = document.getElementById('watchStatus'); if (el) el.innerText = t; }
+    const crc32Table = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+    function crc32(bytes) { let c = 0xFFFFFFFF; for (let i = 0; i < bytes.length; i++) c = crc32Table[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; }
+    // A result's details as short lines of text, from its popup (buttons and
+    // the training form left out)
+    function watchNotes(f) {
+        const mk = (f._layers || []).find(l => l.getPopup && l.getPopup());
+        let html = mk ? mk.getPopup().getContent() : '';
+        if (typeof html !== 'string') html = html && html.innerHTML ? html.innerHTML : '';
+        if (!html) return [];
+        const d = document.createElement('div');
+        d.innerHTML = html;
+        d.querySelectorAll('button, input, select, textarea, script, style, label, a').forEach(e => e.remove());
+        const lines = [];
+        const walk = (n) => { for (const c of n.childNodes) { if (c.nodeType === 3) lines.push(c.textContent); else if (c.nodeName === 'BR' || /^(DIV|P|LI|TR|H\d)$/.test(c.nodeName)) { lines.push('\n'); walk(c); lines.push('\n'); } else walk(c); } };
+        walk(d);
+        return lines.join('').split('\n').map(s => s.replace(/\s+/g, ' ').trim()).filter(s => s.length > 1 && !/^(Yes|Not real|Confirm|Mark)/i.test(s)).slice(0, 14).map(s => s.length > 160 ? s.slice(0, 157) + '...' : s);
+    }
+    function watchWaypoints(area) {
+        const inA = (f) => !area || (f.lat <= area.n && f.lat >= area.s && f.lon <= area.e && f.lon >= area.w);
+        const list = detectedFeatures.filter(f => f.mode !== 'settlement' && f.lat != null && f.lon != null && inA(f) && (!f._layers || f._layers.some(l => map.hasLayer(l) || (modeLayers[f.mode] && modeLayers[f.mode].hasLayer(l)))));
+        list.sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0));
+        return list.slice(0, WATCH_MAX_WPS).map((f, i) => {
+            const st = MODE_STYLE[f.mode] || { color: '#475569', letter: '?', label: f.mode };
+            const k = f.k || {};
+            const o = { id: 'w' + i + '_' + Math.round(f.lat * 1e5) + '_' + Math.round(f.lon * 1e5), lat: +f.lat.toFixed(7), lon: +f.lon.toFixed(7), kind: st.label, letter: st.letter, color: st.color,
+                        score: f.matchScore != null ? Math.round(f.matchScore) : null, d: f.diameter != null ? +(+f.diameter).toFixed(2) : null,
+                        h: k.maxMetric != null ? +(+k.maxMetric).toFixed(2) : null, conf: !!(f.confirmed || f.known || f.dlKnown), notes: watchNotes(f) };
+            if (Array.isArray(f.polygon) && f.polygon.length >= 3) {
+                const step = Math.max(1, Math.ceil(f.polygon.length / 60));   // at most ~60 points: plenty for a watch screen
+                o.ol = f.polygon.filter((_, j) => j % step === 0).map(([a, b]) => [+(+a).toFixed(6), +(+b).toFixed(6)]);
+            }
+            return o;
+        });
+    }
+    // A hillshade (light from the north-west, relief doubled so low mounds
+    // show) of the loaded LiDAR over `area`, at least `resM` metres a pixel
+    // and at most `maxPx` pixels a side, as a JPEG
+    async function watchHillshade(area, resM, maxPx) {
+        const g = fullDemGrid; if (!g) return null;
+        const b = g.bounds;
+        const a = { n: Math.min(area.n, b.n), s: Math.max(area.s, b.s), e: Math.min(area.e, b.e), w: Math.max(area.w, b.w) };
+        if (a.n <= a.s || a.e <= a.w) return null;
+        const lat0 = (a.n + a.s) / 2, wm = (a.e - a.w) * 111320 * Math.cos(lat0 * Math.PI / 180), hm = (a.n - a.s) * 111320;
+        const res = Math.max(resM, wm / maxPx, hm / maxPx);
+        const W = Math.max(8, Math.round(wm / res)), H = Math.max(8, Math.round(hm / res));
+        const z = (r, c) => {   // nearest LiDAR cell to an output pixel
+            const la = a.n - (r + 0.5) / H * (a.n - a.s), lo = a.w + (c + 0.5) / W * (a.e - a.w);
+            const gr = Math.min(g.h - 1, Math.max(0, Math.floor((b.n - la) / (b.n - b.s) * g.h))), gc = Math.min(g.w - 1, Math.max(0, Math.floor((lo - b.w) / (b.e - b.w) * g.w)));
+            return g.data[gr * g.w + gc];
+        };
+        const Z = new Float32Array(W * H);
+        for (let r = 0; r < H; r++) { for (let c = 0; c < W; c++) Z[r * W + c] = z(r, c); const y = uiYield(); if (y) await y; }
+        const cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+        const ctx = cv.getContext('2d'), im = ctx.createImageData(W, H);
+        const az = 315 * Math.PI / 180, alt = 45 * Math.PI / 180, zf = 2, dx = wm / W, dy = hm / H;
+        const zen = Math.PI / 2 - alt, azm = 2 * Math.PI - az + Math.PI / 2;
+        for (let r = 0; r < H; r++) {
+            for (let c = 0; c < W; c++) {
+                const at = (rr, cc) => { rr = Math.min(H - 1, Math.max(0, rr)); cc = Math.min(W - 1, Math.max(0, cc)); const v = Z[rr * W + cc]; return v < -100 ? Z[r * W + c] : v; };
+                const zc = Z[r * W + c];
+                let v = 0;
+                if (zc >= -100) {
+                    // Horn's method
+                    const dzdx = ((at(r - 1, c + 1) + 2 * at(r, c + 1) + at(r + 1, c + 1)) - (at(r - 1, c - 1) + 2 * at(r, c - 1) + at(r + 1, c - 1))) / (8 * dx);
+                    const dzdy = ((at(r + 1, c - 1) + 2 * at(r + 1, c) + at(r + 1, c + 1)) - (at(r - 1, c - 1) + 2 * at(r - 1, c) + at(r - 1, c + 1))) / (8 * dy);
+                    const slope = Math.atan(zf * Math.hypot(dzdx, dzdy)), aspect = Math.atan2(dzdy, -dzdx);
+                    v = Math.max(0, Math.cos(zen) * Math.cos(slope) + Math.sin(zen) * Math.sin(slope) * Math.cos(azm - aspect));
+                    v = Math.round(30 + 225 * v);
+                }
+                const i = 4 * (r * W + c); im.data[i] = im.data[i + 1] = im.data[i + 2] = v; im.data[i + 3] = 255;
+            }
+            const y = uiYield(); if (y) await y;
+        }
+        ctx.putImageData(im, 0, 0);
+        const blob = await new Promise(res2 => cv.toBlob(res2, 'image/jpeg', 0.72));
+        return { bytes: new Uint8Array(await blob.arrayBuffer()), img: { n: a.n, s: a.s, e: a.e, w: a.w, pw: W, ph: H } };
+    }
+    async function buildWatchPackage() {
+        const scope = (document.getElementById('watchScope') || { value: 'all' }).value;
+        const det = (document.getElementById('watchDetail') || { value: '1' }).value;
+        const mb = map.getBounds();
+        const view = { n: mb.getNorth(), s: mb.getSouth(), e: mb.getEast(), w: mb.getWest() };
+        const g = fullDemGrid;
+        const area = scope === 'view' ? view : (g ? { ...g.bounds } : view);
+        const wps = watchWaypoints(scope === 'view' ? view : null);
+        let hs = null;
+        if (det !== 'none' && g) { watchSay('Making the hillshade for the watch...'); hs = await watchHillshade(area, parseFloat(det), det === '1' ? 2400 : 1600); }
+        const json = { v: 1, name: (document.getElementById('watchName') || {}).value || `LiDAR scan ${new Date().toLocaleDateString()}`, made: Date.now(), wps };
+        if (hs) json.img = hs.img;
+        const jb = new TextEncoder().encode(JSON.stringify(json));
+        const out = new Uint8Array(8 + jb.length + (hs ? hs.bytes.length : 0));
+        out.set([76, 87, 80, 49], 0);   // "LWP1"
+        new DataView(out.buffer).setUint32(4, jb.length, false);
+        out.set(jb, 8);
+        if (hs) out.set(hs.bytes, 8 + jb.length);
+        return { bytes: out, nWps: wps.length, hasMap: !!hs };
+    }
+    async function sendToWatch() {
+        if (watchBusy) return;
+        if (!navigator.bluetooth) { watchSay('Sending to a watch needs Chrome on an Android phone (Web Bluetooth). On this browser it isn\'t available.'); return; }
+        if (!window.isSecureContext) { watchSay('Sending to a watch needs the page opened over https.'); return; }
+        // the device chooser must open straight from the tap, before any slow work
+        let device;
+        try { device = await navigator.bluetooth.requestDevice({ filters: [{ services: [WATCH_SVC] }] }); }
+        catch (e) { watchSay(e && e.name === 'NotFoundError' ? 'No watch chosen. On the watch, open LiDAR Guide › ☰ › Receive from phone, then try again.' : 'Bluetooth: ' + (e.message || e)); return; }
+        watchBusy = true;
+        const btn = document.getElementById('watchSendBtn'); if (btn) btn.disabled = true;
+        let server = null;
+        try {
+            const pkg = await buildWatchPackage();
+            if (!pkg.nWps && !pkg.hasMap) { watchSay('Nothing to send: scan an area first (or download its terrain for the map).'); return; }
+            watchSay(`Connecting to ${device.name || 'the watch'}...`);
+            server = await device.gatt.connect();
+            const svc = await server.getPrimaryService(WATCH_SVC);
+            const rx = await svc.getCharacteristic(WATCH_RX), st = await svc.getCharacteristic(WATCH_STATUS);
+            let result = null, resultWait = null;
+            const done = new Promise(r => { resultWait = r; });
+            st.addEventListener('characteristicvaluechanged', (e) => {
+                const t = new TextDecoder().decode(e.target.value);
+                if (t.startsWith('ok') || t.startsWith('err')) { result = t; resultWait(t); }
+            });
+            try { await st.startNotifications(); } catch (e) { /* the result is read at the end instead */ }
+            const total = pkg.bytes.length, crc = crc32(pkg.bytes), t0 = Date.now();
+            const head = new Uint8Array(9); head[0] = 1; new DataView(head.buffer).setUint32(1, total, false); new DataView(head.buffer).setUint32(5, crc, false);
+            await rx.writeValueWithResponse(head);
+            const PIECE = 495;
+            for (let off = 0; off < total; off += PIECE) {
+                const len = Math.min(PIECE, total - off), msg = new Uint8Array(5 + len);
+                msg[0] = 2; new DataView(msg.buffer).setUint32(1, off, false); msg.set(pkg.bytes.subarray(off, off + len), 5);
+                await rx.writeValueWithResponse(msg);
+                if ((off / PIECE) % 8 === 0) watchSay(`Sending to the watch: ${Math.round(100 * (off + len) / total)}% of ${Math.round(total / 1024)} KB (${Math.round((Date.now() - t0) / 1000)} s)...`);
+            }
+            await rx.writeValueWithResponse(new Uint8Array([3]));
+            const r = result || await Promise.race([done, new Promise(r2 => setTimeout(() => r2(null), 15000))]) ||
+                new TextDecoder().decode(await st.readValue());
+            if (r && r.startsWith('ok')) watchSay(`Sent to the watch: ${r.slice(3)} (${Math.round(total / 1024)} KB in ${Math.round((Date.now() - t0) / 1000)} s). On the watch, tap a waypoint for its details, or ➤ to be guided to it.`);
+            else watchSay('The watch did not confirm it: ' + (r ? r.replace(/^err ?/, '') : 'no answer') + '. Try again.');
+        } catch (e) {
+            console.error(e);
+            watchSay('Sending to the watch failed: ' + (e.message || e) + '. Keep the watch on its Receive screen and close by, then try again.');
+        } finally {
+            try { if (server && server.connected) server.disconnect(); } catch (e) { }
+            watchBusy = false; if (btn) btn.disabled = false;
         }
     }
     async function geocodeAddress(q) {

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- a hillshaded mound with a waypoint pin -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp" android:height="48dp" android:viewportWidth="48" android:viewportHeight="48">
+    <path android:fillColor="#1E293B" android:pathData="M24,0a24,24 0 1,0 0.01,0z" />
+    <path android:fillColor="#64748B" android:pathData="M4,34 Q16,18 24,20 Q32,22 44,34 L44,40 L4,40z" />
+    <path android:fillColor="#CBD5E1" android:pathData="M4,34 Q16,18 24,20 L22,26 Q14,26 4,36z" />
+    <path android:fillColor="#9333EA" android:pathData="M24,6 C19,6 16,9.5 16,14 C16,20 24,28 24,28 C24,28 32,20 32,14 C32,9.5 29,6 24,6z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M24,10.5a3.5,3.5 0 1,0 0.01,0z" />
+</vector>
