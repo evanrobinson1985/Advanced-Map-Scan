@@ -1185,8 +1185,10 @@
             else { myLoc.follow = true; myLocFollow(true); sagOnPosition(); }
         } else {
             clearTimeout(sag.retry);
-            sagSet(sag.busy ? 'Turning off after the area under way...' : sagSummary());
-            if (!sag.busy) sagFinish();
+            // the area under way stops at once too (as the progress card's Stop does)
+            if (sag.busy) { sagStopNow(); return; }
+            sagSet(`Scan as you go is off. ${sagSummary()}`);
+            sagFinish();
         }
     }
     function sagSummary() {
@@ -1215,7 +1217,7 @@
         }
         sagRunArea(next).finally(() => {
             if (sag.on) setTimeout(sagOnPosition, 0);
-            else { sagSet(sagSummary()); sagFinish(); }
+            else { sagSet(`Scan as you go is off. ${sagSummary()}`); sagFinish(); }
         });
     }
     // Stop now: scan as you go turns off, and the area under way stops at once
