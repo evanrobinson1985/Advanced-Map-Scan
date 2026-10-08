@@ -33,7 +33,7 @@
            z-indexes, compared directly, for real this time. Position/size
            are set per-render in renderGLLayer() using layer points, which pan
            correctly for free via that same transform. */
-        #glCanvas { position: absolute; pointer-events: none; opacity: 0.85; }
+        #glCanvas { position: absolute; pointer-events: none; opacity: 0.7; }
         #glCanvasSlope { position: absolute; pointer-events: none; opacity: 0.7; display: none; }
         #glCanvasSettlement { position: absolute; pointer-events: none; opacity: 0.8; display: none; }
 
@@ -199,8 +199,8 @@
         <div style="font-size:0.68rem; color:#94a3b8; margin-top:-4px; margin-bottom:6px; line-height:1.35;">Blends 4 lights spread around the compass (still anchored to the Azimuth slider) instead of just one, so a mound's flank facing away from the light isn't underlit or missed by eye - useful for visually sanity-checking scan results, since a real candidate should look like a coherent bump or depression from every side, not just the one the sun happens to be hitting. The classic single-light look (better for a strong sense of 3D form) is still there with this off.</div>
         <div class="slider-row">
             <label>Hillshade Opacity</label>
-            <input type="range" id="opacity" min="0" max="1" step="0.1" value="0.85" oninput="updateOpacity()">
-            <span class="val-display" id="opacityVal">85%</span>
+            <input type="range" id="opacity" min="0" max="1" step="0.1" value="0.7" oninput="updateOpacity()">
+            <span class="val-display" id="opacityVal">70%</span>
         </div>
         <div class="slider-row">
             <label>Slope Opacity</label>
@@ -1551,7 +1551,7 @@
     const satellite = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 21, maxNativeZoom: 19, attribution: 'Esri' });
     const topo = L.tileLayer('https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}', { maxZoom: 21, maxNativeZoom: 16, attribution: 'USGS' });
 
-    topo.addTo(map); // Default Base
+    satellite.addTo(map); // Default base: satellite imagery
 
     // --- SEARCH BAR (coordinates or address) ---
     // The Search box in the panel uses the same search as the map's search box
