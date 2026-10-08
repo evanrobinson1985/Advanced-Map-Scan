@@ -1218,12 +1218,26 @@
             else { sagSet(sagSummary()); sagFinish(); }
         });
     }
+    // Stop now: scan as you go turns off, and the area under way stops at once
+    // (its download is cancelled, the deep-learning scan and the mound scan
+    // stop at their next step); results already on the map stay
+    function sagStopNow() {
+        const cb = document.getElementById('sagOn'); if (cb) cb.checked = false;
+        sag.on = false; clearTimeout(sag.retry);
+        if (sag.busy) {
+            sag.stopping = true;
+            scanStopRequested = true;
+            if (downloadAbort) downloadAbort.abort();
+            if (dlBusy) dlCancel = true;
+            sagSet('Stopping...');
+        } else sagToggle(false);
+    }
     function sagRestore(kept) { restoreFeatures([...kept].filter(f => !detectedFeatures.includes(f))); }
     async function sagRunArea(A) {
         sag.busy = true; sag.cur = A; sagDraw();
         const status = document.getElementById('status'), areaNo = sag.areas.length + 1;
         const say = (m) => { sagSet(`Area ${areaNo}: ${m}`); progSet('sag', { text: m.charAt(0).toUpperCase() + m.slice(1) }); };
-        progBegin('sag', `Scan as you go · area ${areaNo}`, { cancel: () => { const cb = document.getElementById('sagOn'); if (cb) cb.checked = false; sagToggle(false); } });
+        progBegin('sag', `Scan as you go · area ${areaNo}`, { cancel: sagStopNow });
         progSet('sag', { frac: 0, span: [0, 0.25] });
         const prev = sag.areas.filter(a => !a.failed).map(a => a.r);
         // everything on the map now stays (a download clears the map)
@@ -1238,6 +1252,7 @@
             window.__dlBoundsOverride = bnd;
             try { await fetchDEM(); } finally { window.__dlBoundsOverride = null; }
             sagRestore(kept);
+            if (sag.stopping) return;
             progSet('sag', { frac: 0.25, span: null });
             if (!fullDemGrid || fullDemGrid === before) { sag.areas.push({ r: A, failed: true, n: 0 }); say('no LiDAR terrain could be downloaded here; moving on.'); return; }
             // the automatic settings for the new area run first (when that option is on)
@@ -1266,7 +1281,7 @@
                 for (const f of drop) removeFeatureLayers(f);
                 if (drop.length) detectedFeatures = detectedFeatures.filter(f => !drop.includes(f));
             };
-            if (doRegular) {
+            if (doRegular && !sag.stopping) {
                 const mode0 = scanModeEl.value;
                 const modes = what === 'all' || what === 'allboth' ? SCAN_ALL_ORDER.filter(m => m !== 'settlement') : [mode0];
                 if (modes[0] === 'settlement') note = ' Settlement likelihood is a heat map for one area, so it is not scanned as you go: choose another scan mode.';
@@ -1277,7 +1292,7 @@
                     progSet('sag', { span: [0.25, doDL ? 0.55 : 1] });
                     try {
                         await runInSections(scanSections(false), async () => {
-                            for (let k = 0; k < modes.length; k++) {
+                            for (let k = 0; k < modes.length && !sag.stopping; k++) {
                                 say(`${steps > 1 ? 'step 1 of 2, ' : ''}regular scan${modes.length > 1 ? ` (${k + 1} of ${modes.length}: ${MODE_STYLE[modes[k]].label})` : ` (${MODE_STYLE[modes[k]].label})`}...`);
                                 if (modes.length > 1) { scanModeEl.value = modes[k]; onScanModeChange(); }
                                 await runScannerOnGrid();
@@ -1294,7 +1309,7 @@
                     updateDetectionLegend(); updateExportButtons();
                 }
             }
-            if (doDL) {
+            if (doDL && !sag.stopping) {
                 if (!dlPrefs().model || dlModelOutdated()) note += ' No trained deep-learning model is selected, so the deep-learning scan was skipped.';
                 else {
                     const nReg = detectedFeatures.filter(f => !kept.has(f) && f.mode !== 'settlement').length;
@@ -1318,12 +1333,16 @@
             const msg = `Scan as you go: area ${areaNo} done, ${added} new result${added === 1 ? '' : 's'}. ${sagSummary()}${note}`;
             sagSet(msg); status.innerText = msg;
         } catch (e) {
-            console.error(e);
-            sag.areas.push({ r: A, failed: true, n: 0 });
             sagRestore(kept);
-            say('failed: ' + (e.message || e));
+            if (e instanceof ScanStopped || sag.stopping) { /* stopped: the results so far stay */ }
+            else { console.error(e); sag.areas.push({ r: A, failed: true, n: 0 }); say('failed: ' + (e.message || e)); }
         } finally {
-            sag.busy = false; sag.cur = null; sagDraw();
+            if (sag.stopping) {
+                // what this area found before it was stopped stays on the map
+                for (const f of detectedFeatures) if (!kept.has(f) && f.mode !== 'settlement') sag.added.add(f);
+                sagSet(`Stopped. ${sagSummary()}`);
+            }
+            sag.busy = false; sag.cur = null; sag.stopping = false; scanStopRequested = false; sagDraw();
             progEnd('sag');
         }
     }
@@ -1792,7 +1811,21 @@
             card.style.cssText = 'position:absolute;z-index:1002;left:50%;transform:translateX(-50%);bottom:30px;width:440px;max-width:calc(100% - 16px);box-sizing:border-box;' +
                 'background:#fff;border-radius:10px;box-shadow:0 3px 14px rgba(0,0,0,0.35);padding:8px 10px;font:12px sans-serif;color:#1e293b;';
             L.DomEvent.disableClickPropagation(card); L.DomEvent.disableScrollPropagation(card);
+            // the lines are redrawn every second; the buttons below them stay put,
+            // so a tap on one is never lost to a redraw
+            card.innerHTML = `<div id="progBody"></div>
+                <div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11px;color:#64748b;">
+                  <span id="progCount" style="flex:1;"></span>
+                  <button id="progMinBtn" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;"></button>
+                  <button id="progStopBtn" style="width:auto;margin:0;padding:3px 10px;font-size:0.75rem;background:#fee2e2;color:#991b1b;"></button></div>`;
             map.getContainer().appendChild(card);
+            card.querySelector('#progMinBtn').onclick = () => { progMin = !progMin; progRender(); };
+            card.querySelector('#progStopBtn').onclick = () => {
+                const s = progLevels.find(l => l.cancel);
+                if (!s || s.stopping) return;
+                s.stopping = true; progRender();
+                try { s.cancel(); } catch (e) { console.warn(e); }
+            };
             if (!document.getElementById('progStyle')) {
                 const st = document.createElement('style'); st.id = 'progStyle';
                 st.textContent = '@keyframes progStripe{from{background-position:0 0}to{background-position:40px 0}}' +
@@ -1802,50 +1835,50 @@
         }
         card.style.display = 'block';
         const now = Date.now(), inner = progLevels[progLevels.length - 1];
-        // minimised: one slim line (the outermost job and its share done)
-        if (progMin) {
-            const o = progLevels[0];
-            let f0 = o.frac;
-            { let e = null; for (let i = progLevels.length - 1; i >= 0; i--) { const l = progLevels[i]; e = l.span && e != null ? l.span[0] + (l.span[1] - l.span[0]) * e : l.frac; } f0 = e; }
-            card.innerHTML = `<div style="display:flex;align-items:center;gap:8px;">
-                <b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(o.title)}</b>
-                <span style="color:#475569;white-space:nowrap;">${f0 != null ? Math.floor(f0 * 100) + '% \u00B7 ' : ''}${progTime(now - o.t0)}</span>
-                <button id="progMinBtn" title="Show the details" style="width:auto;margin:0;padding:1px 8px;font-size:0.8rem;">&#9650;</button></div>
-                <div style="height:4px;background:#e2e8f0;border-radius:3px;overflow:hidden;margin-top:4px;"><div class="${f0 == null ? 'prog-indet' : ''}" style="height:100%;width:${f0 == null ? 100 : Math.max(2, f0 * 100)}%;background-color:#2563eb;${f0 == null ? 'opacity:.55;' : ''}"></div></div>`;
-            document.getElementById('progMinBtn').onclick = () => { progMin = false; progRender(); };
-            progPlace(card);
-            return;
-        }
         const stopper = progLevels.find(l => l.cancel);
-        const colors = ['#2563eb', '#7c3aed', '#0891b2', '#16a34a'];
         // the share done of each line, innermost first (a span follows the line inside it)
         const eff = new Array(progLevels.length).fill(null);
         for (let i = progLevels.length - 1; i >= 0; i--) {
             const l = progLevels[i], innerF = i + 1 < progLevels.length ? eff[i + 1] : null;
             eff[i] = l.span && innerF != null ? l.span[0] + (l.span[1] - l.span[0]) * innerF : l.frac;
         }
-        const rows = progLevels.map((l, i) => {
-            const el = now - l.t0, f = eff[i];
-            let left = '';
-            // time left only where the share done is measured directly: an outer
-            // line made of steps of unequal length can't say it honestly
-            if (!l.span && f != null && f >= 0.03 && f < 1 && el > 3000) left = ` · about ${progTime(el * (1 - f) / f)} left`;
-            const text = l.ownText ? l.text : (l === inner ? progStatusText : '');
-            return `<div style="margin-top:${i ? 6 : 0}px;${i ? 'padding-left:' + Math.min(3, i) * 8 + 'px;' : ''}">
-                <div style="display:flex;gap:6px;align-items:baseline;"><b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(l.title)}</b>
-                  <span style="color:#475569;white-space:nowrap;">${f != null ? Math.floor(f * 100) + '% · ' : ''}${progTime(el)}${left}</span></div>
-                <div style="height:${i ? 5 : 7}px;background:#e2e8f0;border-radius:4px;overflow:hidden;margin-top:3px;">
-                  <div class="${f == null ? 'prog-indet' : ''}" style="height:100%;width:${f == null ? 100 : Math.max(2, f * 100)}%;background-color:${colors[i % colors.length]};${f == null ? 'opacity:.55;' : 'transition:width .25s;'}"></div></div>
-                ${text ? `<div style="color:#475569;margin-top:2px;font-size:11px;line-height:1.3;max-height:2.6em;overflow:hidden;">${escapeHtml(text)}</div>` : ''}</div>`;
-        }).join('');
+        const body = card.querySelector('#progBody');
+        if (progMin) {
+            // minimised: one slim line (the outermost job and its share done)
+            const o = progLevels[0], f0 = eff[0];
+            body.innerHTML = `<div style="display:flex;align-items:center;gap:8px;">
+                <b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(o.title)}</b>
+                <span style="color:#475569;white-space:nowrap;">${f0 != null ? Math.floor(f0 * 100) + '% · ' : ''}${progTime(now - o.t0)}</span></div>
+                <div style="height:4px;background:#e2e8f0;border-radius:3px;overflow:hidden;margin-top:4px;"><div class="${f0 == null ? 'prog-indet' : ''}" style="height:100%;width:${f0 == null ? 100 : Math.max(2, f0 * 100)}%;background-color:#2563eb;${f0 == null ? 'opacity:.55;' : ''}"></div></div>`;
+        } else {
+            const colors = ['#2563eb', '#7c3aed', '#0891b2', '#16a34a'];
+            body.innerHTML = progLevels.map((l, i) => {
+                const el = now - l.t0, f = eff[i];
+                let left = '';
+                // time left only where the share done is measured directly: an outer
+                // line made of steps of unequal length can't say it honestly
+                if (!l.span && f != null && f >= 0.03 && f < 1 && el > 3000) left = ` · about ${progTime(el * (1 - f) / f)} left`;
+                const text = l.ownText ? l.text : (l === inner ? progStatusText : '');
+                return `<div style="margin-top:${i ? 6 : 0}px;${i ? 'padding-left:' + Math.min(3, i) * 8 + 'px;' : ''}">
+                    <div style="display:flex;gap:6px;align-items:baseline;"><b style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(l.title)}</b>
+                      <span style="color:#475569;white-space:nowrap;">${f != null ? Math.floor(f * 100) + '% · ' : ''}${progTime(el)}${left}</span></div>
+                    <div style="height:${i ? 5 : 7}px;background:#e2e8f0;border-radius:4px;overflow:hidden;margin-top:3px;">
+                      <div class="${f == null ? 'prog-indet' : ''}" style="height:100%;width:${f == null ? 100 : Math.max(2, f * 100)}%;background-color:${colors[i % colors.length]};${f == null ? 'opacity:.55;' : 'transition:width .25s;'}"></div></div>
+                    ${text ? `<div style="color:#475569;margin-top:2px;font-size:11px;line-height:1.3;max-height:2.6em;overflow:hidden;">${escapeHtml(text)}</div>` : ''}</div>`;
+            }).join('');
+        }
         const nRes = detectedFeatures.filter(f => f.mode !== 'settlement' && f.lat != null).length;
-        card.innerHTML = rows + `<div style="display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11px;color:#64748b;">
-            <span style="flex:1;">${nRes} result${nRes === 1 ? '' : 's'} on the map</span>
-            <button id="progMinBtn" title="Make this smaller" style="width:auto;margin:0;padding:3px 8px;font-size:0.75rem;">&#9660; Smaller</button>
-            ${stopper ? `<button id="progStopBtn" style="width:auto;margin:0;padding:3px 10px;font-size:0.75rem;background:#fee2e2;color:#991b1b;">&#9632; Stop ${escapeHtml(stopper.title.split(/[·(:]/)[0].trim().toLowerCase())}</button>` : ''}</div>`;
-        const b = document.getElementById('progStopBtn');
-        if (b && stopper) b.onclick = () => { b.disabled = true; b.innerText = 'Stopping...'; try { stopper.cancel(); } catch (e) { console.warn(e); } };
-        document.getElementById('progMinBtn').onclick = () => { progMin = true; progRender(); };
+        card.querySelector('#progCount').textContent = `${nRes} result${nRes === 1 ? '' : 's'} on the map`;
+        const mb = card.querySelector('#progMinBtn');
+        mb.textContent = progMin ? '▲ Details' : '▼ Smaller';
+        mb.title = progMin ? 'Show the details' : 'Make this smaller';
+        const sb = card.querySelector('#progStopBtn');
+        sb.style.display = stopper ? '' : 'none';
+        if (stopper) {
+            const label = stopper.stopping ? 'Stopping...' : '■ Stop ' + stopper.title.split(/[·(:]/)[0].trim().toLowerCase();
+            if (sb.textContent !== label) sb.textContent = label;
+            sb.disabled = !!stopper.stopping;
+        }
         progPlace(card);
     }
     // Where the card goes, never over the settings panel or its fold button:
@@ -1888,6 +1921,14 @@
         };
         watchText('status'); watchText('dlStatus');
     }
+
+    // ---- Stopping a scan part-way ----
+    // Set by a Stop button: the mound scan (the longest regular scan) checks
+    // it between its steps and stops with ScanStopped; other scans finish
+    // their current (short) run.
+    let scanStopRequested = false;
+    class ScanStopped extends Error { constructor() { super('Stopped'); this.name = 'ScanStopped'; } }
+    function scanCheckStop() { if (scanStopRequested) throw new ScanStopped(); }
 
     // ---- Keeping the map smooth during scans ----
     // A scan runs on the page's one thread, so a long stretch of work
@@ -2096,7 +2137,7 @@ onmessage = (e) => {
         let done = 0;
         progBegin('sections', `${secs.length} sections, ${km2.toFixed(1)} km² in all`);
         try {
-        for (let i = 0; i < secs.length && !(stop && stop()); i++) {
+        for (let i = 0; i < secs.length && !(stop && stop()) && !scanStopRequested; i++) {
             progSet('sections', { frac: i / secs.length, span: [i / secs.length, (i + 1) / secs.length], title: `Section ${i + 1} of ${secs.length} (${km2.toFixed(1)} km² in all)` });
             const sec = secs[i], before = new Set(detectedFeatures), beforeOv = new Set(last3DOverlays);
             await withStatusPrefix(`Section ${i + 1} of ${secs.length} (${km2.toFixed(1)} km² in all): `, () => withGrid(cropGrid(g, sec.r0, sec.c0, sec.r1, sec.c1), fn));
@@ -12528,7 +12569,8 @@ onmessage = (e) => {
     async function runScannerOnGrid() {
         const m = document.getElementById('scanMode').value;
         progBegin('stage', `Scanning: ${MODE_STYLE[m] ? MODE_STYLE[m].label : m}`);
-        try { return await runScannerOnGridNow(); } finally { progEnd('stage'); }
+        try { return await runScannerOnGridNow(); }
+        finally { progEnd('stage'); const b = document.getElementById('scanBtn'); if (b && !scanAllActive) b.disabled = false; }
     }
     async function runScannerOnGridNow() {
         if (!currentDEM) return;
@@ -12642,6 +12684,7 @@ onmessage = (e) => {
                 const { trend: baseTrend, quad } = trendCache.get(trendR);
                 let hostDiam = null;
                 for (const pass of ['normal', 'spur']) {
+                scanCheckStop();
                 progSet('stage', { frac: 0.85 * (progPass++) / progPasses });
                 const trend = pass === 'normal' ? baseTrend : quad;
                 const resid = new Float32Array(n);
@@ -12730,6 +12773,7 @@ onmessage = (e) => {
                 const k = c.k;
                 if (runs > 0 && persistChecked >= 400) { moundUnchecked = merged.length - merged.indexOf(c); break; } // keeps very large scans responsive
                 { const y = uiYield(); if (y) await y; }
+                scanCheckStop();
                 progSet('stage', { frac: 0.85 + 0.15 * persistChecked / Math.max(1, Math.min(merged.length, 400)) });
                 if (runs > 0 && persistChecked % 10 === 0) await tick0(`Mounds: stochastic persistence test ${persistChecked + 1}-${Math.min(merged.length, persistChecked + 10)} of ${Math.min(merged.length, 400)}...`);
                 // peak cell of this candidate
