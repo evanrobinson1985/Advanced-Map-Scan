@@ -1542,7 +1542,9 @@
                      computeSlopeDegrees, vhFilter, topHat, thinZS, thinCorners, skeletonGraph, pathLenPx, effigyDescribe, effigyChecks, effigyFind,
                      shellDescribe, shellFind, builtShapeAt, effigyLatLon, gridInfo,
                      // the automatic settings
-                     slidingExtreme1D, extremeFilter2D];
+                     slidingExtreme1D, extremeFilter2D,
+                     // the deep-learning scan's openness views
+                     dlOpenness];
         return `'use strict';
 const MOUND_MAX_ROUGH = ${MOUND_MAX_ROUGH}, MOUND_TILT_MIN = ${MOUND_TILT_MIN}, IMOUND_OFFSET = ${IMOUND_OFFSET};
 const BUILT_WHY = ${JSON.stringify(BUILT_WHY)}, EFFIGY_MAX_H = ${EFFIGY_MAX_H}, FT_TO_M = ${FT_TO_M};
@@ -1563,6 +1565,7 @@ const ops = {
     },
     moundTrend, iMoundHeights,
     sort(a) { return a.sort(); },
+    openness: dlOpenness,
     hiLo(hiIn, loIn, W, H, R) { return { hi: extremeFilter2D(hiIn, W, H, R, true), lo: extremeFilter2D(loIn, W, H, R, false) }; },
     drain(d, W, H, nd) {
         const filled = fillDepressionsEps(boxSmooth(d, W, H, 1, nd), W, H, nd);
@@ -5804,7 +5807,7 @@ onmessage = (e) => {
             for (let c = 0; c < RW; c++) R[r * RW + c] = sample(area.n - (r + 0.5) * DL.RES * mLat, area.w + (c + 0.5) * DL.RES * mLon);
             const y = uiYield(); if (y) await y;
         }
-        const OP = DL.CH >= 6 ? dlOpenness(R, RW, RH, DL.RES, DL_OPEN_R) : null;
+        const OP = DL.CH >= 6 ? await offThread('openness', [R, RW, RH, DL.RES, DL_OPEN_R], () => dlOpenness(R, RW, RH, DL.RES, DL_OPEN_R)) : null;
         const winP = new Float32Array(DL.INPUT * DL.INPUT), winN = new Float32Array(DL.INPUT * DL.INPUT);
         const st = DL.STRIDE, GW = Math.floor((RW - N) / st) + 1, GH = Math.floor((RH - N) / st) + 1, total = GW * GH;
         const prob = new Float32Array(total);
@@ -5831,6 +5834,7 @@ onmessage = (e) => {
                 dlFeatures(win, 0, xs, off, OP ? winP : null, OP ? winN : null);
                 which[nb++] = k;
                 if (nb === BATCH) await flush();
+                else { const y = uiYield(); if (y) await y; }
             }
             if (gi % 4 === 3) { dlSetStatus(label + `Scanning: ${Math.round(100 * (gi + 1) / GH)}% (${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}...`); await dlTick(); }
         }
