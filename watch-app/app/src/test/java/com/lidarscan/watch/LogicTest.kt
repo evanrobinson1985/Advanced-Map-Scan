@@ -127,6 +127,22 @@ class LogicTest {
         assertTrue(q.places.isEmpty()); assertNull(q.placesJson)
     }
 
+    @Test fun decodesGzippedPlacesAndKeepsThemOutOfHistory() {
+        val arr = JSONArray(); for (i in 0 until 3000) arr.put(JSONObject().put("id", "p$i").put("lat", 34 + i * 1e-4).put("lon", -85.0).put("kind", "Caves").put("name", "Cave $i"))
+        val gz = ByteArrayOutputStream().also { o -> java.util.zip.GZIPOutputStream(o).use { it.write(arr.toString().toByteArray()) } }.toByteArray()
+        val hs = byteArrayOf(9, 8, 7)
+        val j = sample(); j.getJSONObject("img").put("len", hs.size); j.put("placesGz", JSONObject().put("len", gz.size).put("n", 3000))
+        val bytes = pack(j, hs + gz)
+        val p = WatchPackage.decode(bytes)
+        assertEquals(3000, p.placesCount); assertEquals(3000, p.places.size); assertEquals("Cave 2999", p.places[2999].name)
+        assertTrue(hs.contentEquals(p.imageBytes)); assertEquals(2, p.waypoints.size)
+        // the history's copy: the same package, without the places
+        val h = WatchPackage.withoutPlaces(bytes)
+        assertTrue(h.size < bytes.size - gz.size + 10)
+        val q = WatchPackage.decode(h)
+        assertEquals(0, q.placesCount); assertTrue(q.places.isEmpty()); assertTrue(hs.contentEquals(q.imageBytes)); assertEquals(2, q.waypoints.size)
+    }
+
     @Test fun rejectsOtherFiles() {
         try { WatchPackage.decode("hello world, not a package".toByteArray()); fail() } catch (e: IllegalArgumentException) { }
     }
@@ -249,7 +265,8 @@ class LogicTest {
         if (!f.exists()) return
         val p = WatchPackage.decode(f.readBytes())
         println("web package: ${p.name}, ${p.waypoints.size} waypoints, image ${p.image?.widthPx}x${p.image?.heightPx} (${p.imageBytes?.size} bytes), basemap ${p.baseSrc} ${p.baseImage?.widthPx}x${p.baseImage?.heightPx} (${p.baseBytes?.size} bytes), view ${p.viewBase} ${p.viewHillshadeOpacity}")
-        println("  imported places: " + p.places.joinToString { "${it.name} (${it.kind})" })
+        val t = System.currentTimeMillis(); val n = p.places.size
+        println("  imported places: $n (${p.placesCount} listed, ${p.placesJson?.length} chars of JSON, read in ${System.currentTimeMillis() - t} ms): " + p.places.take(3).joinToString { "${it.name} (${it.kind})" })
         assertTrue(p.waypoints.isNotEmpty() || p.places.isNotEmpty())
         for (w in p.waypoints + p.places) { assertTrue(w.lat in -90.0..90.0); assertTrue(w.lon in -180.0..180.0) }
     }

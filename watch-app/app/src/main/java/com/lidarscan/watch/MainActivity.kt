@@ -16,6 +16,7 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -151,6 +152,7 @@ class AppModel(private val ctx: Context) {
     var currentId by mutableStateOf(-1L); private set
     /** Places imported from GPX files on the phone: kept for good, shown with any package. */
     var places by mutableStateOf<List<Waypoint>>(emptyList()); private set
+    private var placesLoaded = false
     val tiles = TileLayer(ctx) { main.post { tileTick++ } }
     private var areas: List<OnlineArea> = emptyList()
     private var onlineBusy = false
@@ -160,9 +162,25 @@ class AppModel(private val ctx: Context) {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /** The package's waypoints and your imported places. */
+    val allWaypoints: List<Waypoint> by derivedStateOf { (pkg?.waypoints ?: emptyList()) + places }
+    private val byId: Map<String, Waypoint> by derivedStateOf { allWaypoints.associateBy { it.id } }
+    fun waypoint(id: String?): Waypoint? = if (id == null) null else byId[id]
+    val selected: Waypoint? get() = waypoint(selectedId)
+
+    /** The waypoints shown: those in groups not hidden by the filter. */
+    val visibleWaypoints: List<Waypoint> by derivedStateOf { allWaypoints.filter { it.kind !in hiddenKinds } }
+    /** The groups in the package on the map, with how many waypoints each. */
+    val kinds: List<Pair<Waypoint, Int>> by derivedStateOf { allWaypoints.groupBy { it.kind }.map { (_, l) -> Pair(l[0], l.size) }.sortedByDescending { it.second } }
+
     init {
         tiles.enabled = onlineMaps
-        places = Store.places(ctx)
+        // the imported places are read in the background: there can be tens of thousands
+        scope.launch {
+            places = withContext(Dispatchers.IO) { Store.places(ctx) }
+            placesLoaded = true
+            if (selected == null) selectedId = null
+        }
         Store.loadPackage(ctx)?.let { applyPackage(it) }
         currentId = Store.currentId(ctx)
         history = Store.history(ctx)
@@ -171,15 +189,6 @@ class AppModel(private val ctx: Context) {
 
     fun close() { scope.cancel(); tiles.close() }
 
-    /** The package's waypoints and your imported places. */
-    val allWaypoints: List<Waypoint> get() = (pkg?.waypoints ?: emptyList()) + places
-    fun waypoint(id: String?): Waypoint? = if (id == null) null else allWaypoints.firstOrNull { it.id == id }
-    val selected: Waypoint? get() = waypoint(selectedId)
-
-    /** The waypoints shown: those in groups not hidden by the filter. */
-    val visibleWaypoints: List<Waypoint> get() = allWaypoints.filter { it.kind !in hiddenKinds }
-    /** The groups in the package on the map, with how many waypoints each. */
-    val kinds: List<Pair<Waypoint, Int>> get() = allWaypoints.groupBy { it.kind }.map { (_, l) -> Pair(l[0], l.size) }.sortedByDescending { it.second }
     fun setKindShown(kind: String, shown: Boolean) { hiddenKinds = if (shown) hiddenKinds - kind else hiddenKinds + kind; Store.setHiddenKinds(ctx, hiddenKinds); if (!shown && selected?.kind == kind) selectedId = null }
     fun showAllKinds() { hiddenKinds = emptySet(); Store.setHiddenKinds(ctx, hiddenKinds) }
 
@@ -204,7 +213,7 @@ class AppModel(private val ctx: Context) {
         pkg = p
         pkgBitmap = p.imageBytes?.let { decodeMap(it) }
         baseBitmap = p.baseBytes?.let { decodeMap(it) }
-        if (waypoint(selectedId) == null) selectedId = null
+        if (placesLoaded && waypoint(selectedId) == null) selectedId = null   // (a place may be chosen: wait for them)
     }
 
     /** Called from the Bluetooth thread with a complete package: checked, kept, shown. */
@@ -213,10 +222,11 @@ class AppModel(private val ctx: Context) {
         // imported places are kept on their own, added to those already here
         val newPlaces = p.placesJson?.let { Store.addPlaces(ctx, it) } ?: 0
         if (p.placesJson != null) { val pl = Store.places(ctx); main.post { places = pl } }
-        val placesText = if (p.places.isEmpty()) "" else "${p.places.size} imported place${if (p.places.size == 1) "" else "s"} ($newPlaces new)"
+        val placesText = if (p.placesCount == 0) "" else "${p.placesCount} imported place${if (p.placesCount == 1) "" else "s"} ($newPlaces new)"
         // places alone: the map and its waypoints stay as they are
-        if (p.waypoints.isEmpty() && p.image == null && p.places.isNotEmpty()) return placesText
-        val id = Store.addToHistory(ctx, bytes, p)
+        if (p.waypoints.isEmpty() && p.image == null && p.placesCount > 0) return placesText
+        // (the history keeps the package without the places, which are kept once, on their own)
+        val id = Store.addToHistory(ctx, if (p.placesJson != null) WatchPackage.withoutPlaces(bytes) else bytes, p)
         main.post {
             applyPackage(p); showPackageArea = true
             currentId = id; history = Store.history(ctx)
@@ -289,9 +299,10 @@ class AppModel(private val ctx: Context) {
 
     /** Deletes a group of imported places (one GPX file's), or all of them. */
     fun deletePlaces(kind: String? = null) {
-        Store.deletePlaces(ctx, kind)
-        places = Store.places(ctx)
-        if (selected == null) selectedId = null
+        scope.launch {
+            places = withContext(Dispatchers.IO) { Store.deletePlaces(ctx, kind); Store.places(ctx) }
+            if (selected == null) selectedId = null
+        }
     }
 
     /** Deletes the downloaded map areas (the received packages stay). */

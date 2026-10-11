@@ -1486,7 +1486,7 @@
     // as teal pins and sent to the watch, which keeps them apart from its
     // packages. Each place: { id, lat, lon, name, desc, ele, sym, file, ts }
     let myPlaces = [], placesLayer = null;
-    const PLACES_COLOR = '#0891b2', PLACES_MAX_WATCH = 5000;
+    const PLACES_COLOR = '#0891b2';
     function parseGPX(text, fileName) {
         const doc = new DOMParser().parseFromString(text, 'application/xml');
         if (doc.getElementsByTagName('parsererror').length) throw new Error('not a readable GPX file');
@@ -1552,9 +1552,9 @@
     function watchPlaces(area) {
         if (!(document.getElementById('watchPlaces') || {}).checked) return [];
         const inA = (p) => !area || (p.lat <= area.n && p.lat >= area.s && p.lon <= area.e && p.lon >= area.w);
-        return myPlaces.filter(inA).slice(0, PLACES_MAX_WATCH).map(p => {
-            const o = { id: p.id, lat: +p.lat.toFixed(7), lon: +p.lon.toFixed(7), kind: p.file, letter: ((p.name || p.file).match(/[A-Za-z0-9]/) || ['P'])[0].toUpperCase(), color: PLACES_COLOR,
-                        score: null, d: null, h: null, conf: false, notes: [] };
+        return myPlaces.filter(inA).map(p => {
+            // (no size, height or score: the watch reads those as unknown)
+            const o = { id: p.id, lat: +p.lat.toFixed(6), lon: +p.lon.toFixed(6), kind: p.file, letter: ((p.name || p.file).match(/[A-Za-z0-9]/) || ['P'])[0].toUpperCase(), color: PLACES_COLOR, notes: [] };
             if (p.name) o.name = p.name;
             if (p.desc) o.notes.push(p.desc);
             if (p.type || p.sym) o.notes.push([p.type, p.sym].filter(Boolean).join(', '));
@@ -1600,16 +1600,27 @@
             base = await watchBasemapPicture(baseKey, hs.img, hs.img.pw, hs.img.ph);
         }
         const json = { v: 1, name: (document.getElementById('watchName') || {}).value || `LiDAR scan ${new Date().toLocaleDateString()}`, made: Date.now(), wps, view: viewSettings };
-        if (places.length) json.places = places;   // kept on the watch apart from the package
         if (hs) json.img = { ...hs.img, len: hs.bytes.length };
         if (base) json.base = { ...base.img, len: base.bytes.length };
+        // imported places (kept on the watch apart from the package): gzipped after
+        // the pictures, so tens of thousands go over in a few MB
+        let pz = null;
+        if (places.length) {
+            const raw = new TextEncoder().encode(JSON.stringify(places));
+            if (window.CompressionStream) {
+                watchSay(`Packing ${places.length} imported places...`);
+                pz = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+                json.placesGz = { len: pz.length, n: places.length };
+            } else json.places = places;
+        }
         const jb = new TextEncoder().encode(JSON.stringify(json));
-        const out = new Uint8Array(8 + jb.length + (hs ? hs.bytes.length : 0) + (base ? base.bytes.length : 0));
+        const parts = [hs && hs.bytes, base && base.bytes, pz].filter(Boolean);
+        const out = new Uint8Array(8 + jb.length + parts.reduce((a, b) => a + b.length, 0));
         out.set([76, 87, 80, 49], 0);   // "LWP1"
         new DataView(out.buffer).setUint32(4, jb.length, false);
         out.set(jb, 8);
-        if (hs) out.set(hs.bytes, 8 + jb.length);
-        if (base) out.set(base.bytes, 8 + jb.length + (hs ? hs.bytes.length : 0));
+        let at = 8 + jb.length;
+        for (const b of parts) { out.set(b, at); at += b.length; }
         return { bytes: out, nWps: wps.length, nPlaces: places.length, hasMap: !!hs, hasBase: !!base, baseKey };
     }
     async function sendToWatch() {
@@ -1702,7 +1713,9 @@
                 await sendCareful(0, total, '');
             }
             await rx.writeValueWithResponse(new Uint8Array([3]));
-            const r = result || await Promise.race([done, new Promise(r2 => setTimeout(() => r2(null), 15000))]) ||
+            // (the watch checks and saves it first: tens of thousands of places take a while)
+            if (!result && pkg.nPlaces > 2000) watchSay(`Sent. The watch is saving ${pkg.nPlaces} places...`);
+            const r = result || await Promise.race([done, new Promise(r2 => setTimeout(() => r2(null), pkg.nPlaces > 2000 ? 120000 : 15000))]) ||
                 new TextDecoder().decode(await st.readValue());
             if (r && r.startsWith('ok')) watchSay(`Sent to the watch: ${r.slice(3)} (${Math.round(total / 1024)} KB in ${Math.round((Date.now() - t0) / 1000)} s). On the watch, tap a waypoint for its details, or ➤ to be guided to it.`);
             else watchSay('The watch did not confirm it: ' + (r ? r.replace(/^err ?/, '') : 'no answer') + '. Try again.');

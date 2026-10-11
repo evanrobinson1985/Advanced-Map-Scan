@@ -39,10 +39,16 @@ data class WatchPackage(
     /** The web app's map settings when it was sent: its basemap and hillshade opacity. */
     val viewBase: String? = null,
     val viewHillshadeOpacity: Float? = null,
-    /** Places imported from GPX files on the phone: kept on the watch apart from the package. */
-    val places: List<Waypoint> = emptyList(),
+    /**
+     * Places imported from GPX files on the phone, kept on the watch apart
+     * from the package: their JSON (the web app's waypoint form) and how many.
+     */
     val placesJson: String? = null,
+    val placesCount: Int = 0,
 ) {
+    /** The places, read when first wanted (there can be tens of thousands). */
+    val places: List<Waypoint> by lazy { placesJson?.let { waypointsOf(JSONArray(it)) } ?: emptyList() }
+
     companion object {
         private val MAGIC = byteArrayOf('L'.code.toByte(), 'W'.code.toByte(), 'P'.code.toByte(), '1'.code.toByte())
 
@@ -68,7 +74,32 @@ data class WatchPackage(
             }
             val imageBytes = take(json.optJSONObject("img"))
             val baseBytes = take(json.optJSONObject("base"))
-            return fromJson(json, imageBytes, baseBytes)
+            // imported places, gzipped after the pictures
+            val pz = json.optJSONObject("placesGz")
+            val placesGz = if (pz != null) { require(pz.has("len")) { "places without a length" }; take(pz) } else null
+            val placesJson = placesGz?.let { String(java.util.zip.GZIPInputStream(it.inputStream()).use { s -> s.readBytes() }, Charsets.UTF_8) }
+            return fromJson(json, imageBytes, baseBytes, placesJson)
+        }
+
+        /**
+         * The package without its imported places (kept in the history: the
+         * places are kept once, on their own).
+         */
+        fun withoutPlaces(bytes: ByteArray): ByteArray {
+            val jsonLen = ByteBuffer.wrap(bytes, 4, 4).int
+            val json = JSONObject(String(bytes, 8, jsonLen, Charsets.UTF_8))
+            if (!json.has("placesGz") && !json.has("places")) return bytes
+            var off = 8 + jsonLen
+            val keep = java.io.ByteArrayOutputStream()
+            for (k in listOf("img", "base")) json.optJSONObject(k)?.let { o ->
+                val n = o.optInt("len", bytes.size - off).coerceAtMost(bytes.size - off)
+                keep.write(bytes, off, n); off += n
+            }
+            json.remove("placesGz"); json.remove("places")
+            val j = json.toString().toByteArray(Charsets.UTF_8)
+            val out = java.io.ByteArrayOutputStream()
+            out.write(MAGIC); out.write(ByteBuffer.allocate(4).putInt(j.size).array()); out.write(j); keep.writeTo(out)
+            return out.toByteArray()
         }
 
         /** Waypoints in the web app's form (the package's "wps", and its imported places). */
@@ -110,7 +141,7 @@ data class WatchPackage(
 
         private fun mapImage(o: JSONObject) = MapImage(o.getDouble("n"), o.getDouble("s"), o.getDouble("e"), o.getDouble("w"), o.optInt("pw"), o.optInt("ph"))
 
-        fun fromJson(json: JSONObject, imageBytes: ByteArray?, baseBytes: ByteArray? = null): WatchPackage {
+        fun fromJson(json: JSONObject, imageBytes: ByteArray?, baseBytes: ByteArray? = null, placesGzJson: String? = null): WatchPackage {
             val img = json.optJSONObject("img")
             val image = img?.let { mapImage(it) }
             val base = json.optJSONObject("base")
@@ -118,8 +149,8 @@ data class WatchPackage(
             val wps = waypointsOf(json.optJSONArray("wps"))
             return WatchPackage(
                 json.optString("name", "LiDAR scan"), json.optLong("made", 0L), image, wps, imageBytes,
-                places = waypointsOf(json.optJSONArray("places")),
-                placesJson = json.optJSONArray("places")?.toString(),
+                placesJson = placesGzJson ?: json.optJSONArray("places")?.toString(),
+                placesCount = json.optJSONObject("placesGz")?.optInt("n") ?: json.optJSONArray("places")?.length() ?: 0,
                 baseImage = if (base != null && baseBytes != null) mapImage(base) else null,
                 baseBytes = if (base != null) baseBytes else null,
                 baseSrc = base?.optString("src", "satellite"),
