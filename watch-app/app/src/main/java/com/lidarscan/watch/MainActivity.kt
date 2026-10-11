@@ -149,6 +149,8 @@ class AppModel(private val ctx: Context) {
     /** The packages received, newest first, and which one is on the map. */
     var history by mutableStateOf<List<HistoryEntry>>(emptyList()); private set
     var currentId by mutableStateOf(-1L); private set
+    /** Places imported from GPX files on the phone: kept for good, shown with any package. */
+    var places by mutableStateOf<List<Waypoint>>(emptyList()); private set
     val tiles = TileLayer(ctx) { main.post { tileTick++ } }
     private var areas: List<OnlineArea> = emptyList()
     private var onlineBusy = false
@@ -160,6 +162,7 @@ class AppModel(private val ctx: Context) {
 
     init {
         tiles.enabled = onlineMaps
+        places = Store.places(ctx)
         Store.loadPackage(ctx)?.let { applyPackage(it) }
         currentId = Store.currentId(ctx)
         history = Store.history(ctx)
@@ -168,12 +171,15 @@ class AppModel(private val ctx: Context) {
 
     fun close() { scope.cancel(); tiles.close() }
 
-    val selected: Waypoint? get() = pkg?.waypoints?.firstOrNull { it.id == selectedId }
+    /** The package's waypoints and your imported places. */
+    val allWaypoints: List<Waypoint> get() = (pkg?.waypoints ?: emptyList()) + places
+    fun waypoint(id: String?): Waypoint? = if (id == null) null else allWaypoints.firstOrNull { it.id == id }
+    val selected: Waypoint? get() = waypoint(selectedId)
 
     /** The waypoints shown: those in groups not hidden by the filter. */
-    val visibleWaypoints: List<Waypoint> get() = pkg?.waypoints?.filter { it.kind !in hiddenKinds } ?: emptyList()
+    val visibleWaypoints: List<Waypoint> get() = allWaypoints.filter { it.kind !in hiddenKinds }
     /** The groups in the package on the map, with how many waypoints each. */
-    val kinds: List<Pair<Waypoint, Int>> get() = (pkg?.waypoints ?: emptyList()).groupBy { it.kind }.map { (_, l) -> Pair(l[0], l.size) }.sortedByDescending { it.second }
+    val kinds: List<Pair<Waypoint, Int>> get() = allWaypoints.groupBy { it.kind }.map { (_, l) -> Pair(l[0], l.size) }.sortedByDescending { it.second }
     fun setKindShown(kind: String, shown: Boolean) { hiddenKinds = if (shown) hiddenKinds - kind else hiddenKinds + kind; Store.setHiddenKinds(ctx, hiddenKinds); if (!shown && selected?.kind == kind) selectedId = null }
     fun showAllKinds() { hiddenKinds = emptySet(); Store.setHiddenKinds(ctx, hiddenKinds) }
 
@@ -198,12 +204,18 @@ class AppModel(private val ctx: Context) {
         pkg = p
         pkgBitmap = p.imageBytes?.let { decodeMap(it) }
         baseBitmap = p.baseBytes?.let { decodeMap(it) }
-        if (p.waypoints.none { it.id == selectedId }) selectedId = null
+        if (waypoint(selectedId) == null) selectedId = null
     }
 
     /** Called from the Bluetooth thread with a complete package: checked, kept, shown. */
     fun receive(bytes: ByteArray): String {
         val p = WatchPackage.decode(bytes)
+        // imported places are kept on their own, added to those already here
+        val newPlaces = p.placesJson?.let { Store.addPlaces(ctx, it) } ?: 0
+        if (p.placesJson != null) { val pl = Store.places(ctx); main.post { places = pl } }
+        val placesText = if (p.places.isEmpty()) "" else "${p.places.size} imported place${if (p.places.size == 1) "" else "s"} ($newPlaces new)"
+        // places alone: the map and its waypoints stay as they are
+        if (p.waypoints.isEmpty() && p.image == null && p.places.isNotEmpty()) return placesText
         val id = Store.addToHistory(ctx, bytes, p)
         main.post {
             applyPackage(p); showPackageArea = true
@@ -213,7 +225,8 @@ class AppModel(private val ctx: Context) {
             p.viewHillshadeOpacity?.let { chooseHillshadeOpacity(it) }
         }
         return "${p.waypoints.size} waypoint${if (p.waypoints.size == 1) "" else "s"}" + (if (p.image != null) ", the hillshade" else "") +
-            (if (p.baseBytes != null) " and the ${if (p.baseSrc == "topo") "topo map" else "satellite imagery"}" else "")
+            (if (p.baseBytes != null) " and the ${if (p.baseSrc == "topo") "topo map" else "satellite imagery"}" else "") +
+            (if (placesText.isEmpty()) "" else "; $placesText")
     }
 
     fun toggleHeadingUp() { headingUp = !headingUp; Store.setHeadingUp(ctx, headingUp) }
@@ -272,6 +285,13 @@ class AppModel(private val ctx: Context) {
                 }
             } finally { showing = false }
         }
+    }
+
+    /** Deletes a group of imported places (one GPX file's), or all of them. */
+    fun deletePlaces(kind: String? = null) {
+        Store.deletePlaces(ctx, kind)
+        places = Store.places(ctx)
+        if (selected == null) selectedId = null
     }
 
     /** Deletes the downloaded map areas (the received packages stay). */

@@ -204,7 +204,7 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
                 m.visibleWaypoints.isNotEmpty() && m.visibleWaypoints.none { w -> val (x, y) = view.toScreen(w.lat, w.lon); x in 0f..(size.toFloat()) && y in 0f..(size.toFloat()) } -> {
                     val f = fix!!
                     val near = m.visibleWaypoints.minBy { Geo.distanceM(f.lat, f.lon, it.lat, it.lon) }
-                    "Nearest ${near.letter} " + Geo.distanceText(Geo.distanceM(f.lat, f.lon, near.lat, near.lon)) + " " + Geo.compassWord(Geo.bearingDeg(f.lat, f.lon, near.lat, near.lon))
+                    "Nearest ${near.name.ifEmpty { near.letter }} " + Geo.distanceText(Geo.distanceM(f.lat, f.lon, near.lat, near.lon)) + " " + Geo.compassWord(Geo.bearingDeg(f.lat, f.lon, near.lat, near.lon))
                 }
                 pkg == null -> "☰ › Receive from phone"
                 else -> scaleText(mpp, size)
@@ -360,7 +360,7 @@ fun ListScreen(act: MainActivity, onWaypoint: (String) -> Unit, onReceive: () ->
                 colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
         }
         if (wps.isEmpty()) item {
-            Text(if (m.pkg?.waypoints?.isNotEmpty() == true) "Every group is hidden: Filter waypoints to show them." else "No waypoints yet. Send them from the LiDAR web app (⌚ Send to watch).",
+            Text(if (m.allWaypoints.isNotEmpty()) "Every group is hidden: Filter waypoints to show them." else "No waypoints yet. Send them from the LiDAR web app (⌚ Send to watch).",
                 fontSize = 12.sp, textAlign = TextAlign.Center)
         }
         items(wps) { w ->
@@ -392,7 +392,7 @@ private val NoteColor = Color(0xFFFDE68A)   // your own notes, in amber
 @Composable
 fun DetailScreen(act: MainActivity, id: String, onGuide: () -> Unit, onMap: () -> Unit) {
     val m = act.model
-    val w = m.pkg?.waypoints?.firstOrNull { it.id == id } ?: run { Text("This waypoint is gone."); return }
+    val w = m.waypoint(id) ?: run { Text("This waypoint is gone."); return }
     val fix by act.tracker.fix.collectAsState()
     ScalingLazyColumn(Modifier.fillMaxSize()) {
         item { Row(verticalAlignment = Alignment.CenterVertically) { Letter(w, true); Spacer(Modifier.width(6.dp)); Text(w.kind, fontWeight = FontWeight.Bold, maxLines = 2) } }
@@ -426,7 +426,7 @@ fun DetailScreen(act: MainActivity, id: String, onGuide: () -> Unit, onMap: () -
 @Composable
 fun GuideScreen(act: MainActivity, id: String) {
     val m = act.model
-    val w = m.pkg?.waypoints?.firstOrNull { it.id == id } ?: run { Text("This waypoint is gone."); return }
+    val w = m.waypoint(id) ?: run { Text("This waypoint is gone."); return }
     val fix by act.tracker.fix.collectAsState()
     val heading by act.tracker.heading.collectAsState()
     var arrived by remember { mutableStateOf(false) }
@@ -540,6 +540,13 @@ fun SettingsScreen(act: MainActivity) {
         }
         item {
             var sure by remember { mutableStateOf(false) }
+            Chip(onClick = { if (m.places.isNotEmpty()) { if (sure) { m.deletePlaces(); sure = false } else sure = true } },
+                label = { Text(if (sure) "Tap again to delete" else "Imported places: ${m.places.size}") },
+                secondaryLabel = { Text(if (sure) "All of them, from the watch" else "From GPX on the phone; tap twice to delete") },
+                colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
+        }
+        item {
+            var sure by remember { mutableStateOf(false) }
             Chip(onClick = { if (m.areaCount > 0) { if (sure) { m.clearDownloadedAreas(); sure = false } else sure = true } },
                 label = { Text(if (sure) "Tap again to delete" else "Downloaded areas: ${m.areaCount}") },
                 secondaryLabel = { Text(if (sure) "Received maps stay" else "Tap twice to delete them") },
@@ -571,11 +578,21 @@ fun FilterScreen(act: MainActivity) {
         items(m.kinds) { (w, n) ->
             val shown = w.kind !in m.hiddenKinds
             ToggleChip(checked = shown, onCheckedChange = { m.setKindShown(w.kind, it) },
-                label = { Text(w.kind, maxLines = 2) }, secondaryLabel = { Text("$n waypoint${if (n == 1) "" else "s"}") },
+                label = { Text(w.kind, maxLines = 2) }, secondaryLabel = { Text(if (m.places.any { it.kind == w.kind }) "$n imported place${if (n == 1) "" else "s"}" else "$n waypoint${if (n == 1) "" else "s"}") },
                 appIcon = { Letter(w) }, toggleControl = { Switch(checked = shown) }, modifier = Modifier.fillMaxWidth())
         }
         if (m.hiddenKinds.isNotEmpty()) item {
             Chip(onClick = { m.showAllKinds() }, label = { Text("Show all") }, colors = ChipDefaults.primaryChipColors(), modifier = Modifier.fillMaxWidth())
+        }
+        // imported places (from GPX files on the phone) stay until deleted here
+        val placeKinds = m.places.map { it.kind }.distinct()
+        if (placeKinds.isNotEmpty()) item { ListHeader { Text("Imported places") } }
+        items(placeKinds) { kind ->
+            var sure by remember { mutableStateOf(false) }
+            Chip(onClick = { if (sure) { m.deletePlaces(kind); sure = false } else sure = true },
+                label = { Text(if (sure) "Tap again to delete" else "Delete $kind", maxLines = 2) },
+                secondaryLabel = { Text("${m.places.count { it.kind == kind }} places, from the phone") },
+                colors = ChipDefaults.secondaryChipColors(), modifier = Modifier.fillMaxWidth())
         }
     }
 }

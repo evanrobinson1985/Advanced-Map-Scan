@@ -1,6 +1,7 @@
 package com.lidarscan.watch
 
 import android.content.Context
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -72,6 +73,40 @@ object Store {
             addToHistory(ctx, bytes, p, old.lastModified())
         } catch (e: Exception) { /* unreadable: dropped */ }
         old.delete()
+    }
+
+    // ---- places imported from GPX files on the phone ----
+    // Kept in places.json (the web app's waypoint form), apart from the
+    // packages: every package that brings places adds to them (the same place
+    // again replaces itself), and they show whichever package is on the map.
+    private fun placesFile(ctx: Context) = File(ctx.filesDir, "places.json")
+    private fun placesArray(ctx: Context): JSONArray = try { JSONArray(placesFile(ctx).readText()) } catch (e: Exception) { JSONArray() }
+
+    fun places(ctx: Context): List<Waypoint> = try { WatchPackage.waypointsOf(placesArray(ctx)) } catch (e: Exception) { emptyList() }
+
+    /** Adds the places a package brought; returns how many new ones. */
+    fun addPlaces(ctx: Context, json: String): Int {
+        val byId = LinkedHashMap<String, JSONObject>()
+        val old = placesArray(ctx)
+        for (i in 0 until old.length()) old.optJSONObject(i)?.let { byId[it.optString("id", "o$i")] = it }
+        val before = byId.size
+        val add = JSONArray(json)
+        for (i in 0 until add.length()) add.optJSONObject(i)?.let { byId[it.optString("id", "n$i")] = it }
+        writePlaces(ctx, byId.values)
+        return byId.size - before
+    }
+
+    /** Deletes one group of places (a GPX file's), or all of them. */
+    fun deletePlaces(ctx: Context, kind: String? = null) {
+        if (kind == null) { placesFile(ctx).delete(); return }
+        val a = placesArray(ctx)
+        writePlaces(ctx, (0 until a.length()).mapNotNull { a.optJSONObject(it) }.filter { it.optString("kind") != kind })
+    }
+
+    private fun writePlaces(ctx: Context, list: Collection<JSONObject>) {
+        val tmp = File(ctx.filesDir, "places.tmp")
+        tmp.writeText(JSONArray().apply { list.forEach { put(it) } }.toString())
+        tmp.renameTo(placesFile(ctx))
     }
 
     // ---- settings ----

@@ -110,6 +110,23 @@ class LogicTest {
         assertEquals("", p.waypoints[1].name); assertTrue(p.waypoints[1].userNotes.isEmpty())
     }
 
+    @Test fun decodesImportedPlaces() {
+        val j = sample().put("places", JSONArray()
+            .put(JSONObject().put("id", "p3497_8581_ab").put("lat", 34.9701).put("lon", -85.8123).put("kind", "AL caves").put("letter", "R")
+                .put("color", "#0891b2").put("name", "Russell Cave").put("notes", JSONArray().put("Elevation: 600 ft")))
+            .put(JSONObject().put("id", "p2").put("lat", 34.99).put("lon", -85.83).put("kind", "AL caves")))
+        val p = WatchPackage.decode(pack(j, null))
+        assertEquals(2, p.waypoints.size); assertEquals(2, p.places.size)
+        val c = p.places[0]
+        assertEquals("Russell Cave", c.name); assertEquals("AL caves", c.kind); assertEquals(listOf("Elevation: 600 ft"), c.notes)
+        assertEquals(0xFF0891B2.toInt(), c.color)
+        assertNotNull(p.placesJson)
+        assertEquals(2, WatchPackage.waypointsOf(JSONArray(p.placesJson)).size)
+        // a package without places
+        val q = WatchPackage.decode(pack(sample(), null))
+        assertTrue(q.places.isEmpty()); assertNull(q.placesJson)
+    }
+
     @Test fun rejectsOtherFiles() {
         try { WatchPackage.decode("hello world, not a package".toByteArray()); fail() } catch (e: IllegalArgumentException) { }
     }
@@ -232,7 +249,8 @@ class LogicTest {
         if (!f.exists()) return
         val p = WatchPackage.decode(f.readBytes())
         println("web package: ${p.name}, ${p.waypoints.size} waypoints, image ${p.image?.widthPx}x${p.image?.heightPx} (${p.imageBytes?.size} bytes), basemap ${p.baseSrc} ${p.baseImage?.widthPx}x${p.baseImage?.heightPx} (${p.baseBytes?.size} bytes), view ${p.viewBase} ${p.viewHillshadeOpacity}")
-        assertTrue(p.waypoints.isNotEmpty())
-        for (w in p.waypoints) { assertTrue(w.lat in -90.0..90.0); assertTrue(w.lon in -180.0..180.0) }
+        println("  imported places: " + p.places.joinToString { "${it.name} (${it.kind})" })
+        assertTrue(p.waypoints.isNotEmpty() || p.places.isNotEmpty())
+        for (w in p.waypoints + p.places) { assertTrue(w.lat in -90.0..90.0); assertTrue(w.lon in -180.0..180.0) }
     }
 }

@@ -23,6 +23,14 @@ Once the waypoints are on the watch, it works on its own. It needs no phone and 
 
 Every setting is kept on the watch and comes back each time the app opens. That covers the basemap, hillshade opacity, map facing, keep screen on, dimming, maps as you go, arrival distance and the waypoint filter. The map's zoom, the waypoint you chose and the package on the map are kept too. The one exception: a newly received package brings the web app's basemap and hillshade opacity with it. You can change them again on the watch, and those changes are then kept.
 
+## Imported places (GPX)
+
+Places imported from GPX files in the web app (*My Places*), such as cave locations, come to the watch when *Include my imported places* is ticked there before *Send to watch*. The watch keeps them apart from the packages, so they show whichever package is on the map, and they stay until you delete them:
+- **On the watch:** they appear as teal pins, lettered by their name, in the list, the details (name, description, elevation) and the guide, like any waypoint. The "nearest" line names them.
+- **Filtering:** each GPX file is its own group under *Filter waypoints*, where you can hide it.
+- **Sending more:** places add to those already on the watch. The same place sent again replaces itself. Sending only places, with no scan results or map, leaves the map as it is.
+- **Deleting:** *Filter waypoints › Delete <file>* deletes one file's places (tap twice). *Settings › Imported places* deletes all of them.
+
 ## Basemap and hillshade
 
 The map shows a basemap under the LiDAR hillshade, with the hillshade see-through at **70%** by default: the same defaults as the web app (satellite imagery, 70%). When waypoints arrive from the phone, the watch takes the web app's current settings, its basemap and hillshade opacity. You can still change them on the watch:
@@ -98,7 +106,7 @@ Open this folder in Android Studio, or run `./gradlew assembleRelease`. You need
 
 ## How the transfer works
 
-- **The package.** `LWP1`, then the JSON's length (4 bytes, big-endian), then the JSON, then the hillshade JPEG and the basemap JPEG, each with its length in the JSON (`img.len`, `base.len`). `base` has `src` (`satellite` or `topo`) and the same edges as `img`. `view` carries the web app's basemap and hillshade opacity (`base`, `hs`). The JSON holds `name`, `made`, `img` (the hillshade's edges `n s e w` in degrees and its size in pixels) and `wps`. Each waypoint in `wps` has `id lat lon kind letter color score d h conf notes ol`, where `ol` is the outline as `[lat, lon]` pairs. When you have notes for the site in the web app, there is also `name` (your name / note) and `un` (your other notes). These are copied to the top of `notes` too, as `Note: …`, for older watch apps.
+- **The package.** `LWP1`, then the JSON's length (4 bytes, big-endian), then the JSON, then the hillshade JPEG and the basemap JPEG, each with its length in the JSON (`img.len`, `base.len`). `base` has `src` (`satellite` or `topo`) and the same edges as `img`. `view` carries the web app's basemap and hillshade opacity (`base`, `hs`). The JSON holds `name`, `made`, `img` (the hillshade's edges `n s e w` in degrees and its size in pixels) and `wps`. Each waypoint in `wps` has `id lat lon kind letter color score d h conf notes ol`, where `ol` is the outline as `[lat, lon]` pairs. When you have notes for the site in the web app, there is also `name` (your name / note) and `un` (your other notes). These are copied to the top of `notes` too, as `Note: …`, for older watch apps. `places` (optional) holds imported GPX places in the same form, each with `kind` set to its file's name. The watch keeps them in `places.json`, apart from the package.
 - **The Bluetooth service.** It is `7b1e0001-5a4c-4b8e-9d3a-2f6c1a9e4d10`, with two characteristics:
   - **RX** (`…0002`, write, or write without response): the phone sends BEGIN (`1`, size, CRC-32), then DATA pieces (`2`, offset, then the bytes), then END (`3`).
     - In careful mode, each DATA piece holds up to 495 bytes and is a confirmed write.

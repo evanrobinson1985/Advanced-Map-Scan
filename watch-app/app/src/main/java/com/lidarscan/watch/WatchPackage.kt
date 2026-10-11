@@ -1,5 +1,6 @@
 package com.lidarscan.watch
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.util.zip.CRC32
@@ -38,6 +39,9 @@ data class WatchPackage(
     /** The web app's map settings when it was sent: its basemap and hillshade opacity. */
     val viewBase: String? = null,
     val viewHillshadeOpacity: Float? = null,
+    /** Places imported from GPX files on the phone: kept on the watch apart from the package. */
+    val places: List<Waypoint> = emptyList(),
+    val placesJson: String? = null,
 ) {
     companion object {
         private val MAGIC = byteArrayOf('L'.code.toByte(), 'W'.code.toByte(), 'P'.code.toByte(), '1'.code.toByte())
@@ -67,14 +71,8 @@ data class WatchPackage(
             return fromJson(json, imageBytes, baseBytes)
         }
 
-        private fun mapImage(o: JSONObject) = MapImage(o.getDouble("n"), o.getDouble("s"), o.getDouble("e"), o.getDouble("w"), o.optInt("pw"), o.optInt("ph"))
-
-        fun fromJson(json: JSONObject, imageBytes: ByteArray?, baseBytes: ByteArray? = null): WatchPackage {
-            val img = json.optJSONObject("img")
-            val image = img?.let { mapImage(it) }
-            val base = json.optJSONObject("base")
-            val view = json.optJSONObject("view")
-            val arr = json.optJSONArray("wps")
+        /** Waypoints in the web app's form (the package's "wps", and its imported places). */
+        fun waypointsOf(arr: JSONArray?): List<Waypoint> {
             val wps = ArrayList<Waypoint>()
             if (arr != null) for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
@@ -107,8 +105,21 @@ data class WatchPackage(
                     )
                 )
             }
+            return wps
+        }
+
+        private fun mapImage(o: JSONObject) = MapImage(o.getDouble("n"), o.getDouble("s"), o.getDouble("e"), o.getDouble("w"), o.optInt("pw"), o.optInt("ph"))
+
+        fun fromJson(json: JSONObject, imageBytes: ByteArray?, baseBytes: ByteArray? = null): WatchPackage {
+            val img = json.optJSONObject("img")
+            val image = img?.let { mapImage(it) }
+            val base = json.optJSONObject("base")
+            val view = json.optJSONObject("view")
+            val wps = waypointsOf(json.optJSONArray("wps"))
             return WatchPackage(
                 json.optString("name", "LiDAR scan"), json.optLong("made", 0L), image, wps, imageBytes,
+                places = waypointsOf(json.optJSONArray("places")),
+                placesJson = json.optJSONArray("places")?.toString(),
                 baseImage = if (base != null && baseBytes != null) mapImage(base) else null,
                 baseBytes = if (base != null) baseBytes else null,
                 baseSrc = base?.optString("src", "satellite"),

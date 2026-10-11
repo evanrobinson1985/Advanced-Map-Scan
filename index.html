@@ -111,12 +111,26 @@
     </div>
 
     <div class="control-group">
+        <h4>My Places (GPX)</h4>
+        <input type="file" id="placesInput" accept=".gpx,application/gpx+xml" multiple style="display:none" onchange="placesImport(this)">
+        <div style="display:flex; gap:6px;">
+            <button onclick="document.getElementById('placesInput').click()" style="flex:2; margin-top:0;">&#128205; Import GPX (caves, sites)</button>
+            <button onclick="placesClear()" style="flex:1; margin-top:0; background:#fee2e2; color:#991b1b;">Delete all</button>
+        </div>
+        <label style="display:flex; gap:6px; align-items:center; font-size:0.8rem; margin-top:6px;"><input type="checkbox" id="placesShow" checked onchange="placesDraw()"> Show them on the map</label>
+        <div id="placesFiles" style="font-size:0.75rem; margin-top:4px;"></div>
+        <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Waypoints from GPX files (cave locations, known sites, from a GPS, Gaia, CalTopo, BaseCamp and so on) are kept in this browser, so they are here next time, and shown as teal pins. To take them to the watch, tick <i>Include my imported places</i> under Watch (off unless you choose it; remembered): the watch keeps them for good, whichever map it shows, until you delete them there. Each file is its own group, which you can hide on the watch. They stay on this device and the watch: nothing is uploaded. Cave locations are protected by law in many states: don't share them.</div>
+        <div id="placesStatus" style="font-size:0.75rem; color:#075985; margin-top:4px; line-height:1.4;"></div>
+    </div>
+
+    <div class="control-group">
         <h4>Watch</h4>
         <div class="slider-row" style="margin:0;"><label style="font-size:0.8rem; flex:1;">Waypoints</label>
             <select id="watchScope" style="flex:2;"><option value="all">All results on the map</option><option value="view">Results in view</option></select></div>
         <div class="slider-row" style="margin:6px 0 0;"><label style="font-size:0.8rem; flex:1;">Hillshade</label>
             <select id="watchDetail" style="flex:2;"><option value="1">1 m (sharpest)</option><option value="2" selected>2 m (faster to send)</option><option value="none">No map (waypoints only)</option></select></div>
         <label style="display:flex; gap:6px; align-items:center; font-size:0.8rem; margin-top:6px;"><input type="checkbox" id="watchBasemap" checked> Include the basemap (satellite or topo, as shown here) so it works with no signal</label>
+        <label style="display:flex; gap:6px; align-items:center; font-size:0.8rem; margin-top:4px;"><input type="checkbox" id="watchPlaces" onchange="try { localStorage.setItem('watchPlaces', this.checked ? '1' : '0'); } catch (e) { }"> Include my imported places (<span id="watchPlacesN">0</span>)</label>
         <button id="watchSendBtn" onclick="sendToWatch()" style="margin-top:6px; background:#1e293b; color:#fff;">&#8986; Send to watch</button>
         <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">For the LiDAR Guide app on a Galaxy Watch (Wear OS). On the watch open LiDAR Guide &rsaquo; &#9776; &rsaquo; Receive from phone, then press Send here and pick the watch. Needs Chrome on Android. The watch then works on its own: the hillshade, your live position and heading, a guide arrow to the waypoint you pick and its details.</div>
         <div id="watchStatus" style="font-size:0.75rem; color:#075985; margin-top:4px; line-height:1.4;"></div>
@@ -1467,6 +1481,90 @@
     // (satellite imagery or USGS Topo, as one image from the map server, the
     // same edges as the hillshade so it lies under it exactly); null when it
     // can't be had (no such picture for street maps, or offline)
+    // ---- My places: waypoints imported from GPX files ----
+    // Kept in this browser (IndexedDB, as the deep-learning samples are), drawn
+    // as teal pins and sent to the watch, which keeps them apart from its
+    // packages. Each place: { id, lat, lon, name, desc, ele, sym, file, ts }
+    let myPlaces = [], placesLayer = null;
+    const PLACES_COLOR = '#0891b2', PLACES_MAX_WATCH = 5000;
+    function parseGPX(text, fileName) {
+        const doc = new DOMParser().parseFromString(text, 'application/xml');
+        if (doc.getElementsByTagName('parsererror').length) throw new Error('not a readable GPX file');
+        const kids = (el, tag) => { for (const c of el.children) if (c.localName === tag) return (c.textContent || '').trim(); return ''; };
+        // waypoints; a file holding only a route gives its points instead
+        let pts = [...doc.getElementsByTagNameNS('*', 'wpt')];
+        if (!pts.length) pts = [...doc.getElementsByTagNameNS('*', 'rtept')];
+        const file = fileName.replace(/\.gpx$/i, ''), out = [];
+        for (const p of pts) {
+            const lat = parseFloat(p.getAttribute('lat')), lon = parseFloat(p.getAttribute('lon'));
+            if (!(lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180)) continue;
+            const name = kids(p, 'name'), ele = parseFloat(kids(p, 'ele'));
+            const desc = [kids(p, 'desc'), kids(p, 'cmt')].filter((t, i, a) => t && a.indexOf(t) === i).join(' — ');
+            out.push({ id: 'p' + Math.round(lat * 1e5) + '_' + Math.round(lon * 1e5) + '_' + (crc32(new TextEncoder().encode(name)) % 46656).toString(36),
+                       lat, lon, name: name.slice(0, 120), desc: desc.slice(0, 600), ele: isFinite(ele) ? ele : null, sym: kids(p, 'sym').slice(0, 40), type: kids(p, 'type').slice(0, 40), file, ts: Date.now() });
+        }
+        return out;
+    }
+    async function placesImport(input) {
+        const files = [...(input.files || [])]; input.value = '';
+        const say = (t) => { document.getElementById('placesStatus').innerText = t; };
+        const msgs = [];
+        for (const f of files) {
+            try {
+                const got = parseGPX(await f.text(), f.name);
+                if (!got.length) { msgs.push(`${f.name}: no waypoints in it.`); continue; }
+                // the same place again (same spot and name) is replaced, not doubled
+                const have = new Map(myPlaces.map(p => [p.id, p]));
+                let added = 0; for (const p of got) { if (!have.has(p.id)) added++; have.set(p.id, p); }
+                myPlaces = [...have.values()];
+                msgs.push(`${f.name}: ${got.length} place${got.length === 1 ? '' : 's'}${added < got.length ? ` (${got.length - added} already here, updated)` : ''}.`);
+            } catch (e) { console.error(e); msgs.push(`${f.name}: could not read it (${e.message || e}).`); }
+        }
+        await placesSave(); placesDraw();
+        say(msgs.join(' ') + (myPlaces.length ? ' To take them to the watch, tick Include my imported places under Watch.' : ''));
+        const added = myPlaces.filter(p => files.some(f => f.name.replace(/\.gpx$/i, '') === p.file));
+        if (added.length && !added.some(p => map.getBounds().contains([p.lat, p.lon]))) map.fitBounds(L.latLngBounds(added.map(p => [p.lat, p.lon])).pad(0.1), { maxZoom: 15 });
+    }
+    async function placesSave() { try { await idbPut('myPlaces', myPlaces); } catch (e) { console.warn('Could not save the imported places', e); } placesList(); }
+    function placesClear(file) {
+        const n = file == null ? myPlaces.length : myPlaces.filter(p => p.file === file).length;
+        if (!n || !confirm(`Delete ${n} imported place${n === 1 ? '' : 's'}${file == null ? '' : ` from "${file}"`} from this browser? (The watch keeps its copy until you delete it there.)`)) return;
+        myPlaces = file == null ? [] : myPlaces.filter(p => p.file !== file);
+        placesSave(); placesDraw();
+    }
+    function placesList() {
+        const el = document.getElementById('placesFiles'), n = document.getElementById('watchPlacesN');
+        if (n) n.innerText = myPlaces.length;
+        if (!el) return;
+        const byFile = new Map(); for (const p of myPlaces) byFile.set(p.file, (byFile.get(p.file) || 0) + 1);
+        el.innerHTML = [...byFile].map(([f, c]) => `<div style="display:flex;justify-content:space-between;gap:6px;padding:2px 0;border-top:1px solid #e2e8f0;"><span><span style="color:${PLACES_COLOR};">&#9679;</span> ${escapeHtml(f)} (${c})</span><a href="#" onclick="event.preventDefault(); placesClear(${escapeHtml(JSON.stringify(f))});" style="color:#991b1b;">delete</a></div>`).join('');
+    }
+    function placesDraw() {
+        if (placesLayer) { map.removeLayer(placesLayer); placesLayer = null; }
+        if (!myPlaces.length || !(document.getElementById('placesShow') || { checked: true }).checked) return;
+        const rend = L.canvas({ padding: 0.3 });
+        placesLayer = L.layerGroup(myPlaces.map(p => L.circleMarker([p.lat, p.lon], { renderer: rend, radius: 6, color: '#fff', weight: 2, fillColor: PLACES_COLOR, fillOpacity: 1 })
+            .bindPopup(() => `<b>${escapeHtml(p.name || 'Place')}</b><br><i style="color:#64748b">Imported from ${escapeHtml(p.file)}.gpx</i><br>` +
+                (p.desc ? escapeHtml(p.desc) + '<br>' : '') + (p.sym || p.type ? `<span style="color:#64748b">${escapeHtml([p.type, p.sym].filter(Boolean).join(', '))}</span><br>` : '') +
+                (p.ele != null ? `<b>Elevation:</b> ${metersToFeetInches(p.ele)}<br>` : '') + `${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}`))).addTo(map);
+    }
+    // places for the watch, in its waypoint form (all, or those in an area)
+    function watchPlaces(area) {
+        if (!(document.getElementById('watchPlaces') || {}).checked) return [];
+        const inA = (p) => !area || (p.lat <= area.n && p.lat >= area.s && p.lon <= area.e && p.lon >= area.w);
+        return myPlaces.filter(inA).slice(0, PLACES_MAX_WATCH).map(p => {
+            const o = { id: p.id, lat: +p.lat.toFixed(7), lon: +p.lon.toFixed(7), kind: p.file, letter: ((p.name || p.file).match(/[A-Za-z0-9]/) || ['P'])[0].toUpperCase(), color: PLACES_COLOR,
+                        score: null, d: null, h: null, conf: false, notes: [] };
+            if (p.name) o.name = p.name;
+            if (p.desc) o.notes.push(p.desc);
+            if (p.type || p.sym) o.notes.push([p.type, p.sym].filter(Boolean).join(', '));
+            if (p.ele != null) o.notes.push('Elevation: ' + Math.round(p.ele / FT_TO_M) + ' ft');
+            return o;
+        });
+    }
+    try { const cb = document.getElementById('watchPlaces'); if (cb) cb.checked = localStorage.getItem('watchPlaces') === '1'; } catch (e) { }
+    setTimeout(() => idbGet('myPlaces').then(v => { myPlaces = Array.isArray(v) ? v : []; placesList(); placesDraw(); }).catch(e => console.warn('Could not read the imported places', e)), 0);
+
     function currentBasemapKey() { return map.hasLayer(satellite) ? 'satellite' : map.hasLayer(topo) ? 'topo' : map.hasLayer(street) ? 'street' : 'none'; }
     async function watchBasemapPicture(key, a, pw, ph) {
         const svc = key === 'satellite' ? 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer'
@@ -1489,6 +1587,7 @@
         const g = fullDemGrid;
         const area = scope === 'view' ? view : (g ? { ...g.bounds } : view);
         const wps = watchWaypoints(scope === 'view' ? view : null);
+        const places = watchPlaces(scope === 'view' ? view : null);
         let hs = null;
         if (det !== 'none' && g) { watchSay('Making the hillshade for the watch...'); hs = await watchHillshade(area, parseFloat(det), det === '1' ? 2400 : 1600); }
         // the map settings here go with them, as the watch's defaults: the basemap and the hillshade's opacity
@@ -1501,6 +1600,7 @@
             base = await watchBasemapPicture(baseKey, hs.img, hs.img.pw, hs.img.ph);
         }
         const json = { v: 1, name: (document.getElementById('watchName') || {}).value || `LiDAR scan ${new Date().toLocaleDateString()}`, made: Date.now(), wps, view: viewSettings };
+        if (places.length) json.places = places;   // kept on the watch apart from the package
         if (hs) json.img = { ...hs.img, len: hs.bytes.length };
         if (base) json.base = { ...base.img, len: base.bytes.length };
         const jb = new TextEncoder().encode(JSON.stringify(json));
@@ -1510,7 +1610,7 @@
         out.set(jb, 8);
         if (hs) out.set(hs.bytes, 8 + jb.length);
         if (base) out.set(base.bytes, 8 + jb.length + (hs ? hs.bytes.length : 0));
-        return { bytes: out, nWps: wps.length, hasMap: !!hs, hasBase: !!base, baseKey };
+        return { bytes: out, nWps: wps.length, nPlaces: places.length, hasMap: !!hs, hasBase: !!base, baseKey };
     }
     async function sendToWatch() {
         if (watchBusy) return;
@@ -1525,7 +1625,7 @@
         let server = null;
         try {
             const pkg = await buildWatchPackage();
-            if (!pkg.nWps && !pkg.hasMap) { watchSay('Nothing to send: scan an area first (or download its terrain for the map).'); return; }
+            if (!pkg.nWps && !pkg.hasMap && !pkg.nPlaces) { watchSay('Nothing to send: scan an area first (or download its terrain for the map).'); return; }
             watchSay(`Connecting to ${device.name || 'the watch'}...`);
             server = await device.gatt.connect();
             const svc = await server.getPrimaryService(WATCH_SVC);
