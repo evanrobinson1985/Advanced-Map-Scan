@@ -9,6 +9,7 @@ Once the waypoints are on the watch, it works on its own. It needs no phone and 
 - **Map** (opens first). The hillshade, with every waypoint as a coloured letter in the web app's colours. Outlines show when you zoom in. You are the blue dot with an arrow for the way you face, inside a circle for the GPS accuracy.
   - **+** and **−** zoom; double-tap zooms in. Drag to look around.
   - **◎** follows you again after you drag.
+  - The map stays where you left it while the app is open. Back from a waypoint's details, the list or Settings, it is where you dragged it, at the same zoom; **◎** takes you back to your location. A waypoint's *Map* button centres the map on that waypoint.
   - The map stays where you left it while the app is open. Back from a waypoint's details, the list or Settings, it is where you dragged it, at the same zoom. A waypoint's *Map* button centres the map on that waypoint.
   - **N** / **▲** switches between north up and the map turned to face your heading.
   - Tap a waypoint for its details.
