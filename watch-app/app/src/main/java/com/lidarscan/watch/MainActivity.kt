@@ -18,6 +18,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -123,6 +124,17 @@ class AppModel(private val ctx: Context) {
         set(v) { if (v != selectedState) { selectedState = v; Store.setSelectedWaypoint(ctx, v) } }
     /** The map's zoom (metres per screen pixel) when it was last changed. */
     var mapMpp = Store.mapZoom(ctx); private set
+    /**
+     * Where the map is looking while the app is open: following you, or
+     * dragged to a spot. Kept here, not in the map screen, so it is still
+     * there after a waypoint's details or the list.
+     */
+    var mapZoomNow by mutableFloatStateOf(mapMpp)
+    var mapFollow by mutableStateOf(true)
+    var mapPanLat by mutableStateOf(Double.NaN)
+    var mapPanLon by mutableStateOf(Double.NaN)
+    /** Centres the map on a waypoint (stops following you). */
+    fun showOnMap(w: Waypoint) { mapFollow = false; mapPanLat = w.lat; mapPanLon = w.lon }
     fun saveZoom(v: Float) { if (v != mapMpp) { mapMpp = v; Store.setMapZoom(ctx, v) } }
     var headingUp by mutableStateOf(Store.headingUp(ctx)); private set
     var onlineMaps by mutableStateOf(Store.onlineMaps(ctx)); private set

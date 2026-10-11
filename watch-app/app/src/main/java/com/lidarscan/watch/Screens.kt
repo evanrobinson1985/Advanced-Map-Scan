@@ -28,7 +28,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import kotlinx.coroutines.delay
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -87,7 +86,7 @@ fun WatchApp(act: MainActivity) {
             }
             composable("detail/{id}") { e ->
                 val id = e.arguments?.getString("id") ?: ""
-                DetailScreen(act, id, onGuide = { nav.navigate("guide/$id") }, onMap = { act.model.selectedId = id; nav.popBackStack("map", false) })
+                DetailScreen(act, id, onGuide = { nav.navigate("guide/$id") }, onMap = { act.model.selectedId = id; act.model.waypoint(id)?.let { act.model.showOnMap(it) }; nav.popBackStack("map", false) })
             }
             composable("guide/{id}") { e -> GuideScreen(act, e.arguments?.getString("id") ?: "") }
             composable("receive") { ReceiveScreen(act, onDone = { nav.popBackStack("map", false) }) }
@@ -109,11 +108,13 @@ fun MapScreen(act: MainActivity, onList: () -> Unit, onWaypoint: (String) -> Uni
     val m = act.model
     val fix by act.tracker.fix.collectAsState()
     val heading by act.tracker.heading.collectAsState()
-    var mpp by remember { mutableFloatStateOf(m.mapMpp) }       // metres per screen pixel (as last left)
+    // where the map is looking, kept in the model: back from a waypoint's
+    // details, the map is where you left it
+    var mpp by m::mapZoomNow                                    // metres per screen pixel
     LaunchedEffect(mpp) { delay(800); m.saveZoom(mpp) }
-    var follow by remember { mutableStateOf(true) }
-    var panLat by remember { mutableStateOf(Double.NaN) }
-    var panLon by remember { mutableStateOf(Double.NaN) }
+    var follow by m::mapFollow
+    var panLat by m::mapPanLat
+    var panLon by m::mapPanLon
     var size by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(fix) { fix?.let { m.maybeFetchOnline(it) } }
