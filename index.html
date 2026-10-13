@@ -121,6 +121,16 @@
         <div id="placesFiles" style="font-size:0.75rem; margin-top:4px;"></div>
         <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Waypoints from GPX files (cave locations, known sites, from a GPS, Gaia, CalTopo, BaseCamp and so on) are kept in this browser, so they are here next time, and shown as teal pins. To take them to the watch, tick <i>Include my imported places</i> under Watch (off unless you choose it; remembered): the watch keeps them for good, whichever map it shows, until you delete them there. Each file is its own group, which you can hide on the watch. They stay on this device and the watch: nothing is uploaded. Cave locations are protected by law in many states: don't share them.</div>
         <div id="placesStatus" style="font-size:0.75rem; color:#075985; margin-top:4px; line-height:1.4;"></div>
+        <div style="margin-top:8px; padding-top:6px; border-top:1px solid #e2e8f0;">
+            <b style="font-size:0.85rem;">Compare scans with my caves</b>
+            <label style="display:flex; gap:6px; align-items:center; font-size:0.8rem; margin-top:4px;"><input type="checkbox" id="placesCompareOn" checked onchange="placesCompareSoon()"> After every scan, check which caves it found</label>
+            <div class="slider-row" style="margin:4px 0 0;"><label style="font-size:0.8rem; flex:1;">Counts as found within</label>
+                <select id="placesMatchFt" style="flex:1;" onchange="placesCompareSoon()"><option value="50">50 ft</option><option value="100" selected>100 ft</option><option value="200">200 ft</option><option value="400">400 ft</option></select></div>
+            <div id="placesCompare" style="font-size:0.78rem; margin-top:4px; line-height:1.45;"></div>
+            <button onclick="placesAspects()" style="margin-top:6px; font-size:0.8rem;">&#129517; Which way do my caves face?</button>
+            <div id="placesAspect" style="font-size:0.78rem; margin-top:4px; line-height:1.45;"></div>
+            <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Your imported places count as known cave locations. After each scan (any mode, deep learning, Scan All, scan as you go), the caves inside the scanned ground are marked on the map: a green ring when a detection lies within the distance above, a red dashed ring when none does. The summary shows how many were found, by which scans, and how many detections sit at known caves. <i>Which way do my caves face?</i> measures the hillside at each cave in the loaded LiDAR and compares it with all the steep ground around them, so a lean towards the south shows only if the caves favour it more than the hills themselves do.</div>
+        </div>
     </div>
 
     <div class="control-group">
@@ -1520,7 +1530,7 @@
                 msgs.push(`${f.name}: ${got.length} place${got.length === 1 ? '' : 's'}${added < got.length ? ` (${got.length - added} already here, updated)` : ''}.`);
             } catch (e) { console.error(e); msgs.push(`${f.name}: could not read it (${e.message || e}).`); }
         }
-        await placesSave(); placesDraw();
+        await placesSave(); placesDraw(); placesCompareSoon();
         say(msgs.join(' ') + (myPlaces.length ? ' To take them to the watch, tick Include my imported places under Watch.' : ''));
         const added = myPlaces.filter(p => files.some(f => f.name.replace(/\.gpx$/i, '') === p.file));
         if (added.length && !added.some(p => map.getBounds().contains([p.lat, p.lon]))) map.fitBounds(L.latLngBounds(added.map(p => [p.lat, p.lon])).pad(0.1), { maxZoom: 15 });
@@ -1530,7 +1540,7 @@
         const n = file == null ? myPlaces.length : myPlaces.filter(p => p.file === file).length;
         if (!n || !confirm(`Delete ${n} imported place${n === 1 ? '' : 's'}${file == null ? '' : ` from "${file}"`} from this browser? (The watch keeps its copy until you delete it there.)`)) return;
         myPlaces = file == null ? [] : myPlaces.filter(p => p.file !== file);
-        placesSave(); placesDraw();
+        placesSave(); placesDraw(); placesCompareSoon();
     }
     function placesList() {
         const el = document.getElementById('placesFiles'), n = document.getElementById('watchPlacesN');
@@ -1548,6 +1558,132 @@
                 (p.desc ? escapeHtml(p.desc) + '<br>' : '') + (p.sym || p.type ? `<span style="color:#64748b">${escapeHtml([p.type, p.sym].filter(Boolean).join(', '))}</span><br>` : '') +
                 (p.ele != null ? `<b>Elevation:</b> ${metersToFeetInches(p.ele)}<br>` : '') + `${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}`))).addTo(map);
     }
+    // ---- Comparing scans with the imported caves ----
+    let placesRings = null, placesCompareTimer = null;
+    function placesCompareSoon() { clearTimeout(placesCompareTimer); placesCompareTimer = setTimeout(placesCompare, 250); }
+    // the ground scanned: the download, and the areas scanned as you go
+    function scannedRects() {
+        const r = [];
+        if (fullDemGrid && fullDemGrid.bounds) r.push(fullDemGrid.bounds);
+        if (typeof sag !== 'undefined') for (const a of sag.areas) if (!a.failed && a.r) r.push(a.r);
+        return r;
+    }
+    const modeName = (m) => (MODE_STYLE[m] && MODE_STYLE[m].label) || (typeof DL_PROFILES !== 'undefined' && Object.values(DL_PROFILES).find(p => p.RESULT_MODE === m) ? 'Deep learning: ' + Object.values(DL_PROFILES).find(p => p.RESULT_MODE === m).label : m);
+    function placesCompare() {
+        const el = document.getElementById('placesCompare'); if (!el) return;
+        if (placesRings) { map.removeLayer(placesRings); placesRings = null; }
+        if (!(document.getElementById('placesCompareOn') || {}).checked) { el.innerHTML = ''; return; }
+        if (!myPlaces.length) { el.innerHTML = '<span style="color:#64748b;">Import your cave locations (GPX) to compare scans with them.</span>'; return; }
+        const rects = scannedRects();
+        const inR = (b, la, lo) => la <= b.n && la >= b.s && lo <= b.e && lo >= b.w;
+        const caves = myPlaces.filter(p => rects.some(b => inR(b, p.lat, p.lon)));
+        const feats = detectedFeatures.filter(f => f.lat != null && f.lon != null && f.mode !== 'settlement');
+        if (!caves.length) { el.innerHTML = '<span style="color:#64748b;">None of your caves lie in the ground loaded or scanned so far.</span>'; return; }
+        const R = feetToMeters(parseFloat((document.getElementById('placesMatchFt') || { value: 100 }).value));
+        // detections in cells R wide, so each cave looks at its 3x3 cells only
+        const cell = R / 111320, key = (la, lo) => Math.floor(la / cell) + ',' + Math.floor(lo / (cell / Math.cos(la * Math.PI / 180)));
+        const grid = new Map();
+        for (const f of feats) { const k = key(f.lat, f.lon); if (!grid.has(k)) grid.set(k, []); grid.get(k).push(f); }
+        const near = (la, lo) => {
+            const out = [], i0 = Math.floor(la / cell), j0 = Math.floor(lo / (cell / Math.cos(la * Math.PI / 180)));
+            for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) for (const f of grid.get((i0 + i) + ',' + (j0 + j)) || []) {
+                const d = approxMetersBetween(la, lo, f.lat, f.lon); if (d <= R) out.push({ f, d });
+            }
+            return out.sort((a, b) => a.d - b.d);
+        };
+        const found = [], missed = [], byMode = new Map(), featAtCave = new Set();
+        for (const c of caves) {
+            const hits = near(c.lat, c.lon);
+            if (hits.length) {
+                found.push({ c, hits });
+                for (const m of new Set(hits.map(h => h.f.mode))) byMode.set(m, (byMode.get(m) || 0) + 1);
+                for (const h of hits) featAtCave.add(h.f);
+            } else missed.push(c);
+        }
+        const featByMode = new Map(), atByMode = new Map();
+        for (const f of feats) { featByMode.set(f.mode, (featByMode.get(f.mode) || 0) + 1); if (featAtCave.has(f)) atByMode.set(f.mode, (atByMode.get(f.mode) || 0) + 1); }
+        // rings on the map
+        placesRings = L.layerGroup();
+        const ringPop = (c, hits) => `<b>${escapeHtml(c.name || 'Cave')}</b> <i style="color:#64748b">(${escapeHtml(c.file)})</i><br>` +
+            (hits ? '<b style="color:#166534;">&#10003; Found</b> by ' + [...new Map(hits.map(h => [h.f.mode, h])).values()].map(h => `${escapeHtml(modeName(h.f.mode))} (${Math.round(h.d / FT_TO_M)} ft${h.f.matchScore != null ? ', ' + Math.round(h.f.matchScore) + '%' : ''})`).join(', ')
+                  : `<b style="color:#b91c1c;">&#10007; Not found</b>: no detection within ${Math.round(R / FT_TO_M)} ft`);
+        for (const { c, hits } of found) L.circle([c.lat, c.lon], { radius: R, color: '#16a34a', weight: 2, fill: false }).bindPopup(ringPop(c, hits)).addTo(placesRings);
+        for (const c of missed) L.circle([c.lat, c.lon], { radius: R, color: '#dc2626', weight: 2, dashArray: '5,4', fill: false }).bindPopup(ringPop(c, null)).addTo(placesRings);
+        placesRings.addTo(map);
+        const pct = (a, b) => b ? Math.round(100 * a / b) + '%' : '-';
+        const rows = [...featByMode.keys()].sort((a, b) => (byMode.get(b) || 0) - (byMode.get(a) || 0)).map(m =>
+            `<tr><td>${escapeHtml(modeName(m))}</td><td style="text-align:right;">${byMode.get(m) || 0}</td><td style="text-align:right;">${atByMode.get(m) || 0} of ${featByMode.get(m)}</td></tr>`).join('');
+        window.__placesMissed = missed;
+        el.innerHTML = `<b>${caves.length}</b> of your caves lie in the scanned ground. ` + (feats.length
+            ? `<b style="color:#166534;">${found.length} found (${pct(found.length, caves.length)})</b>, <b style="color:#b91c1c;">${missed.length} missed</b>, within ${Math.round(R / FT_TO_M)} ft.` +
+              `<table style="width:100%;font-size:0.75rem;margin-top:4px;border-collapse:collapse;"><tr style="color:#64748b;"><td>Scan</td><td style="text-align:right;">caves found</td><td style="text-align:right;">its hits at a cave</td></tr>${rows}</table>` +
+              `<div style="color:#64748b;margin-top:2px;">${feats.length - featAtCave.size} detection${feats.length - featAtCave.size === 1 ? '' : 's'} not at a known cave: possible new sites, or false alarms.</div>` +
+              (missed.length ? `<div style="margin-top:2px;">Missed: ${missed.slice(0, 8).map((c, i) => `<a href="#" onclick="event.preventDefault(); const c = window.__placesMissed[${i}]; map.setView([c.lat, c.lon], 18);">${escapeHtml(c.name || 'cave')}</a>`).join(', ')}${missed.length > 8 ? ` and ${missed.length - 8} more (red rings)` : ''}</div>` : '')
+            : ' Run a scan to see which of them it finds.');
+    }
+
+    // Which way the ground faces at the caves (in the loaded LiDAR), against
+    // all the sloping ground around them: the hillside at each cave across
+    // about 30 m, in 16 directions; caves on flatter ground (under 10
+    // degrees: sinkholes, flats) face nowhere and are counted apart
+    function placesAspects() {
+        const el = document.getElementById('placesAspect');
+        const g = fullDemGrid;
+        if (!g || !g.data) { el.innerHTML = '<span style="color:#b91c1c;">Download or load the LiDAR terrain around your caves first.</span>'; return; }
+        const b = g.bounds, W = g.w, H = g.h, res = g.res, k = Math.max(1, Math.round(15 / res)), MIN_SLOPE = 10;
+        const at = (r, c) => {
+            if (r < k || c < k || r >= H - k || c >= W - k) return null;
+            const z = (rr, cc) => g.data[rr * W + cc];
+            const zE = z(r, c + k), zW = z(r, c - k), zN = z(r - k, c), zS = z(r + k, c);
+            if (!(zE > -100 && zW > -100 && zN > -100 && zS > -100)) return null;
+            const dx = (zE - zW) / (2 * k * res), dn = (zN - zS) / (2 * k * res);
+            return { slope: Math.atan(Math.hypot(dx, dn)) * 180 / Math.PI, aspect: (Math.atan2(-dx, -dn) * 180 / Math.PI + 360) % 360 };
+        };
+        const sector = (a) => Math.round(a / 22.5) % 16;
+        const cave = new Array(16).fill(0), hill = new Array(16).fill(0);
+        let nIn = 0, nFlat = 0, nSlope = 0, slopeSum = 0;
+        for (const p of myPlaces) {
+            if (p.lat > b.n || p.lat < b.s || p.lon > b.e || p.lon < b.w) continue;
+            nIn++;
+            const a = at(Math.floor((b.n - p.lat) / (b.n - b.s) * H), Math.floor((p.lon - b.w) / (b.e - b.w) * W));
+            if (!a) continue;
+            if (a.slope < MIN_SLOPE) { nFlat++; continue; }
+            cave[sector(a.aspect)]++; nSlope++; slopeSum += a.slope;
+        }
+        if (!nIn) { el.innerHTML = '<span style="color:#b91c1c;">None of your caves lie in the loaded terrain. Download the LiDAR where they are, then try again.</span>'; return; }
+        // the hills: every sloping cell (about every 10 m)
+        const step = Math.max(1, Math.round(10 / res));
+        let nHill = 0;
+        for (let r = k; r < H - k; r += step) for (let c = k; c < W - k; c += step) { const a = at(r, c); if (a && a.slope >= MIN_SLOPE) { hill[sector(a.aspect)]++; nHill++; } }
+        if (!nSlope || !nHill) { el.innerHTML = `${nIn} cave${nIn === 1 ? '' : 's'} in the loaded terrain, but none on a slope of ${MIN_SLOPE}&deg; or more (${nFlat} on flatter ground), so there is no facing direction to compare.`; return; }
+        const names = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+        const cs = cave.map(v => v / nSlope), hs = hill.map(v => v / nHill);
+        // a rose: wedges = the caves' share, outline = the hills' share
+        const max = Math.max(...cs, ...hs), Rr = 70, C = 80;
+        const pt = (deg, r) => [C + r * Math.sin(deg * Math.PI / 180), C - r * Math.cos(deg * Math.PI / 180)];
+        let wedges = '', outline = '';
+        for (let i = 0; i < 16; i++) {
+            const r = Rr * Math.sqrt(cs[i] / max), a0 = i * 22.5 - 10, a1 = i * 22.5 + 10;
+            const [x0, y0] = pt(a0, r), [x1, y1] = pt(a1, r);
+            wedges += `<path d="M${C},${C} L${x0.toFixed(1)},${y0.toFixed(1)} A${r.toFixed(1)},${r.toFixed(1)} 0 0 1 ${x1.toFixed(1)},${y1.toFixed(1)} Z" fill="#0891b2" fill-opacity="0.8"/>`;
+            const [hx, hy] = pt(i * 22.5, Rr * Math.sqrt(hs[i] / max)); outline += (i ? 'L' : 'M') + hx.toFixed(1) + ',' + hy.toFixed(1);
+        }
+        const labels = ['N', 'E', 'S', 'W'].map((t, i) => { const [x, y] = pt(i * 90, Rr + 8); return `<text x="${x}" y="${y + 4}" text-anchor="middle" font-size="10" fill="#475569">${t}</text>`; }).join('');
+        const svg = `<svg viewBox="-12 -12 184 184" width="170" height="170" style="display:block;margin:4px auto;"><circle cx="${C}" cy="${C}" r="${Rr}" fill="none" stroke="#e2e8f0"/><circle cx="${C}" cy="${C}" r="${Rr / 2}" fill="none" stroke="#e2e8f0"/>${wedges}<path d="${outline}Z" fill="none" stroke="#f97316" stroke-width="1.5"/>${labels}</svg>`;
+        // the half facing south-east to south-west, and each direction's lean
+        const half = (arr) => [5, 6, 7, 8, 9, 10, 11].reduce((s2, i) => s2 + arr[i], 0) - (arr[5] + arr[11]) / 2;   // ESE..WSW, the end sectors half
+        const southC = half(cs), southH = half(hs);
+        const lean = cs.map((v, i) => ({ i, v, h: hs[i], r: hs[i] ? v / hs[i] : 0 })).filter(x => cave[x.i] >= 3).sort((a, b2) => b2.r - a.r);
+        const fmt = (x) => `${names[x.i]} ${Math.round(x.v * 100)}% of caves vs ${Math.round(x.h * 100)}% of hillsides (${x.r.toFixed(1)}&times;)`;
+        el.innerHTML = svg +
+            `<div style="text-align:center;color:#64748b;font-size:0.72rem;"><span style="color:#0891b2;">&#9632;</span> your caves &nbsp; <span style="color:#f97316;">&#9472;</span> all the hillsides here</div>` +
+            `<b>${nSlope}</b> cave${nSlope === 1 ? '' : 's'} on slopes of ${MIN_SLOPE}&deg;+ (average ${(slopeSum / nSlope).toFixed(0)}&deg;)` + (nFlat ? `; ${nFlat} on flatter ground (sinkholes, flats) left out` : '') + (nIn - nSlope - nFlat ? `; ${nIn - nSlope - nFlat} at the edge of the terrain left out` : '') + '.<br>' +
+            `Facing south-east to south-west: <b>${Math.round(southC * 100)}%</b> of caves vs ${Math.round(southH * 100)}% of the hillsides, ` +
+            (southH ? `<b>${(southC / southH).toFixed(1)}&times;</b> what the terrain alone would give.` : '') +
+            (lean.length ? `<br>Most favoured: ${lean.slice(0, 2).map(fmt).join('; ')}.<br>Least: ${lean.slice(-2).reverse().map(fmt).join('; ')}.` : '') +
+            (nSlope < 30 ? `<br><span style="color:#92400e;">Only ${nSlope} caves: too few to be sure of a pattern. Load a bigger area to include more.</span>` : '');
+    }
+
     // places for the watch, in its waypoint form (all, or those in an area)
     function watchPlaces(area) {
         if (!(document.getElementById('watchPlaces') || {}).checked) return [];
@@ -1563,7 +1699,7 @@
         });
     }
     try { const cb = document.getElementById('watchPlaces'); if (cb) cb.checked = localStorage.getItem('watchPlaces') === '1'; } catch (e) { }
-    setTimeout(() => idbGet('myPlaces').then(v => { myPlaces = Array.isArray(v) ? v : []; placesList(); placesDraw(); }).catch(e => console.warn('Could not read the imported places', e)), 0);
+    setTimeout(() => idbGet('myPlaces').then(v => { myPlaces = Array.isArray(v) ? v : []; placesList(); placesDraw(); placesCompareSoon(); }).catch(e => console.warn('Could not read the imported places', e)), 0);
 
     function currentBasemapKey() { return map.hasLayer(satellite) ? 'satellite' : map.hasLayer(topo) ? 'topo' : map.hasLayer(street) ? 'street' : 'none'; }
     async function watchBasemapPicture(key, a, pw, ph) {
@@ -13987,6 +14123,7 @@ onmessage = (e) => {
     }
     function updateExportButtons() {
         const hasFeatures = detectedFeatures.length > 0;
+        if (typeof placesCompareSoon === 'function') placesCompareSoon();   // which of your caves the scans found
         document.getElementById('exportShpBtn').style.display = hasFeatures ? 'block' : 'none';
         document.getElementById('exportGeoJsonBtn').style.display = hasFeatures ? 'block' : 'none';
         document.getElementById('exportTiffBtn').style.display = lastExportRaster ? 'block' : 'none';
