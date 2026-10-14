@@ -74,6 +74,14 @@ A summary lists what was detected and every value set, and all sliders stay adju
   - **On the map:** a green ring marks a cave with a detection within the chosen distance (50–400 ft, 100 by default), and a red dashed ring marks one with none. Tap a ring for which scans found it and how far off they were.
   - **The summary:** how many caves were found and missed, which scan modes found them, how many of each mode's detections sit at a known cave, and how many don't. The ones that don't are possible new sites, or false alarms.
   - **Missed caves:** they are listed with links, and you can switch the comparison off.
+- **Learning from your caves.** *Learn from my caves* teaches the cave scans from your imported caves in the loaded LiDAR.
+  - **Measuring:** at each cave it measures what the Caves / sinkholes, Cave entrance, Rockshelter and Ceremonial karst scans see, as a scan would. That is the nearest feature each scan would trace, within 80 ft of the point to allow for GPS error, measured with the drainage network and wall slopes.
+  - **Examples:** these are kept as confirmed examples, so similar shapes rank higher, as with caves you confirm by hand.
+  - **Limits:** each scan's size, depth and roundness limits are widened to take in 90% of them. The odd outlier doesn't open them wide, and at least 5 are needed.
+  - **Why caves were missed:** for the Caves / sinkholes scan it reports which rules dropped your caves until now, such as too shallow for its width, a creek through it, or walls too gentle. It loosens those rules the same way. A hollow shaped like your caves (85%+ alike, walls included) is then kept even where those rules would drop it.
+  - **Setting:** with *Rank cave detections in my caves' setting higher*, a cave scan's detection gets up to 15% more when it sits at the height your caves within 5 km sit at, since caves often follow one rock layer. It also gains when it faces a way your caves favour more than the hills do. Its popup says so.
+  - **Undoing:** *Forget it* removes the examples and puts every limit and rule back as it was.
+  - **Test:** on real Russell Cave LiDAR with 12 known sinks, which were hollows with up to 33 ft of GPS error, the Caves / sinkholes scan found 2 before learning and 10 after. Its detections went from 7 to 30, so it also finds more look-alikes: check new ones.
 - **Which way the caves face.** *Which way do my caves face?* measures the hillside at each cave in the loaded LiDAR, across about 30 m, and draws a 16-direction rose.
   - **Compared with the terrain:** it is drawn against the facing direction of all the sloping ground in the same area. A lean towards the south therefore shows only if the caves favour it more than the hills themselves do.
   - **Figures:** it gives the share facing south-east to south-west against the hills' share, and the most and least favoured directions.

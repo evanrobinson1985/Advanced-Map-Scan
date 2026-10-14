@@ -129,7 +129,13 @@
             <div id="placesCompare" style="font-size:0.78rem; margin-top:4px; line-height:1.45;"></div>
             <button onclick="placesAspects()" style="margin-top:6px; font-size:0.8rem;">&#129517; Which way do my caves face?</button>
             <div id="placesAspect" style="font-size:0.78rem; margin-top:4px; line-height:1.45;"></div>
-            <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Your imported places count as known cave locations. After each scan (any mode, deep learning, Scan All, scan as you go), the caves inside the scanned ground are marked on the map: a green ring when a detection lies within the distance above, a red dashed ring when none does. The summary shows how many were found, by which scans, and how many detections sit at known caves. <i>Which way do my caves face?</i> measures the hillside at each cave in the loaded LiDAR and compares it with all the steep ground around them, so a lean towards the south shows only if the caves favour it more than the hills themselves do.</div>
+            <div style="display:flex; gap:6px; margin-top:6px;">
+                <button onclick="learnFromCaves()" style="flex:2; margin-top:0; font-size:0.8rem; background:#0e7490; color:#fff;">&#127891; Learn from my caves</button>
+                <button onclick="forgetCaveLearning()" style="flex:1; margin-top:0; font-size:0.75rem; background:#fee2e2; color:#991b1b;">Forget it</button>
+            </div>
+            <label style="display:flex; gap:6px; align-items:center; font-size:0.8rem; margin-top:4px;"><input type="checkbox" id="caveSettingBoost" checked onchange="(trainingData.prefs || (trainingData.prefs = {})).caveSettingBoost = this.checked; saveTrainingData();"> Rank cave detections in my caves' setting higher</label>
+            <div id="caveLearn" style="font-size:0.78rem; margin-top:4px; line-height:1.45;"></div>
+            <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Your imported places count as known cave locations. After each scan (any mode, deep learning, Scan All, scan as you go), the caves inside the scanned ground are marked on the map: a green ring when a detection lies within the distance above, a red dashed ring when none does. The summary shows how many were found, by which scans, and how many detections sit at known caves. <i>Learn from my caves</i> measures what the Caves / sinkholes, Cave entrance, Rockshelter and Ceremonial karst scans see at each of your caves in the loaded LiDAR (within 80 ft of the point, for GPS error), keeps those as confirmed examples (similar shapes rank higher) and widens each scan's limits to take in 90% of them (the odd outlier is left out, so the limits don't open wide). The cave scans then also rank a detection higher when it sits at the heights and on the slopes your caves nearby do. <i>Forget it</i> takes all of that back. <i>Which way do my caves face?</i> measures the hillside at each cave in the loaded LiDAR and compares it with all the steep ground around them, so a lean towards the south shows only if the caves favour it more than the hills themselves do.</div>
         </div>
     </div>
 
@@ -1622,6 +1628,47 @@
             : ' Run a scan to see which of them it finds.');
     }
 
+    // The hillside at a point of a grid: its slope and the way it faces
+    // (downhill, degrees from north) across about 30 m, and its height
+    function placeTerrain(g, lat, lon) {
+        const b = g.bounds, W = g.w, H = g.h, res = g.res, k = Math.max(1, Math.round(15 / res));
+        const r = Math.floor((b.n - lat) / (b.n - b.s) * H), c = Math.floor((lon - b.w) / (b.e - b.w) * W);
+        return terrainAtRC(g, r, c, k);
+    }
+    function terrainAtRC(g, r, c, k) {
+        const W = g.w, H = g.h, res = g.res;
+        if (r < k || c < k || r >= H - k || c >= W - k) return null;
+        const z = (rr, cc) => g.data[rr * W + cc];
+        const zE = z(r, c + k), zW = z(r, c - k), zN = z(r - k, c), zS = z(r + k, c), z0 = z(r, c);
+        if (!(zE > -100 && zW > -100 && zN > -100 && zS > -100 && z0 > -100)) return null;
+        const dx = (zE - zW) / (2 * k * res), dn = (zN - zS) / (2 * k * res);
+        return { elev: z0, slope: Math.atan(Math.hypot(dx, dn)) * 180 / Math.PI, aspect: (Math.atan2(-dx, -dn) * 180 / Math.PI + 360) % 360 };
+    }
+    const CAVE_MIN_SLOPE = 10;
+    const aspectSector = (a) => Math.round(a / 22.5) % 16;
+    // Your caves in a grid and their setting, against the hills around them:
+    // { caves: [{p, t}], nIn, nFlat, nSlope, slopeSum, caveShare[16], hillShare[16] }
+    function caveSetting(g) {
+        const b = g.bounds, W = g.w, H = g.h, k = Math.max(1, Math.round(15 / g.res));
+        const cave = new Array(16).fill(0), hill = new Array(16).fill(0), caves = [];
+        let nIn = 0, nFlat = 0, nSlope = 0, slopeSum = 0;
+        for (const p of myPlaces) {
+            if (p.lat > b.n || p.lat < b.s || p.lon > b.e || p.lon < b.w) continue;
+            nIn++;
+            const t = placeTerrain(g, p.lat, p.lon);
+            if (!t) continue;
+            caves.push({ p, t });
+            if (t.slope < CAVE_MIN_SLOPE) { nFlat++; continue; }
+            cave[aspectSector(t.aspect)]++; nSlope++; slopeSum += t.slope;
+        }
+        // the hills: every sloping cell (about every 10 m)
+        const step = Math.max(1, Math.round(10 / g.res));
+        let nHill = 0;
+        if (nSlope) for (let r = k; r < H - k; r += step) for (let c = k; c < W - k; c += step) { const t = terrainAtRC(g, r, c, k); if (t && t.slope >= CAVE_MIN_SLOPE) { hill[aspectSector(t.aspect)]++; nHill++; } }
+        return { caves, nIn, nFlat, nSlope, nHill, slopeSum, cave, hill,
+                 caveShare: cave.map(v => nSlope ? v / nSlope : 0), hillShare: hill.map(v => nHill ? v / nHill : 0) };
+    }
+
     // Which way the ground faces at the caves (in the loaded LiDAR), against
     // all the sloping ground around them: the hillside at each cave across
     // about 30 m, in 16 directions; caves on flatter ground (under 10
@@ -1630,31 +1677,9 @@
         const el = document.getElementById('placesAspect');
         const g = fullDemGrid;
         if (!g || !g.data) { el.innerHTML = '<span style="color:#b91c1c;">Download or load the LiDAR terrain around your caves first.</span>'; return; }
-        const b = g.bounds, W = g.w, H = g.h, res = g.res, k = Math.max(1, Math.round(15 / res)), MIN_SLOPE = 10;
-        const at = (r, c) => {
-            if (r < k || c < k || r >= H - k || c >= W - k) return null;
-            const z = (rr, cc) => g.data[rr * W + cc];
-            const zE = z(r, c + k), zW = z(r, c - k), zN = z(r - k, c), zS = z(r + k, c);
-            if (!(zE > -100 && zW > -100 && zN > -100 && zS > -100)) return null;
-            const dx = (zE - zW) / (2 * k * res), dn = (zN - zS) / (2 * k * res);
-            return { slope: Math.atan(Math.hypot(dx, dn)) * 180 / Math.PI, aspect: (Math.atan2(-dx, -dn) * 180 / Math.PI + 360) % 360 };
-        };
-        const sector = (a) => Math.round(a / 22.5) % 16;
-        const cave = new Array(16).fill(0), hill = new Array(16).fill(0);
-        let nIn = 0, nFlat = 0, nSlope = 0, slopeSum = 0;
-        for (const p of myPlaces) {
-            if (p.lat > b.n || p.lat < b.s || p.lon > b.e || p.lon < b.w) continue;
-            nIn++;
-            const a = at(Math.floor((b.n - p.lat) / (b.n - b.s) * H), Math.floor((p.lon - b.w) / (b.e - b.w) * W));
-            if (!a) continue;
-            if (a.slope < MIN_SLOPE) { nFlat++; continue; }
-            cave[sector(a.aspect)]++; nSlope++; slopeSum += a.slope;
-        }
+        const MIN_SLOPE = CAVE_MIN_SLOPE;
+        const st = caveSetting(g), { nIn, nFlat, nSlope, nHill, slopeSum, cave, hill } = st;
         if (!nIn) { el.innerHTML = '<span style="color:#b91c1c;">None of your caves lie in the loaded terrain. Download the LiDAR where they are, then try again.</span>'; return; }
-        // the hills: every sloping cell (about every 10 m)
-        const step = Math.max(1, Math.round(10 / res));
-        let nHill = 0;
-        for (let r = k; r < H - k; r += step) for (let c = k; c < W - k; c += step) { const a = at(r, c); if (a && a.slope >= MIN_SLOPE) { hill[sector(a.aspect)]++; nHill++; } }
         if (!nSlope || !nHill) { el.innerHTML = `${nIn} cave${nIn === 1 ? '' : 's'} in the loaded terrain, but none on a slope of ${MIN_SLOPE}&deg; or more (${nFlat} on flatter ground), so there is no facing direction to compare.`; return; }
         const names = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
         const cs = cave.map(v => v / nSlope), hs = hill.map(v => v / nHill);
@@ -1684,6 +1709,222 @@
             (nSlope < 30 ? `<br><span style="color:#92400e;">Only ${nSlope} caves: too few to be sure of a pattern. Load a bigger area to include more.</span>` : '');
     }
 
+    // ---- Learning from your caves ----
+    // At each imported cave in the loaded terrain, the cave scans' own
+    // signal is measured as a scan measures it: the nearest feature each
+    // scan would trace, within 25 m of the point (GPS error). These become
+    // confirmed examples (src 'gpx'), and each scan's limits are widened to
+    // take in 90% of them.
+    const CAVE_MODES = ['caves', 'entrance', 'shelter', 'ceremonial'];
+    const CAVE_SNAP_M = 25, CAVE_MAX_D = { caves: 250, entrance: 300, shelter: 400, ceremonial: 250 };
+    // Why the scan (with today's settings) would drop a traced feature: [] if it keeps it
+    function sinkWhyDropped(mode, k, d) {
+        const t = trainingData[mode].thresholds, why = [];
+        if (!t) return why;
+        const ftm = feetToMeters;
+        if (k.maxMetric < ftm(t.minHeight)) why.push('too shallow');
+        if (d < ftm(t.minDiameter)) why.push('too small');
+        if (d > ftm(t.maxDiameter)) why.push('too big');
+        if (k.circularity < t.minCircularity) why.push('not round enough');
+        if (mode === 'caves' || mode === 'ceremonial') {
+            const ex = document.getElementById('excludeWaterways').checked;
+            if (ex && k.waterwayFraction > 0.4 && !(k.maxMetric >= ftm(t.minHeight) * 2.5)) why.push('on a waterway');
+            if (k.maxMetric / d < parseFloat(document.getElementById('sinkMinRatio').value)) why.push('too shallow for its width');
+            if (k.maxFlankSlope < parseFloat(document.getElementById('sinkMinWall').value)) why.push('walls too gentle');
+            if (k.waterwayFraction > 0.02 && k.maxMetric < parseFloat(document.getElementById('creekPoolDepth').value)) why.push('a creek runs through it');
+        }
+        return why;
+    }
+    const SINK_SLIDERS = { sinkMinRatio: ['', 2], sinkMinWall: ['°', 0], creekPoolDepth: null };
+    function setSinkSlider(id, v) {
+        const el = document.getElementById(id); if (!el) return;
+        el.value = v;
+        if (id === 'creekPoolDepth') updateMetricLenVal(id, 2); else updateThresholdVal(id, SINK_SLIDERS[id][0], SINK_SLIDERS[id][1]);
+    }
+    // the sink settings learned from your caves stay in force after a reload
+    setTimeout(() => { try { const sk = trainingData.caveLearn && trainingData.caveLearn.sink; if (sk) for (const id in sk) setSinkSlider(id, sk[id]); } catch (e) { } }, 0);
+    // A candidate the sink rules would drop, but shaped like the caves you
+    // imported (85%+ alike, walls included): kept
+    function likeMyCaves(mode, k, diameter) {
+        const v = featureVector(k, diameter);
+        for (const ex of trainingData[mode].examples) {
+            if (ex.src !== 'gpx') continue;
+            const sim = featureSimilarity(v, { diameterM: ex.diameter, heightM: ex.maxMetric, circularity: ex.circularity, elongation: ex.elongation, flankSlopeDeg: ex.wall != null ? ex.wall : null });
+            if (sim >= 0.85) return true;
+        }
+        return false;
+    }
+    async function learnFromCaves() {
+        const el = document.getElementById('caveLearn');
+        const g = fullDemGrid;
+        if (!g || !g.data) { el.innerHTML = '<span style="color:#b91c1c;">Download or load the LiDAR terrain around your caves first.</span>'; return; }
+        if (scanInProgress) { el.innerHTML = '<span style="color:#b91c1c;">Wait for the scan to finish.</span>'; return; }
+        const b = g.bounds;
+        const toRC = (p) => [Math.floor((b.n - p.lat) / (b.n - b.s) * g.h), Math.floor((p.lon - b.w) / (b.e - b.w) * g.w)];
+        const caves = myPlaces.filter(p => { const [r, c] = toRC(p); return r >= 0 && c >= 0 && r < g.h && c < g.w; });
+        if (!caves.length) { el.innerHTML = '<span style="color:#b91c1c;">None of your caves lie in the loaded terrain.</span>'; return; }
+        // windows (up to 2048 px) around the caves, each cave well inside one
+        const WIN = 2048, M = Math.round(150 / g.res), wins = [], left = new Set(caves);
+        for (const p of caves) {
+            if (!left.has(p)) continue;
+            const [r, c] = toRC(p);
+            const r0 = Math.max(0, Math.min(g.h - WIN, r - WIN / 2)), c0 = Math.max(0, Math.min(g.w - WIN, c - WIN / 2));
+            const w = { r0, c0, r1: Math.min(g.h, r0 + WIN), c1: Math.min(g.w, c0 + WIN), caves: [] };
+            for (const q of left) { const [rr, cc] = toRC(q); if (rr >= w.r0 + Math.min(M, r - w.r0) && rr < w.r1 - Math.min(M, w.r1 - 1 - r) && cc >= w.c0 + Math.min(M, c - w.c0) && cc < w.c1 - Math.min(M, w.c1 - 1 - c)) w.caves.push(q); }
+            if (!w.caves.includes(p)) w.caves.push(p);
+            for (const q of w.caves) left.delete(q);
+            wins.push(w);
+        }
+        const found = [];   // { p, mode, d, h, circ, elong, lat, lon }
+        let stop = false;
+        progBegin('caveLearn', 'Learning from your caves', { cancel: () => { stop = true; } });
+        scanInProgress = true;
+        try {
+            for (let wi = 0; wi < wins.length && !stop; wi++) {
+                const w = wins[wi];
+                await withGrid(cropGrid(g, w.r0, w.c0, w.r1, w.c1), async () => {
+                    for (let mi = 0; mi < CAVE_MODES.length && !stop; mi++) {
+                        const mode = CAVE_MODES[mi];
+                        progSet('caveLearn', { frac: (wi + mi / CAVE_MODES.length) / wins.length, text: `Area ${wi + 1} of ${wins.length} (${w.caves.length} cave${w.caves.length === 1 ? '' : 's'}): what the ${modeName(mode)} scan sees there` });
+                        await uiYield();
+                        const { denoised, metricRaster, candidateMask } = await computeMetricRasterForMode(mode);
+                        const W = demWidth, H = demHeight, snap = Math.max(2, Math.round(CAVE_SNAP_M / effRes));
+                        // sinks are traced as the scan traces them: with the drainage network and their wall slopes
+                        let ww = null, sl = null;
+                        if (mode === 'caves' || mode === 'ceremonial') {
+                            const flow = await getFlowData(), thr = acresToCells(parseFloat(document.getElementById('waterwayThreshold').value));
+                            ww = new Uint8Array(W * H); for (let i = 0; i < ww.length; i++) if (flow.accum[i] >= thr) ww[i] = 1;
+                            sl = computeSlopeDegrees(denoised, W, H, effRes, -100);
+                        }
+                        const visited = new Uint8Array(W * H), stR = new Int32Array(W * H), stC = new Int32Array(W * H);
+                        for (const p of w.caves) {
+                            const r = Math.floor((demBounds.n - p.lat) / (demBounds.n - demBounds.s) * H), c = Math.floor((p.lon - demBounds.w) / (demBounds.e - demBounds.w) * W);
+                            // the nearest cell of this scan's signal
+                            let sr = -1, sc = -1, bd = Infinity;
+                            for (let rr = Math.max(0, r - snap); rr <= Math.min(H - 1, r + snap); rr++) for (let cc = Math.max(0, c - snap); cc <= Math.min(W - 1, c + snap); cc++) {
+                                const d2 = (rr - r) ** 2 + (cc - c) ** 2;
+                                if (candidateMask[rr * W + cc] && d2 <= snap * snap && d2 < bd) { bd = d2; sr = rr; sc = cc; }
+                            }
+                            if (sr < 0) continue;
+                            visited.fill(0);
+                            const k = traceOneComponent(candidateMask, metricRaster, denoised, W, H, effRes, -100, visited, stR, stC, sr, sc, ww, sl);
+                            if (!k || k.area < 4) continue;
+                            const d = 2 * Math.sqrt(k.area / Math.PI);
+                            if (d > CAVE_MAX_D[mode] || !(k.maxMetric > 0)) continue;   // the landform around it, not the feature
+                            found.push({ p, mode, d, h: k.maxMetric, circ: k.circularity, elong: k.elongation, wall: k.maxFlankSlope, wf: k.waterwayFraction || 0, incomplete: !!k.incomplete, why: sinkWhyDropped(mode, k, d),
+                                         lat: demBounds.n - (k.centroidR / H) * (demBounds.n - demBounds.s), lon: demBounds.w + (k.centroidC / W) * (demBounds.e - demBounds.w) });
+                        }
+                    }
+                });
+            }
+        } catch (e) { console.error(e); el.innerHTML = '<span style="color:#b91c1c;">Could not finish: ' + escapeHtml(e.message || String(e)) + '</span>'; return; }
+        finally { scanInProgress = false; progEnd('caveLearn'); }
+        if (stop) { el.innerHTML = 'Stopped: nothing was learned.'; return; }
+        // keep them: the thresholds before (once, for Forget it), the examples, the widened limits
+        const L0 = trainingData.caveLearn || { before: {} };
+        const lines = [];
+        const q = (arr, f) => { const a = [...arr].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.max(0, Math.floor(f * (a.length - 1))))]; };
+        for (const mode of CAVE_MODES) {
+            const got = found.filter(f => f.mode === mode);
+            const list = trainingData[mode].examples;
+            // earlier examples learned from your caves are replaced; your own are kept
+            trainingData[mode].examples = list.filter(ex => ex.src !== 'gpx');
+            for (const f of got) {
+                if (trainingData[mode].examples.some(ex => ex.src !== 'gpx' && approxMetersBetween(ex.lat, ex.lon, f.lat, f.lon) < 20)) continue;
+                trainingData[mode].examples.push({ diameter: f.d, circularity: f.circ, elongation: f.elong, maxMetric: f.h, wall: f.wall, lat: f.lat, lon: f.lon, ts: Date.now(), src: 'gpx', name: f.p.name || '', place: f.p.id });
+            }
+            const t = trainingData[mode].thresholds, changed = [];
+            if (!L0.before[mode] && t) L0.before[mode] = JSON.parse(JSON.stringify(t));
+            if (t && got.length >= 5) {
+                const ft = (m) => metersToFeet(m);
+                const minC = Math.max(0, +(q(got.map(f => f.circ), 0.1) - 0.02).toFixed(2));
+                const minD = Math.max(0.5, +ft(q(got.map(f => f.d), 0.1)).toFixed(1));
+                const maxD = Math.ceil(ft(q(got.map(f => f.d), 0.9)));
+                const minH = Math.max(0.25, +ft(q(got.map(f => f.h), 0.1)).toFixed(2));
+                if (minC < t.minCircularity) { t.minCircularity = minC; changed.push(`min roundness ${minC}`); }
+                if (minD < t.minDiameter) { t.minDiameter = minD; changed.push(`min width ${minD} ft`); }
+                if (maxD > t.maxDiameter) { t.maxDiameter = maxD; changed.push(`max width ${maxD} ft`); }
+                if (minH < t.minHeight) { t.minHeight = minH; changed.push(`min ${mode === 'caves' || mode === 'ceremonial' ? 'depth' : 'relief'} ${minH} ft`); }
+                if (mode === activeThresholdMode) applyModeThresholds(mode);
+            }
+            const med = (arr) => q(arr, 0.5);
+            lines.push(`<tr><td>${escapeHtml(modeName(mode))}</td><td style="text-align:right;">${got.length}</td><td>${got.length ? `${Math.round(metersToFeet(med(got.map(f => f.d))))} ft across, ${metersToFeet(med(got.map(f => f.h))).toFixed(1)} ft ${mode === 'caves' || mode === 'ceremonial' ? 'deep' : 'relief'}` : ''}${changed.length ? `<br><span style="color:#0e7490;">widened: ${changed.join(', ')}</span>` : got.length && got.length < 5 ? '<br><span style="color:#64748b;">(under 5: limits left as they are)</span>' : ''}</td></tr>`);
+        }
+        // the sink rules (depth for width, wall slope, creek pools), from what the
+        // Caves / sinkholes scan sees at your caves: loosened to take in 90%
+        const sinks = found.filter(f => f.mode === 'caves' && !f.incomplete);
+        const why = new Map(); for (const f of sinks) for (const w2 of f.why) why.set(w2, (why.get(w2) || 0) + 1);
+        const sinkChanged = [];
+        if (sinks.length >= 5) {
+            if (!L0.beforeSink) L0.beforeSink = Object.fromEntries(Object.keys(SINK_SLIDERS).map(id => [id, parseFloat(document.getElementById(id).value)]));
+            const sk = L0.sink || {};
+            const cur = (id) => parseFloat(document.getElementById(id).value);
+            const ratio = Math.max(0, Math.floor(q(sinks.map(f => f.h / f.d), 0.1) * 0.95 * 100) / 100);
+            if (ratio < cur('sinkMinRatio')) { sk.sinkMinRatio = ratio; sinkChanged.push(`depth for width ${ratio}`); }
+            const wall = Math.max(0, Math.floor(q(sinks.map(f => f.wall || 0), 0.1) - 1));
+            if (wall < cur('sinkMinWall')) { sk.sinkMinWall = wall; sinkChanged.push(`wall slope ${wall}&deg;`); }
+            const onCreek = sinks.filter(f => f.wf > 0.02);
+            if (onCreek.length >= 3) {
+                const pool = Math.max(0, Math.floor(q(onCreek.map(f => f.h), 0.1) * 4) / 4);
+                if (pool < cur('creekPoolDepth')) { sk.creekPoolDepth = pool; sinkChanged.push(`creek pools deeper than ${metersToFeetInches(pool)} kept`); }
+            }
+            for (const id in sk) setSinkSlider(id, sk[id]);
+            L0.sink = sk;
+        }
+        const seen = new Set(found.map(f => f.p));
+        L0.at = Date.now(); L0.caves = caves.length; L0.seen = seen.size;
+        trainingData.caveLearn = L0;
+        saveTrainingData(true); updateTrainingSummary();
+        el.innerHTML = `Measured <b>${caves.length}</b> cave${caves.length === 1 ? '' : 's'} in the loaded terrain: <b>${seen.size}</b> show in at least one cave scan's signal; ${caves.length - seen.size} show nothing within ${Math.round(CAVE_SNAP_M / FT_TO_M)} ft (horizontal entrances under a ledge or in a cliff, which bare-earth LiDAR can't see, or a GPS point well off).` +
+            `<table style="width:100%;font-size:0.75rem;margin-top:4px;border-collapse:collapse;"><tr style="color:#64748b;"><td>Scan</td><td style="text-align:right;">caves</td><td>&nbsp;typical there</td></tr>${lines.join('')}</table>` +
+            (sinks.length ? `<div style="margin-top:2px;">Why the Caves / sinkholes scan dropped your caves until now: ${why.size ? [...why].sort((a2, b2) => b2[1] - a2[1]).map(([w2, n]) => `${w2} (${n})`).join(', ') : 'it kept all of them'}.` +
+                (sinkChanged.length ? ` <span style="color:#0e7490;">Sinkhole rules loosened: ${sinkChanged.join(', ')}.</span>` : '') + ' Hollows shaped like your caves are now kept even where those rules would drop them.</div>' : '') +
+            `<div style="color:#64748b;margin-top:2px;">Kept as confirmed examples (like ones you confirm by hand), so similar shapes rank higher. Run the cave scans again to use it.</div>`;
+    }
+    function forgetCaveLearning() {
+        const el = document.getElementById('caveLearn');
+        const L0 = trainingData.caveLearn;
+        let n = 0;
+        for (const mode of CAVE_MODES) { const before = trainingData[mode].examples.length; trainingData[mode].examples = trainingData[mode].examples.filter(ex => ex.src !== 'gpx'); n += before - trainingData[mode].examples.length; }
+        if (L0 && L0.before) for (const mode of Object.keys(L0.before)) { trainingData[mode].thresholds = L0.before[mode]; if (mode === activeThresholdMode) applyModeThresholds(mode); }
+        if (L0 && L0.beforeSink) for (const id in L0.beforeSink) setSinkSlider(id, L0.beforeSink[id]);
+        delete trainingData.caveLearn;
+        saveTrainingData(true); updateTrainingSummary();
+        el.innerHTML = n || L0 ? `Forgot ${n} example${n === 1 ? '' : 's'} learned from your caves${L0 ? ' and put the scans\' limits back as they were before' : ''}.` : 'Nothing learned from your caves to forget.';
+    }
+    // The setting your caves nearby sit in, for ranking a cave scan's
+    // detections: prepared once per scan; boost(lat, lon) gives a score
+    // change (-0.05 to +0.15) and a note
+    function caveSettingForScan(mode, g) {
+        if (!CAVE_MODES.includes(mode) || !myPlaces.length || !g || !g.data) return null;
+        if (!(document.getElementById('caveSettingBoost') || { checked: true }).checked) return null;
+        const st = caveSetting(g);
+        if (st.caves.length < 3) return null;
+        const names = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'];
+        return {
+            boost(lat, lon) {
+                const t = placeTerrain(g, lat, lon); if (!t) return null;
+                // the height band of the caves within 5 km (caves often follow one rock layer)
+                const local = st.caves.filter(c => approxMetersBetween(c.p.lat, c.p.lon, lat, lon) < 5000);
+                if (local.length < 3) return null;
+                const el = local.map(c => c.t.elev).sort((x, y) => x - y), med = el[Math.floor(el.length / 2)];
+                const iqr = el[Math.floor(0.75 * (el.length - 1))] - el[Math.floor(0.25 * (el.length - 1))];
+                const z = Math.abs(t.elev - med) / Math.max(8, iqr / 1.35);
+                let b2 = 0.10 * Math.exp(-z * z / 2);
+                const notes = [];
+                if (z < 1) notes.push(`at the height your ${local.length} caves nearby sit at (${Math.round(metersToFeet(med))} ft)`);
+                // the way the hillside faces, if your caves lean that way more than the hills do
+                if (t.slope >= CAVE_MIN_SLOPE && st.nSlope >= 15 && st.hillShare[aspectSector(t.aspect)] > 0) {
+                    const lean = st.caveShare[aspectSector(t.aspect)] / st.hillShare[aspectSector(t.aspect)];
+                    const a2 = 0.05 * Math.max(-1, Math.min(1, Math.log2(lean)));
+                    b2 += a2;
+                    if (a2 > 0.02) notes.push(`facing ${names[aspectSector(t.aspect)]}, which your caves favour (${lean.toFixed(1)}&times; the hills)`);
+                }
+                return { b: Math.max(-0.05, Math.min(0.15, b2)), note: notes.join('; ') };
+            },
+        };
+    }
+
     // places for the watch, in its waypoint form (all, or those in an area)
     function watchPlaces(area) {
         if (!(document.getElementById('watchPlaces') || {}).checked) return [];
@@ -1698,6 +1939,7 @@
             return o;
         });
     }
+    setTimeout(() => { try { const cb2 = document.getElementById('caveSettingBoost'); if (cb2 && trainingData.prefs && trainingData.prefs.caveSettingBoost === false) cb2.checked = false; } catch (e) { } }, 0);
     try { const cb = document.getElementById('watchPlaces'); if (cb) cb.checked = localStorage.getItem('watchPlaces') === '1'; } catch (e) { }
     setTimeout(() => idbGet('myPlaces').then(v => { myPlaces = Array.isArray(v) ? v : []; placesList(); placesDraw(); placesCompareSoon(); }).catch(e => console.warn('Could not read the imported places', e)), 0);
 
@@ -13373,6 +13615,7 @@ onmessage = (e) => {
         // a single scan) - re-filtering here against a single shared
         // slider-read value would be wrong in "All Shapes" mode, where no
         // single value applies to every candidate.
+        const hasGpxCaves = mode !== 'mounds' && trainingData[mode] && trainingData[mode].examples.some(ex => ex.src === 'gpx');
         const filtered = mode === 'mounds' ? comps : comps.filter(k => {
             if (k.incomplete) return false; // clipped by the tile edge or a NoData gap - stats can't be trusted
             if (k.maxMetric < minMetric) return false;
@@ -13386,19 +13629,22 @@ onmessage = (e) => {
             // if it's obviously a deep pit (e.g. a swallet/resurgence, genuinely
             // common right at a stream) or a big opening, since real karst and
             // archaeological sites do cluster near water for practical reasons.
+            // shaped like the caves you imported (Learn from my caves): the waterway and
+            // sink rules below don't drop it
+            let mine = null; const likeMine = () => (mine != null ? mine : (mine = hasGpxCaves && likeMyCaves(mode, k, diameter)));
             if (excludeWaterways && k.waterwayFraction > 0.4 && !(modeCtx && modeCtx.skipWaterwayExclusion)) {
                 const obviouslyDeepOrBig = (k.maxMetric >= minMetric * 2.5) || (!sinkMode && diameter >= maxDiameter * 0.5);
-                if (!obviouslyDeepOrBig) return false;
+                if (!obviouslyDeepOrBig && !likeMine()) return false;
             }
             if (sinkMode) {
                 // Real sinkholes are bowls: noticeably deep for their width,
                 // with sloping walls. Broad, barely-there dips on flat ground
                 // (field undulations, LiDAR noise) are not.
-                if (k.maxMetric / diameter < sinkMinRatio) return false;
-                if (k.maxFlankSlope < sinkMinWall) return false;
+                if (k.maxMetric / diameter < sinkMinRatio && !likeMine()) return false;
+                if (k.maxFlankSlope < sinkMinWall && !likeMine()) return false;
                 // A creek running through a shallow depression means a pool,
                 // scour hole or road-culvert "digital dam", not a sink.
-                if (k.waterwayFraction > 0.02 && k.maxMetric < creekPoolDepth) return false;
+                if (k.waterwayFraction > 0.02 && k.maxMetric < creekPoolDepth && !likeMine()) return false;
             }
             if (modeCtx && modeCtx.keep && !modeCtx.keep(k)) return false;
             return true;
@@ -13423,6 +13669,7 @@ onmessage = (e) => {
         let suppressedCount = 0, mergedCount = 0, droppedCount = 0, heldBackCount = 0, resembledCount = 0, rejectionsLearned = 0, builtSkipped = 0, mappedSkipped = 0, roadSkipped = 0;
         const scanBuildings = mode === 'mounds' ? await builtBuildingsForScan(gridInfo()) : null, scanGrid = gridInfo(true);
         const scanRoads = mode === 'mounds' && roadsOn() ? await roadDataFor(scanGrid) : null;
+        const caveCtx = caveSettingForScan(mode, scanGrid);
         const ranked = [];
         // Spots you marked not real before features were recorded: learn what
         // is there now (first, so it applies to this whole scan)
@@ -13475,6 +13722,9 @@ onmessage = (e) => {
             let base = scoreMatch(k, scoreMinDiameter, scoreMaxDiameter, scoreMinMetric, mode, waterDistM, tpiValue);
             // Mounds: a good template fit that survives the error runs raises the score
             if (mode === 'mounds' && k._template != null) base = Math.round(base + (100 - base) * Math.max(0, k._template - 0.5) * 1.2 * k._persist);
+            // cave scans: in the setting your caves nearby sit in (height band, facing)
+            k._caveNote = '';
+            if (caveCtx) { const cb = caveCtx.boost(lat, lon); if (cb) { base = Math.round(cb.b >= 0 ? base + (100 - base) * cb.b : base * (1 + cb.b)); if (cb.note) k._caveNote = cb.note; } }
             // inside one of your look-alike outlines: skip, like a spot marked not real
             if (mode === 'mounds' && trainingData.outlines.some(o => o.label === 'not' && pointInPoly(lon, lat, o.polygon.map(([a2, b2]) => [b2, a2])))) { suppressedCount++; continue; }
             // like what you confirmed: higher; like what you rejected: lower, or skipped when it closely matches
@@ -13491,6 +13741,7 @@ onmessage = (e) => {
             }
             if (k._builtMaybe) { base = Math.round(base * 0.7); k._simHtml += builtNote(k._builtMaybe); }
             if (k._roadMaybe) { base = Math.round(base * 0.7); k._simHtml += roadNote(k._roadMaybe); }
+            if (k._caveNote) k._simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#0e7490;background:#ecfeff;padding:3px 6px;border-radius:4px;">&#9670; In your caves' setting: ${k._caveNote}. Ranked higher.</div>`;
             ranked.push({ k, lat, lon, diameter, base });
         }
         ranked.sort((x, y) => y.base - x.base || y.k.maxMetric - x.k.maxMetric);
