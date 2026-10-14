@@ -1558,8 +1558,8 @@
     function placesDraw() {
         if (placesLayer) { map.removeLayer(placesLayer); placesLayer = null; }
         if (!myPlaces.length || !(document.getElementById('placesShow') || { checked: true }).checked) return;
-        const rend = L.canvas({ padding: 0.3 });
-        placesLayer = L.layerGroup(myPlaces.map(p => L.circleMarker([p.lat, p.lon], { renderer: rend, radius: 6, color: '#fff', weight: 2, fillColor: PLACES_COLOR, fillOpacity: 1 })
+        const rend = L.canvas({ padding: 0.3, pane: 'placesPane' });
+        placesLayer = L.layerGroup(myPlaces.map(p => L.circleMarker([p.lat, p.lon], { pane: 'placesPane', renderer: rend, radius: 6, color: '#fff', weight: 2, fillColor: PLACES_COLOR, fillOpacity: 1 })
             .bindPopup(() => `<b>${escapeHtml(p.name || 'Place')}</b><br><i style="color:#64748b">Imported from ${escapeHtml(p.file)}.gpx</i><br>` +
                 (p.desc ? escapeHtml(p.desc) + '<br>' : '') + (p.sym || p.type ? `<span style="color:#64748b">${escapeHtml([p.type, p.sym].filter(Boolean).join(', '))}</span><br>` : '') +
                 (p.ele != null ? `<b>Elevation:</b> ${metersToFeetInches(p.ele)}<br>` : '') + `${p.lat.toFixed(6)}, ${p.lon.toFixed(6)}`))).addTo(map);
@@ -1613,8 +1613,8 @@
         const ringPop = (c, hits) => `<b>${escapeHtml(c.name || 'Cave')}</b> <i style="color:#64748b">(${escapeHtml(c.file)})</i><br>` +
             (hits ? '<b style="color:#166534;">&#10003; Found</b> by ' + [...new Map(hits.map(h => [h.f.mode, h])).values()].map(h => `${escapeHtml(modeName(h.f.mode))} (${Math.round(h.d / FT_TO_M)} ft${h.f.matchScore != null ? ', ' + Math.round(h.f.matchScore) + '%' : ''})`).join(', ')
                   : `<b style="color:#b91c1c;">&#10007; Not found</b>: no detection within ${Math.round(R / FT_TO_M)} ft`);
-        for (const { c, hits } of found) L.circle([c.lat, c.lon], { radius: R, color: '#16a34a', weight: 2, fill: false }).bindPopup(ringPop(c, hits)).addTo(placesRings);
-        for (const c of missed) L.circle([c.lat, c.lon], { radius: R, color: '#dc2626', weight: 2, dashArray: '5,4', fill: false }).bindPopup(ringPop(c, null)).addTo(placesRings);
+        for (const { c, hits } of found) L.circle([c.lat, c.lon], { pane: 'placesPane', radius: R, color: '#16a34a', weight: 2, fill: false }).bindPopup(ringPop(c, hits)).addTo(placesRings);
+        for (const c of missed) L.circle([c.lat, c.lon], { pane: 'placesPane', radius: R, color: '#dc2626', weight: 2, dashArray: '5,4', fill: false }).bindPopup(ringPop(c, null)).addTo(placesRings);
         placesRings.addTo(map);
         const pct = (a, b) => b ? Math.round(100 * a / b) + '%' : '-';
         const rows = [...featByMode.keys()].sort((a, b) => (byMode.get(b) || 0) - (byMode.get(a) || 0)).map(m =>
@@ -3460,6 +3460,11 @@ onmessage = (e) => {
     // interleaves with tiles/markers/popups by z-index: tiles 200 <
     // hillshade 450 < slope 451 < settlement 452 < markers/popups 600-700.
     const hillshadeGL = setupGLLayer('glCanvas', 'lidarPane', 450, 0.0);
+    // over the hillshade and its slope / settlement layers (450-452): the roads
+    // found, then your imported places and the cave-comparison rings, under
+    // the scan markers (600)
+    map.createPane('roadsPane').style.zIndex = 460;
+    map.createPane('placesPane').style.zIndex = 590;
     const slopeGL = setupGLLayer('glCanvasSlope', 'slopePane', 451, 1.0);
     const settlementGL = setupGLLayer('glCanvasSettlement', 'settlementPane', 452, 2.0);
 
@@ -12713,7 +12718,7 @@ onmessage = (e) => {
         const ctx = cv.getContext('2d'), im = ctx.createImageData(rd.w, rd.h);
         for (let i = 0; i < rd.mask.length; i++) if (rd.mask[i]) { const o = i * 4; im.data[o] = 249; im.data[o + 1] = 115; im.data[o + 2] = 22; im.data[o + 3] = 230; }
         ctx.putImageData(im, 0, 0);
-        roadOverlay = L.imageOverlay(cv.toDataURL(), [[rd.bounds.s, rd.bounds.w], [rd.bounds.n, rd.bounds.e]], { opacity: 0.85, interactive: false }).addTo(map);
+        roadOverlay = L.imageOverlay(cv.toDataURL(), [[rd.bounds.s, rd.bounds.w], [rd.bounds.n, rd.bounds.e]], { pane: 'roadsPane', opacity: 0.85, interactive: false }).addTo(map);
     }
     async function roadOverlayToggle() {
         if (!(document.getElementById('showRoads') || {}).checked) { roadOverlayDraw(null); return; }
