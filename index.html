@@ -134,8 +134,9 @@
                 <button onclick="forgetCaveLearning()" style="flex:1; margin-top:0; font-size:0.75rem; background:#fee2e2; color:#991b1b;">Forget it</button>
             </div>
             <label style="display:flex; gap:6px; align-items:center; font-size:0.8rem; margin-top:4px;"><input type="checkbox" id="caveSettingBoost" checked onchange="(trainingData.prefs || (trainingData.prefs = {})).caveSettingBoost = this.checked; saveTrainingData();"> Rank cave detections in my caves' setting higher</label>
+            <label style="display:flex; gap:6px; align-items:center; font-size:0.8rem; margin-top:2px;"><input type="checkbox" id="caveTighten" checked onchange="(trainingData.prefs || (trainingData.prefs = {})).caveTighten = this.checked; saveTrainingData();"> Tighten as well as loosen (with 10+ caves): fit the limits to my caves both ways, rank detections unlike them lower</label>
             <div id="caveLearn" style="font-size:0.78rem; margin-top:4px; line-height:1.45;"></div>
-            <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Your imported places count as known cave locations. After each scan (any mode, deep learning, Scan All, scan as you go), the caves inside the scanned ground are marked on the map: a green ring when a detection lies within the distance above, a red dashed ring when none does. The summary shows how many were found, by which scans, and how many detections sit at known caves. <i>Learn from my caves</i> measures what the Caves / sinkholes, Cave entrance, Rockshelter and Ceremonial karst scans see at each of your caves in the loaded LiDAR (within 80 ft of the point, for GPS error), keeps those as confirmed examples (similar shapes rank higher) and widens each scan's limits to take in 90% of them (the odd outlier is left out, so the limits don't open wide). The cave scans then also rank a detection higher when it sits at the heights and on the slopes your caves nearby do. <i>Forget it</i> takes all of that back. <i>Which way do my caves face?</i> measures the hillside at each cave in the loaded LiDAR and compares it with all the steep ground around them, so a lean towards the south shows only if the caves favour it more than the hills themselves do.</div>
+            <div style="font-size:0.72rem; color:#64748b; margin-top:6px; line-height:1.4;">Your imported places count as known cave locations. After each scan (any mode, deep learning, Scan All, scan as you go), the caves inside the scanned ground are marked on the map: a green ring when a detection lies within the distance above, a red dashed ring when none does. The summary shows how many were found, by which scans, and how many detections sit at known caves. <i>Learn from my caves</i> measures what the Caves / sinkholes, Cave entrance, Rockshelter and Ceremonial karst scans see at each of your caves in the loaded LiDAR (within 80 ft of the point, for GPS error), keeps those as confirmed examples (similar shapes rank higher) and fits each scan's limits to take in 90% of them (the odd outlier is left out, so the limits don't open wide). Each area you learn in adds to the others: only that area's caves are measured again. With <i>Tighten as well as loosen</i> and 10+ caves for a scan, its limits are fitted both ways (halfway with 10&ndash;29 caves, fully with 30+), so detections smaller or shallower than nearly all your caves are cut, and detections unlike every one of your caves rank lower. The cave scans then also rank a detection higher when it sits at the heights and on the slopes your caves nearby do. <i>Forget it</i> takes all of that back. <i>Which way do my caves face?</i> measures the hillside at each cave in the loaded LiDAR and compares it with all the steep ground around them, so a lean towards the south shows only if the caves favour it more than the hills themselves do.</div>
         </div>
     </div>
 
@@ -1820,55 +1821,81 @@
         } catch (e) { console.error(e); el.innerHTML = '<span style="color:#b91c1c;">Could not finish: ' + escapeHtml(e.message || String(e)) + '</span>'; return; }
         finally { scanInProgress = false; progEnd('caveLearn'); }
         if (stop) { el.innerHTML = 'Stopped: nothing was learned.'; return; }
-        // keep them: the thresholds before (once, for Forget it), the examples, the widened limits
+        // keep them: the settings before the first learning (once, for Forget it,
+        // and as the base every fit starts from), the examples, the fitted limits
         const L0 = trainingData.caveLearn || { before: {} };
+        const tighten = !!(document.getElementById('caveTighten') || { checked: true }).checked;
         const lines = [];
         const q = (arr, f) => { const a = [...arr].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.max(0, Math.floor(f * (a.length - 1))))]; };
+        const here = new Set(caves.map(p => p.id));
+        const R100 = feetToMeters(100);
         for (const mode of CAVE_MODES) {
             const got = found.filter(f => f.mode === mode);
-            const list = trainingData[mode].examples;
-            // earlier examples learned from your caves are replaced; your own are kept
-            trainingData[mode].examples = list.filter(ex => ex.src !== 'gpx');
+            // this area's caves are measured again; examples from other areas stay
+            trainingData[mode].examples = trainingData[mode].examples.filter(ex => !(ex.src === 'gpx' && (here.has(ex.place) || (ex.lat <= b.n && ex.lat >= b.s && ex.lon <= b.e && ex.lon >= b.w))));
             for (const f of got) {
                 if (trainingData[mode].examples.some(ex => ex.src !== 'gpx' && approxMetersBetween(ex.lat, ex.lon, f.lat, f.lon) < 20)) continue;
-                trainingData[mode].examples.push({ diameter: f.d, circularity: f.circ, elongation: f.elong, maxMetric: f.h, wall: f.wall, lat: f.lat, lon: f.lon, ts: Date.now(), src: 'gpx', name: f.p.name || '', place: f.p.id });
+                trainingData[mode].examples.push({ diameter: f.d, circularity: f.circ, elongation: f.elong, maxMetric: f.h, wall: f.wall, wf: f.wf, lat: f.lat, lon: f.lon, ts: Date.now(), src: 'gpx', name: f.p.name || '', place: f.p.id });
             }
+            // the limits, fitted to every example from your caves (all areas): taking
+            // in 90% of them; looser than before with 5+, tighter too with 10+
+            const all = trainingData[mode].examples.filter(ex => ex.src === 'gpx');
             const t = trainingData[mode].thresholds, changed = [];
             if (!L0.before[mode] && t) L0.before[mode] = JSON.parse(JSON.stringify(t));
-            if (t && got.length >= 5) {
-                const ft = (m) => metersToFeet(m);
-                const minC = Math.max(0, +(q(got.map(f => f.circ), 0.1) - 0.02).toFixed(2));
-                const minD = Math.max(0.5, +ft(q(got.map(f => f.d), 0.1)).toFixed(1));
-                const maxD = Math.ceil(ft(q(got.map(f => f.d), 0.9)));
-                const minH = Math.max(0.25, +ft(q(got.map(f => f.h), 0.1)).toFixed(2));
-                if (minC < t.minCircularity) { t.minCircularity = minC; changed.push(`min roundness ${minC}`); }
-                if (minD < t.minDiameter) { t.minDiameter = minD; changed.push(`min width ${minD} ft`); }
-                if (maxD > t.maxDiameter) { t.maxDiameter = maxD; changed.push(`max width ${maxD} ft`); }
-                if (minH < t.minHeight) { t.minHeight = minH; changed.push(`min ${mode === 'caves' || mode === 'ceremonial' ? 'depth' : 'relief'} ${minH} ft`); }
+            const base = L0.before[mode];
+            if (t && base && all.length >= 5) {
+                // tightening goes halfway with 10-29 caves, all the way with 30+
+                const ft = (m) => metersToFeet(m), two = tighten && all.length >= 10, w8 = all.length >= 30 ? 1 : 0.5;
+                const fit = {
+                    minCircularity: Math.max(0, +(q(all.map(e => e.circularity), 0.1) - 0.02).toFixed(2)),
+                    minDiameter: Math.max(0.5, +(0.95 * ft(q(all.map(e => e.diameter), 0.1))).toFixed(1)),
+                    maxDiameter: Math.ceil(1.05 * ft(q(all.map(e => e.diameter), 0.9))),
+                    minHeight: Math.max(0.25, +(0.95 * ft(q(all.map(e => e.maxMetric), 0.1))).toFixed(2)),
+                };
+                const label = { minCircularity: 'min roundness', minDiameter: 'min width', maxDiameter: 'max width', minHeight: `min ${mode === 'caves' || mode === 'ceremonial' ? 'depth' : 'relief'}` };
+                const unit = { minCircularity: '', minDiameter: ' ft', maxDiameter: ' ft', minHeight: ' ft' };
+                for (const key of Object.keys(fit)) {
+                    const isMax = key === 'maxDiameter';
+                    const loose = isMax ? Math.max(base[key], fit[key]) : Math.min(base[key], fit[key]);
+                    const tight = isMax ? fit[key] < base[key] : fit[key] > base[key];
+                    const r2 = (x) => key === 'minCircularity' ? +x.toFixed(2) : key === 'maxDiameter' ? Math.ceil(x) : +x.toFixed(key === 'minHeight' ? 2 : 1);
+                    const v = two && tight ? r2(base[key] + w8 * (fit[key] - base[key])) : loose;
+                    if (v !== t[key]) changed.push(`${label[key]} ${t[key]}&rarr;${v}${unit[key]}${(isMax ? v < t[key] : v > t[key]) ? ' (tighter)' : ''}`);
+                    t[key] = v;
+                }
                 if (mode === activeThresholdMode) applyModeThresholds(mode);
             }
+            // how often this scan's detections here land on one of your caves
+            const dets = detectedFeatures.filter(f => f.mode === mode && f.lat <= b.n && f.lat >= b.s && f.lon <= b.e && f.lon >= b.w);
+            const hits = dets.filter(f => caves.some(c => approxMetersBetween(c.lat, c.lon, f.lat, f.lon) <= R100)).length;
             const med = (arr) => q(arr, 0.5);
-            lines.push(`<tr><td>${escapeHtml(modeName(mode))}</td><td style="text-align:right;">${got.length}</td><td>${got.length ? `${Math.round(metersToFeet(med(got.map(f => f.d))))} ft across, ${metersToFeet(med(got.map(f => f.h))).toFixed(1)} ft ${mode === 'caves' || mode === 'ceremonial' ? 'deep' : 'relief'}` : ''}${changed.length ? `<br><span style="color:#0e7490;">widened: ${changed.join(', ')}</span>` : got.length && got.length < 5 ? '<br><span style="color:#64748b;">(under 5: limits left as they are)</span>' : ''}</td></tr>`);
+            lines.push(`<tr><td>${escapeHtml(modeName(mode))}</td><td style="text-align:right;">${got.length}${all.length > got.length ? ` <span style="color:#64748b;">(${all.length} all areas)</span>` : ''}</td><td>${got.length ? `${Math.round(metersToFeet(med(got.map(f => f.d))))} ft across, ${metersToFeet(med(got.map(f => f.h))).toFixed(1)} ft ${mode === 'caves' || mode === 'ceremonial' ? 'deep' : 'relief'}` : ''}` +
+                (dets.length ? `<br><span style="color:#64748b;">last scan here: ${hits} of ${dets.length} detections at a known cave (${Math.round(100 * hits / dets.length)}%)</span>` : '') +
+                (changed.length ? `<br><span style="color:#0e7490;">limits: ${changed.join(', ')}</span>` : all.length && all.length < 5 ? '<br><span style="color:#64748b;">(under 5 caves: limits left as they are)</span>' : '') + `</td></tr>`);
         }
-        // the sink rules (depth for width, wall slope, creek pools), from what the
-        // Caves / sinkholes scan sees at your caves: loosened to take in 90%
+        // the sink rules (depth for width, wall slope, creek pools), fitted the same
+        // way to what the Caves / sinkholes scan sees at your caves (all areas)
         const sinks = found.filter(f => f.mode === 'caves' && !f.incomplete);
         const why = new Map(); for (const f of sinks) for (const w2 of f.why) why.set(w2, (why.get(w2) || 0) + 1);
+        const allSinks = trainingData.caves.examples.filter(ex => ex.src === 'gpx');
         const sinkChanged = [];
-        if (sinks.length >= 5) {
+        if (allSinks.length >= 5) {
             if (!L0.beforeSink) L0.beforeSink = Object.fromEntries(Object.keys(SINK_SLIDERS).map(id => [id, parseFloat(document.getElementById(id).value)]));
-            const sk = L0.sink || {};
+            const bs = L0.beforeSink, two = tighten && allSinks.length >= 10, w8 = allSinks.length >= 30 ? 1 : 0.5, sk = {};
+            const fitS = (id, v, dec) => two && v > bs[id] ? +(bs[id] + w8 * (v - bs[id])).toFixed(dec) : Math.min(bs[id], v);
             const cur = (id) => parseFloat(document.getElementById(id).value);
-            const ratio = Math.max(0, Math.floor(q(sinks.map(f => f.h / f.d), 0.1) * 0.95 * 100) / 100);
-            if (ratio < cur('sinkMinRatio')) { sk.sinkMinRatio = ratio; sinkChanged.push(`depth for width ${ratio}`); }
-            const wall = Math.max(0, Math.floor(q(sinks.map(f => f.wall || 0), 0.1) - 1));
-            if (wall < cur('sinkMinWall')) { sk.sinkMinWall = wall; sinkChanged.push(`wall slope ${wall}&deg;`); }
-            const onCreek = sinks.filter(f => f.wf > 0.02);
-            if (onCreek.length >= 3) {
-                const pool = Math.max(0, Math.floor(q(onCreek.map(f => f.h), 0.1) * 4) / 4);
-                if (pool < cur('creekPoolDepth')) { sk.creekPoolDepth = pool; sinkChanged.push(`creek pools deeper than ${metersToFeetInches(pool)} kept`); }
+            const ratio = Math.max(0, Math.floor(q(allSinks.map(e => e.maxMetric / e.diameter), 0.1) * 0.95 * 100) / 100);
+            sk.sinkMinRatio = fitS('sinkMinRatio', ratio, 2);
+            const wallV = allSinks.filter(e => e.wall != null);
+            if (wallV.length >= 5) { const wall = Math.max(0, Math.floor(q(wallV.map(e => e.wall), 0.1) - 1)); sk.sinkMinWall = fitS('sinkMinWall', wall, 0); }
+            // creek pools are only ever let through more, not fewer
+            const onCreek = allSinks.filter(e => e.wf > 0.02);
+            sk.creekPoolDepth = onCreek.length >= 3 ? Math.min(bs.creekPoolDepth, Math.max(0, Math.floor(q(onCreek.map(e => e.maxMetric), 0.1) * 4) / 4)) : bs.creekPoolDepth;
+            for (const id in sk) {
+                const was = cur(id);
+                if (sk[id] !== was) sinkChanged.push(id === 'sinkMinRatio' ? `depth for width ${was}&rarr;${sk[id]}` : id === 'sinkMinWall' ? `wall slope ${was}&rarr;${sk[id]}&deg;` : `creek pools kept deeper than ${metersToFeetInches(sk[id])}`);
+                setSinkSlider(id, sk[id]);
             }
-            for (const id in sk) setSinkSlider(id, sk[id]);
             L0.sink = sk;
         }
         const seen = new Set(found.map(f => f.p));
@@ -1877,9 +1904,9 @@
         saveTrainingData(true); updateTrainingSummary();
         el.innerHTML = `Measured <b>${caves.length}</b> cave${caves.length === 1 ? '' : 's'} in the loaded terrain: <b>${seen.size}</b> show in at least one cave scan's signal; ${caves.length - seen.size} show nothing within ${Math.round(CAVE_SNAP_M / FT_TO_M)} ft (horizontal entrances under a ledge or in a cliff, which bare-earth LiDAR can't see, or a GPS point well off).` +
             `<table style="width:100%;font-size:0.75rem;margin-top:4px;border-collapse:collapse;"><tr style="color:#64748b;"><td>Scan</td><td style="text-align:right;">caves</td><td>&nbsp;typical there</td></tr>${lines.join('')}</table>` +
-            (sinks.length ? `<div style="margin-top:2px;">Why the Caves / sinkholes scan dropped your caves until now: ${why.size ? [...why].sort((a2, b2) => b2[1] - a2[1]).map(([w2, n]) => `${w2} (${n})`).join(', ') : 'it kept all of them'}.` +
-                (sinkChanged.length ? ` <span style="color:#0e7490;">Sinkhole rules loosened: ${sinkChanged.join(', ')}.</span>` : '') + ' Hollows shaped like your caves are now kept even where those rules would drop them.</div>' : '') +
-            `<div style="color:#64748b;margin-top:2px;">Kept as confirmed examples (like ones you confirm by hand), so similar shapes rank higher. Run the cave scans again to use it.</div>`;
+            (sinks.length ? `<div style="margin-top:2px;">Why the Caves / sinkholes scan dropped your caves here until now: ${why.size ? [...why].sort((a2, b2) => b2[1] - a2[1]).map(([w2, n]) => `${w2} (${n})`).join(', ') : 'it kept all of them'}.` +
+                (sinkChanged.length ? ` <span style="color:#0e7490;">Sinkhole rules: ${sinkChanged.join(', ')}.</span>` : '') + ' Hollows shaped like your caves are kept even where those rules would drop them.</div>' : '') +
+            `<div style="color:#64748b;margin-top:2px;">Kept as confirmed examples, added to those from other areas, so similar shapes rank higher${tighten ? ', and detections unlike all of them rank lower' : ''}. Limits are fitted to all of them, starting from your settings before the first learning. Run the cave scans again to use it.</div>`;
     }
     function forgetCaveLearning() {
         const el = document.getElementById('caveLearn');
@@ -1939,7 +1966,8 @@
             return o;
         });
     }
-    setTimeout(() => { try { const cb2 = document.getElementById('caveSettingBoost'); if (cb2 && trainingData.prefs && trainingData.prefs.caveSettingBoost === false) cb2.checked = false; } catch (e) { } }, 0);
+    setTimeout(() => { try { const cb2 = document.getElementById('caveSettingBoost'); if (cb2 && trainingData.prefs && trainingData.prefs.caveSettingBoost === false) cb2.checked = false;
+        const cb3 = document.getElementById('caveTighten'); if (cb3 && trainingData.prefs && trainingData.prefs.caveTighten === false) cb3.checked = false; } catch (e) { } }, 0);
     try { const cb = document.getElementById('watchPlaces'); if (cb) cb.checked = localStorage.getItem('watchPlaces') === '1'; } catch (e) { }
     setTimeout(() => idbGet('myPlaces').then(v => { myPlaces = Array.isArray(v) ? v : []; placesList(); placesDraw(); placesCompareSoon(); }).catch(e => console.warn('Could not read the imported places', e)), 0);
 
@@ -13675,6 +13703,13 @@ onmessage = (e) => {
         const scanBuildings = mode === 'mounds' ? await builtBuildingsForScan(gridInfo()) : null, scanGrid = gridInfo(true);
         const scanRoads = mode === 'mounds' && roadsOn() ? await roadDataFor(scanGrid) : null;
         const caveCtx = caveSettingForScan(mode, scanGrid);
+        const caveUnlike = (() => {
+            if (!CAVE_MODES.includes(mode) || !(document.getElementById('caveTighten') || { checked: true }).checked) return null;
+            const ex = trainingData[mode].examples.filter(e => e.src === 'gpx');
+            if (ex.length < 10) return null;
+            const vs = ex.map(e => ({ diameterM: e.diameter, heightM: e.maxMetric, circularity: e.circularity, elongation: e.elongation, flankSlopeDeg: e.wall != null ? e.wall : null }));
+            return (k, d) => { const v = featureVector(k, d); let best = 0; for (const e of vs) { const sm = featureSimilarity(v, e); if (sm > best) best = sm; } return best; };
+        })();
         const ranked = [];
         // Spots you marked not real before features were recorded: learn what
         // is there now (first, so it applies to this whole scan)
@@ -13730,6 +13765,9 @@ onmessage = (e) => {
             // cave scans: in the setting your caves nearby sit in (height band, facing)
             k._caveNote = '';
             if (caveCtx) { const cb = caveCtx.boost(lat, lon); if (cb) { base = Math.round(cb.b >= 0 ? base + (100 - base) * cb.b : base * (1 + cb.b)); if (cb.note) k._caveNote = cb.note; } }
+            // unlike every cave you imported (Tighten as well as loosen, 10+ of them): lower
+            k._unlikeCaves = null;
+            if (caveUnlike) { const sim = caveUnlike(k, diameter); if (sim != null && sim < 0.3) { base = Math.round(base * (0.6 + sim)); k._unlikeCaves = sim; } }
             // inside one of your look-alike outlines: skip, like a spot marked not real
             if (mode === 'mounds' && trainingData.outlines.some(o => o.label === 'not' && pointInPoly(lon, lat, o.polygon.map(([a2, b2]) => [b2, a2])))) { suppressedCount++; continue; }
             // like what you confirmed: higher; like what you rejected: lower, or skipped when it closely matches
@@ -13746,6 +13784,7 @@ onmessage = (e) => {
             }
             if (k._builtMaybe) { base = Math.round(base * 0.7); k._simHtml += builtNote(k._builtMaybe); }
             if (k._roadMaybe) { base = Math.round(base * 0.7); k._simHtml += roadNote(k._roadMaybe); }
+            if (k._unlikeCaves != null) k._simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#92400e;background:#fef3c7;padding:3px 6px;border-radius:4px;">&#9888; Unlike any of your known caves (at most ${Math.round(k._unlikeCaves * 100)}% alike): ranked lower.</div>`;
             if (k._caveNote) k._simHtml += `<div style="margin:3px 0;font-size:0.75rem;color:#0e7490;background:#ecfeff;padding:3px 6px;border-radius:4px;">&#9670; In your caves' setting: ${k._caveNote}. Ranked higher.</div>`;
             ranked.push({ k, lat, lon, diameter, base });
         }
