@@ -5351,6 +5351,10 @@ onmessage = (e) => {
             (s.tooBig.length ? `<br><span style="color:#475569;">${s.tooBig.length} mound${s.tooBig.length > 1 ? 's' : ''} wider than ${Math.round(DL.MAX_POS_D / FT_TO_M)} ft ${s.tooBig.length > 1 ? 'are' : 'is'} left to the regular scan (too big for the network's ${Math.round(DL.INPUT / FT_TO_M)} ft window).</span>` : '') +
             (s.missing.pos + s.missing.neg ? `<br><span style="color:#92400e;">${s.missing.pos ? pl(s.missing.pos, PN) : ''}${s.missing.pos && s.missing.neg ? ' and ' : ''}${s.missing.neg ? pl(s.missing.neg, NN) : ''} still need a sample: load a DTM that covers ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'}.</span> <a href="#" onclick="event.preventDefault(); dlShowMissing();" style="font-weight:bold;">Show ${s.missing.pos + s.missing.neg > 1 ? 'them' : 'it'} on the map</a>` : '') +
             `<br><b>Model:</b> ` + (m && dlModelOutdated() ? '<span style="color:#92400e;">the method was upgraded; press Train model again (samples are kept)</span>' : m ? `trained ${new Date(m.at).toLocaleString()} on ${pl(m.pos, PN)} and ${pl(m.neg, NN)}${m.val ? `; ${dlValLabel(m.val).toLowerCase()}: found ${m.val.posHit} of ${pl(m.val.pos, PN)}, wrongly flagged ${m.val.negHit} of ${pl(m.val.neg, NN)}` : ` (too few ${DL.NOUNS} for a held-out check)`}` : 'not trained yet');
+        const cmp = m && m.compare;
+        if (m && !dlModelOutdated()) el.innerHTML += `<br><b>Network:</b> ${DL_ARCH_NAMES[m.arch === 'improved' ? 'improved' : 'classic']}` +
+            (cmp ? ` (won the last comparison: classic found ${cmp.classic.posHit} of ${cmp.classic.pos}, flagged ${cmp.classic.negHit}; improved found ${cmp.improved.posHit} of ${cmp.improved.pos}, flagged ${cmp.improved.negHit})` : '');
+        const sel = document.getElementById('dlArchSel'); if (sel) sel.value = dlArch();
         tcUpdateBadge().catch(() => {});   // new samples can change the terrain check
     }
     // ---- Where the items without a sample are ----
@@ -5508,7 +5512,27 @@ onmessage = (e) => {
         }, 200);
     }
 
-    // ---- The network ----
+    // ---- The networks ----
+    // Two designs, chosen per model under "Network" (dlPrefs().arch):
+    // - classic: the original small network (3-4 convolution layers, then a
+    //   dense layer). Kept as it was, so models trained before still load,
+    //   and so "Compare networks" has the original to measure against.
+    // - improved: batch normalization and residual (ResNet-style) blocks,
+    //   a far smaller last layer (fewer weights to over-fit a few hundred
+    //   mounds), trained with a falling learning rate, keeping the round
+    //   that did best on a held-back part of the training areas, and three
+    //   such networks trained separately and averaged (an ensemble). Saved
+    //   as one model, so scanning, saving and loading work as before.
+    // Both read exactly the same samples, so neither needs new data.
+    const DL_ARCH_NAMES = { classic: 'Classic', improved: 'Improved (ensemble of 3)' };
+    const DL_ENSEMBLE = 3;
+    function dlArch() { return dlPrefs().arch === 'improved' ? 'improved' : 'classic'; }
+    function dlSetArch(a) {
+        dlPrefs().arch = a === 'improved' ? 'improved' : 'classic'; saveTrainingData();
+        const m = dlPrefs().model;
+        dlSetStatus(`${DL_ARCH_NAMES[dlArch()]} network selected for the ${DL.label.toLowerCase()} model.` +
+            (m && (m.arch || 'classic') !== dlArch() ? ' The current model was trained with the other network and stays in use until you press Train model.' : ''));
+    }
     function dlBuildModel(tf) {
         const m = tf.sequential();
         m.add(tf.layers.conv2d({ inputShape: [DL.INPUT, DL.INPUT, DL.CH], filters: 16, kernelSize: 3, padding: 'same', activation: 'relu' }));
@@ -5528,6 +5552,147 @@ onmessage = (e) => {
         m.compile({ optimizer: tf.train.adam(0.001), loss: 'binaryCrossentropy', metrics: ['accuracy'] });
         return m;
     }
+    // One member of the improved ensemble. The window halves in size three
+    // times (four for the bigger windows), e.g. 40 > 20 > 10 > 5 cells. The
+    // last map is squeezed to 8 values per cell and flattened, not averaged
+    // away, so the network still knows whether the bump is in the middle of
+    // the window (what the scan's peak-finding relies on).
+    function dlBuildImproved(tf) {
+        const inp = tf.input({ shape: [DL.INPUT, DL.INPUT, DL.CH] });
+        const conv = (y, f, k, st) => tf.layers.conv2d({ filters: f, kernelSize: k, strides: st, padding: 'same', useBias: false, kernelInitializer: 'heNormal' }).apply(y);
+        const bn = (y) => tf.layers.batchNormalization({ momentum: 0.9 }).apply(y);
+        const relu = (y) => tf.layers.activation({ activation: 'relu' }).apply(y);
+        const block = (y, f, down) => {
+            const st = down ? 2 : 1;
+            const r = bn(conv(relu(bn(conv(y, f, 3, st))), f, 3, 1));
+            const sc = (down || y.shape[3] !== f) ? bn(conv(y, f, 1, st)) : y;
+            return relu(tf.layers.add().apply([r, sc]));
+        };
+        // one plain layer at full size (the costly size), then straight down
+        let y = relu(bn(conv(inp, 16, 3, 1)));
+        y = block(y, 32, true);
+        y = block(y, 32, true);
+        y = block(y, 48, true);
+        if (DL.INPUT >= 64) y = block(y, 48, true);
+        y = relu(bn(conv(y, 8, 1, 1)));
+        y = tf.layers.flatten().apply(y);
+        y = tf.layers.dropout({ rate: 0.3 }).apply(y);
+        const out = tf.layers.dense({ units: 1, activation: 'sigmoid' }).apply(y);
+        const m = tf.model({ inputs: inp, outputs: out });
+        m.compile({ optimizer: tf.train.adam(0.002), loss: 'binaryCrossentropy', metrics: ['accuracy'] });
+        return m;
+    }
+    function dlRng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+    // Inputs for a fixed set of samples (centred, one orientation per t)
+    function dlFixedInputs(samples, turns) {
+        const N = DL.INPUT, sz = N * N * DL.CH, c0 = (DL.PATCH - N) / 2;
+        const xs = new Float32Array(samples.length * turns * sz);
+        samples.forEach((s, i) => { for (let t = 0; t < turns; t++) dlInputFromPatch(s.cm, xs, (i * turns + t) * sz, c0, c0, t, 1); });
+        return xs;
+    }
+    // Trains one network on (trPos, trNeg) for DL.EPOCHS rounds. With
+    // `tune` ({ pos, neg }: samples it does not train on), each round is
+    // scored on them (mounds and not-mounds weighted equally) and the best
+    // round's weights are kept; without, the last round is kept.
+    // `lr`: a function round -> learning rate, or null to leave it alone.
+    async function dlFit(tf, model, trPos, trNeg, rnd, opts) {
+        const { tune = null, lr = null, say = () => {} } = opts || {};
+        const N = DL.INPUT, CH = DL.CH, sz = N * N * CH, c0 = (DL.PATCH - N) / 2;
+        // mounds are rare: each epoch shows every mound several times
+        // (shifted, turned, mirrored, a little taller or lower)
+        const reps = Math.max(1, Math.round(0.5 * trNeg.length / trPos.length));
+        let tuneX = null, best = null, bestLoss = Infinity, bestEp = -1;
+        if (tune && tune.pos.length && tune.neg.length) tuneX = dlFixedInputs([...tune.pos, ...tune.neg], 1);
+        const t0 = Date.now();
+        for (let ep = 0; ep < DL.EPOCHS && !dlCancel; ep++) {
+            if (lr) model.optimizer.learningRate = lr(ep);
+            const set = [...trNeg.map(s => [s, 0]), ...Array.from({ length: reps }, () => trPos.map(s => [s, 1])).flat()];
+            dlShuffle(set, rnd);
+            // in chunks, so a large sample set doesn't need all its inputs in memory at once
+            const CHUNK = 2048; let accN = 0, accS = 0;
+            for (let k0 = 0; k0 < set.length && !dlCancel; k0 += CHUNK) {
+                const part = set.slice(k0, k0 + CHUNK);
+                const xs = new Float32Array(part.length * sz), ys = new Float32Array(part.length);
+                part.forEach(([s, y], i) => {
+                    const dr = c0 + Math.round((rnd() * 2 - 1) * 3), dc = c0 + Math.round((rnd() * 2 - 1) * 3);
+                    dlInputFromPatch(s.cm, xs, i * sz, dr, dc, Math.floor(rnd() * 8), y ? 0.8 + rnd() * 0.45 : 0.9 + rnd() * 0.2);
+                    ys[i] = y;
+                });
+                const X = tf.tensor4d(xs, [part.length, N, N, CH]), Y = tf.tensor2d(ys, [part.length, 1]);
+                const h = await model.fit(X, Y, { epochs: 1, batchSize: 32, shuffle: false, verbose: 0 });
+                X.dispose(); Y.dispose();
+                accS += h.history.acc[0] * part.length; accN += part.length;
+                await dlTick();
+            }
+            let tuneNote = '';
+            if (tuneX && !dlCancel) {
+                const np = tune.pos.length, nAll = np + tune.neg.length;
+                const p = tf.tidy(() => model.predict(tf.tensor4d(tuneX, [nAll, N, N, CH])).dataSync());
+                let lp = 0, ln = 0;
+                for (let i = 0; i < nAll; i++) { const q = Math.min(1 - 1e-6, Math.max(1e-6, p[i])); if (i < np) lp -= Math.log(q); else ln -= Math.log(1 - q); }
+                const loss = 0.5 * (lp / np + ln / (nAll - np));
+                // the first rounds are too unsettled to judge
+                if (ep >= Math.min(5, DL.EPOCHS - 1) && loss < bestLoss) {
+                    bestLoss = loss; bestEp = ep;
+                    if (best) best.forEach(w => w.dispose());
+                    best = model.getWeights().map(w => w.clone());
+                }
+                tuneNote = `, best round so far ${bestEp + 1}`;
+            }
+            say(`round ${ep + 1} of ${DL.EPOCHS} (accuracy ${Math.round(100 * accS / Math.max(1, accN))}%${tuneNote}, ${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}`);
+            await dlTick();
+        }
+        if (best) { if (!dlCancel) model.setWeights(best); best.forEach(w => w.dispose()); }
+        return { model, bestRound: bestEp >= 0 ? bestEp + 1 : null };
+    }
+    // Builds and trains a network of the given design on a split's training
+    // part. Resolves to the model (null if stopped).
+    async function dlTrainArch(tf, arch, trPos, trNeg, rnd0, say) {
+        if (arch !== 'improved') {
+            const model = dlBuildModel(tf);
+            await dlFit(tf, model, trPos, trNeg, rnd0, { say: (t) => say('Training: ' + t) });
+            if (dlCancel) { model.dispose(); return null; }
+            return model;
+        }
+        const members = [];
+        for (let k = 0; k < DL_ENSEMBLE && !dlCancel; k++) {
+            const rnd = dlRng(Math.floor(rnd0() * 4294967296));
+            // each member holds back a different part of the training areas
+            // to pick its best round (never the held-out check areas)
+            const inner = dlAreaSplit(dlShuffle([...trPos], rnd), dlShuffle([...trNeg], rnd), rnd);
+            const useTune = inner.valPos.length > 0 && inner.valNeg.length > 0 && inner.trPos.length >= 3;
+            const m = dlBuildImproved(tf);
+            const E = DL.EPOCHS, lr = (ep) => Math.max(1e-4, 0.002 * 0.5 * (1 + Math.cos(Math.PI * ep / E)));
+            await dlFit(tf, m, useTune ? inner.trPos : trPos, useTune ? inner.trNeg : trNeg, rnd,
+                { tune: useTune ? { pos: inner.valPos, neg: inner.valNeg } : null, lr, say: (t) => say(`Training network ${k + 1} of ${DL_ENSEMBLE}: ${t}`) });
+            members.push(m);
+        }
+        if (dlCancel) { members.forEach(m => m.dispose()); return null; }
+        // one model that averages the three
+        const inp = tf.input({ shape: [DL.INPUT, DL.INPUT, DL.CH] });
+        const ens = tf.model({ inputs: inp, outputs: tf.layers.average().apply(members.map(m => m.apply(inp))) });
+        ens.compile({ optimizer: tf.train.adam(0.001), loss: 'binaryCrossentropy' });
+        return ens;
+    }
+    // The held-out check: each sample scored all 8 ways and averaged, as the scan does
+    function dlEvaluate(tf, model, valPos, valNeg, sp) {
+        if (!valPos.length) return null;
+        const N = DL.INPUT, CH = DL.CH;
+        const vs = [...valPos.map(s => [s, 1]), ...valNeg.map(s => [s, 0])];
+        const xs = dlFixedInputs(vs.map(v => v[0]), 8);
+        const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs, [vs.length * 8, N, N, CH])).dataSync());
+        const p = vs.map((_, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; return m / 8; });
+        const thr = dlThreshold();
+        // threshold-free too: the chance a random held-out mound scores above a random not-mound
+        let above = 0, pairs = 0;
+        const pp = p.filter((_, i) => vs[i][1]), pn = p.filter((_, i) => !vs[i][1]);
+        for (const a of pp) for (const b of pn) { pairs++; above += a > b ? 1 : a === b ? 0.5 : 0; }
+        return { pos: valPos.length, neg: valNeg.length, posHit: vs.filter(([, y], i) => y && p[i] >= thr).length, negHit: vs.filter(([, y], i) => !y && p[i] >= thr).length, byArea: sp.byArea, areas: sp.areas,
+                 look: vs.filter(([s, y]) => !y && s.look).length, lookHit: vs.filter(([s, y], i) => !y && s.look && p[i] >= thr).length,
+                 thr, auc: pairs ? above / pairs : null };
+    }
+    // found share minus wrongly-flagged share, at the chosen confidence
+    function dlValScore(v) { return v.posHit / Math.max(1, v.pos) - v.negHit / Math.max(1, v.neg); }
     // A fingerprint of the samples a model learns from: which items, with
     // which labels, which are too big to use, and how much background. Any
     // new, removed, relabelled or re-kinded item, or new background, changes it.
@@ -5605,7 +5770,7 @@ onmessage = (e) => {
     function dlShuffle(a, rnd) { for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
     function dlSetBusy(on) {
         dlBusy = on; dlCancel = false;
-        for (const id of ['dlTrainBtn', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn', 'dlCheckBtn', 'dlTourBtn', 'dlTrainAllBtn', 'dlSaveAllBtn', 'tdOpenBtn', 'dlProfile']) { const b = document.getElementById(id); if (b) b.disabled = on; }
+        for (const id of ['dlTrainBtn', 'dlCompareBtn', 'dlArchSel', 'dlScanBtn', 'dlCollectBtn', 'dlDeleteBtn', 'dlSaveBtn', 'dlLoadBtn', 'dlCheckBtn', 'dlTourBtn', 'dlTrainAllBtn', 'dlSaveAllBtn', 'tdOpenBtn', 'dlProfile']) { const b = document.getElementById(id); if (b) b.disabled = on; }
         const s = document.getElementById('dlStopBtn'); if (s) s.style.display = on ? 'block' : 'none';
     }
     async function dlTrain() {
@@ -5629,52 +5794,16 @@ onmessage = (e) => {
             // split would let it peek); see dlAreaSplit
             const pos = dlShuffle([...S.pos], rnd), neg = dlShuffle([...negAll], rnd);
             const sp = dlAreaSplit(pos, neg, rnd);
-            const { valPos, valNeg, trPos, trNeg } = sp, nvp = valPos.length;
-            const N = DL.INPUT, CH = DL.CH, sz = N * N * CH, c0 = (DL.PATCH - N) / 2;
-            // mounds are rare: each epoch shows every mound several times
-            // (shifted, turned, mirrored, a little taller or lower)
-            const reps = Math.max(1, Math.round(0.5 * trNeg.length / trPos.length));
+            const { valPos, valNeg, trPos, trNeg } = sp;
             if (dlModel) { dlModel.dispose(); dlModel = null; }
-            const model = dlBuildModel(tf);
+            const arch = dlArch();
             const t0 = Date.now();
-            for (let ep = 0; ep < DL.EPOCHS && !dlCancel; ep++) {
-                const set = [...trNeg.map(s => [s, 0]), ...Array.from({ length: reps }, () => trPos.map(s => [s, 1])).flat()];
-                dlShuffle(set, rnd);
-                // in chunks, so a large sample set doesn't need all its inputs in memory at once
-                const CHUNK = 2048; let accN = 0, accS = 0;
-                for (let k0 = 0; k0 < set.length && !dlCancel; k0 += CHUNK) {
-                    const part = set.slice(k0, k0 + CHUNK);
-                    const xs = new Float32Array(part.length * sz), ys = new Float32Array(part.length);
-                    part.forEach(([s, y], i) => {
-                        const dr = c0 + Math.round((rnd() * 2 - 1) * 3), dc = c0 + Math.round((rnd() * 2 - 1) * 3);
-                        dlInputFromPatch(s.cm, xs, i * sz, dr, dc, Math.floor(rnd() * 8), y ? 0.8 + rnd() * 0.45 : 0.9 + rnd() * 0.2);
-                        ys[i] = y;
-                    });
-                    const X = tf.tensor4d(xs, [part.length, N, N, CH]), Y = tf.tensor2d(ys, [part.length, 1]);
-                    const h = await model.fit(X, Y, { epochs: 1, batchSize: 32, shuffle: false, verbose: 0 });
-                    X.dispose(); Y.dispose();
-                    accS += h.history.acc[0] * part.length; accN += part.length;
-                    await dlTick();
-                }
-                dlSetStatus(`Training: round ${ep + 1} of ${DL.EPOCHS} (accuracy ${Math.round(100 * accS / Math.max(1, accN))}%, ${Math.round((Date.now() - t0) / 1000)} s)${dlBackendNote(tf)}...`);
-                await dlTick();
-            }
-            if (dlCancel) { model.dispose(); dlSetStatus('Training stopped; the previous model (if any) is kept.'); return; }
-            let val = null;
-            if (nvp) {
-                const vs = [...valPos.map(s => [s, 1]), ...valNeg.map(s => [s, 0])];
-                // each scored all 8 ways and averaged, as the scan does
-                const xs = new Float32Array(vs.length * 8 * sz);
-                vs.forEach(([s], i) => { for (let t = 0; t < 8; t++) dlInputFromPatch(s.cm, xs, (i * 8 + t) * sz, c0, c0, t, 1); });
-                const p8 = tf.tidy(() => model.predict(tf.tensor4d(xs, [vs.length * 8, N, N, CH])).dataSync());
-                const p = vs.map((_, i) => { let m = 0; for (let t = 0; t < 8; t++) m += p8[i * 8 + t]; return m / 8; });
-                const thr = dlThreshold();
-                val = { pos: valPos.length, neg: valNeg.length, posHit: vs.filter(([, y], i) => y && p[i] >= thr).length, negHit: vs.filter(([, y], i) => !y && p[i] >= thr).length, byArea: sp.byArea, areas: sp.areas,
-                        look: vs.filter(([s, y]) => !y && s.look).length, lookHit: vs.filter(([s, y], i) => !y && s.look && p[i] >= thr).length };
-            }
+            const model = await dlTrainArch(tf, arch, trPos, trNeg, rnd, (t) => dlSetStatus(t + '...'));
+            if (!model) { dlSetStatus('Training stopped; the previous model (if any) is kept.'); return; }
+            const val = dlEvaluate(tf, model, valPos, valNeg, sp);
             await model.save(DL.MODEL_URL);
             dlModel = model;
-            dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val, version: DL.MODEL_VERSION, dataSig: dlDataSig(S) };
+            dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val, version: DL.MODEL_VERSION, dataSig: dlDataSig(S), arch };
             const nRetired = tourAfterTrain(DL.key, dlPrefs().model.at) || 0;
             saveTrainingData();
             await updateDLSummary();
@@ -5682,7 +5811,7 @@ onmessage = (e) => {
             let nDoubt = 0;
             if (DL.key === 'mounds') { try { await tcScoreWithNetwork(tf, model); const iss = await tcFindIssues(); nDoubt = iss.length; tcUpdateBadge(iss); } catch (e) { console.warn(e); } }
             const PN = DL.NOUNS, NN = DL.NEG_NOUN;
-            dlSetStatus(`Trained in ${Math.round((Date.now() - t0) / 1000)} s on ${S.pos.length} ${PN} and ${negAll.length} ${NN} samples` +
+            dlSetStatus(`${DL_ARCH_NAMES[arch]} network trained in ${Math.round((Date.now() - t0) / 1000)} s on ${S.pos.length} ${PN} and ${negAll.length} ${NN} samples` +
                 (S.tooBig.length ? ` (${S.tooBig.length} mounds too big for its window left to the regular scan)` : '') + '.' +
                 (nDoubt ? ` ${nDoubt} possible issue${nDoubt === 1 ? '' : 's'} in your training data: press Check training data.` : '') +
                 (val ? ` ${dlValLabel(val)}: found ${val.posHit} of ${val.pos} ${PN}; wrongly flagged ${val.negHit} of ${val.neg} ${DL.NEG_NOUNS}${val.look ? ` (${val.lookHit} of the ${val.look} look-alikes among them)` : ''}.` : ` With fewer than 5 ${PN} there is no held-out check yet; treat results with extra caution.`) +
@@ -5692,6 +5821,72 @@ onmessage = (e) => {
         } catch (e) {
             console.error(e);
             dlSetStatus('Training failed: ' + (e.message || e));
+        } finally { dlSetBusy(false); }
+    }
+    // ==== COMPARE NETWORKS ====
+    // Trains the classic and the improved network on the same samples, with
+    // the same areas held back, and scores both on those held-back areas
+    // (which neither saw, nor used to pick a best round). The one that finds
+    // more held-out mounds for fewer false alarms, at the chosen Confidence,
+    // is kept as this model and becomes its selected network. A tie goes to
+    // the one that ranks held-out mounds above not-mounds more often, and a
+    // full tie to the classic (it is quicker to train).
+    async function dlCompareNetworks() {
+        if (dlBusy) return;
+        if (tourBusy) { dlSetStatus('The training-site tour is running; compare when it has finished.'); return; }
+        dlSetBusy(true);
+        const trained = [];
+        try {
+            dlPrefs().enabled = true; saveTrainingData();
+            if (fullDemGrid) await dlHarvest(fullDemGrid, true);
+            const S = dlUsableSamples();
+            const negAll = [...S.neg, ...S.bg, ...S.look];
+            if (S.pos.length < 5) { dlSetStatus(`A comparison needs a held-out check, which needs terrain samples of at least 5 ${DL.NOUNS}; there are ${S.pos.length}.`); return; }
+            if (negAll.length < 20) { dlSetStatus('Load a DTM (and press Collect samples) so the networks have ordinary ground to compare with.'); return; }
+            dlSetStatus('Loading TensorFlow.js...');
+            const tf = await loadTF();
+            await dlUseBackend(tf, 'train');
+            const rnd = dlRng(12345);
+            const sp = dlAreaSplit(dlShuffle([...S.pos], rnd), dlShuffle([...negAll], rnd), rnd);
+            if (!sp.valPos.length || !sp.valNeg.length) { dlSetStatus('Could not set aside a held-out check from these samples, so the networks cannot be compared yet.'); return; }
+            const res = {};
+            const archs = ['classic', 'improved'];
+            for (let i = 0; i < archs.length; i++) {
+                const arch = archs[i], t0 = Date.now();
+                const m = await dlTrainArch(tf, arch, sp.trPos, sp.trNeg, dlRng(Math.floor(rnd() * 4294967296)),
+                    (t) => dlSetStatus(`Comparing networks, ${i + 1} of 2 (${DL_ARCH_NAMES[arch]}). ${t}...`));
+                if (!m) { dlSetStatus('Comparison stopped; the previous model (if any) is kept.'); return; }
+                trained.push(m);
+                res[arch] = { model: m, val: dlEvaluate(tf, m, sp.valPos, sp.valNeg, sp), secs: Math.round((Date.now() - t0) / 1000) };
+            }
+            const c = res.classic, im = res.improved, sc = dlValScore(c.val), si = dlValScore(im.val);
+            const winner = si > sc + 1e-9 ? 'improved' : si < sc - 1e-9 ? 'classic' : ((im.val.auc || 0) > (c.val.auc || 0) + 1e-9 ? 'improved' : 'classic');
+            const keep = res[winner];
+            await keep.model.save(DL.MODEL_URL);
+            if (dlModel) { dlModel.dispose(); dlModel = null; }
+            for (const m of trained) if (m !== keep.model) m.dispose();
+            trained.length = 0;
+            dlModel = keep.model;
+            const strip = (r) => ({ ...r.val, secs: r.secs });
+            dlPrefs().arch = winner;
+            dlPrefs().model = { at: Date.now(), pos: S.pos.length, neg: negAll.length, val: keep.val, version: DL.MODEL_VERSION, dataSig: dlDataSig(S), arch: winner,
+                                compare: { winner, classic: strip(c), improved: strip(im) } };
+            const nRetired = tourAfterTrain(DL.key, dlPrefs().model.at) || 0;
+            saveTrainingData();
+            await updateDLSummary();
+            if (DL.key === 'mounds') { try { await tcScoreWithNetwork(tf, keep.model); const iss = await tcFindIssues(); tcUpdateBadge(iss); } catch (e) { console.warn(e); } }
+            const PN = DL.NOUNS, v = c.val;
+            const line = (name, r) => `${name}: found ${r.val.posHit} of ${r.val.pos} ${PN}, wrongly flagged ${r.val.negHit} of ${r.val.neg} ${DL.NEG_NOUNS}` +
+                (r.val.auc != null ? `; ranks a held-out ${DL.NOUN} above a ${DL.NEG_NOUN} ${Math.round(100 * r.val.auc)}% of the time` : '') + ` (trained in ${r.secs} s).`;
+            dlSetStatus(`${dlValLabel(v)}, at ${Math.round(100 * v.thr)}%+ confidence:\n` +
+                line('Classic', c) + '\n' + line('Improved', im) + '\n' +
+                `Kept: ${DL_ARCH_NAMES[winner]}. It is now this model's network and is ready to scan.` +
+                (v.pos < 15 ? ` With only ${v.pos} held-out ${PN}, a difference of one or two may be chance.` : '') +
+                (nRetired ? ` ${nRetired} training-tour site${nRetired === 1 ? ' is' : 's are'} now in the model and left the tour list.` : ''));
+        } catch (e) {
+            console.error(e);
+            trained.forEach(m => { try { m.dispose(); } catch (e2) {} });
+            dlSetStatus('Comparison failed: ' + (e.message || e));
         } finally { dlSetBusy(false); }
     }
     // ==== TRAINING DATA CHECK ====
@@ -6707,6 +6902,7 @@ onmessage = (e) => {
                 if (dlModel) dlModel.dispose();
                 dlModel = m;
                 dlPrefs().model = { ...(file.modelInfo || {}), version: DL.MODEL_VERSION };
+                dlPrefs().arch = dlPrefs().model.arch === 'improved' ? 'improved' : 'classic';   // the network it was trained with
                 modelMsg = `Model trained ${file.modelInfo && file.modelInfo.at ? new Date(file.modelInfo.at).toLocaleDateString() : ''} restored and ready to scan.`;
             } else if (file.model) modelMsg = 'The model in the file was made by an older method; press Train model to rebuild it from the samples (they are loaded).';
             saveTrainingData();

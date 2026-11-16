@@ -764,7 +764,15 @@
             <label style="display:flex; align-items:center; gap:6px; font-size:0.78rem; margin-bottom:6px;" title="The scan's clear false alarms (on ground over 20 degrees, irregular bumps on slopes, no closed rise on a slope, ridges, far too small) are saved as look-alike samples; Train model then teaches the network not to flag them. Clean mound shapes are never used, nor anything near a confirmed mound."><input type="checkbox" id="dlLearnFalse" checked> Learn from clear false alarms (kept as look-alikes for the next training)</label>
         </div>
         <button id="dlCollectBtn" onclick="dlCollectNow()" style="font-size:0.8rem;">Collect samples from this DTM</button>
+        <div class="slider-row" style="margin-bottom:6px;">
+            <label for="dlArchSel" title="Which network design Train model uses for the selected model">Network</label>
+            <select id="dlArchSel" onchange="dlSetArch(this.value)" style="width:auto; flex-grow:1; margin:0 0 0 10px; padding:6px;">
+                <option value="classic" selected>Classic (original, quicker to train)</option>
+                <option value="improved">Improved (residual, ensemble of 3; about 3&times; the training time)</option>
+            </select>
+        </div>
         <button id="dlTrainBtn" onclick="dlTrain()" style="background:#f3e8ff;color:#6b21a8;">&#129504; Train model</button>
+        <button id="dlCompareBtn" onclick="dlCompareNetworks()" title="Trains both networks on the same samples, scores them on the same held-out areas, and keeps the better one" style="font-size:0.8rem;background:#f5f3ff;color:#5b21b6;">&#9878; Compare networks (classic vs improved) and keep the better</button>
         <button id="dlTrainAllBtn" onclick="dlTrainAllNew()" style="font-size:0.8rem;background:#ede9fe;color:#5b21b6;">&#129504; Train all models with new data (mounds, effigies, shell middens)</button>
         <button id="dlCheckBtn" onclick="openTrainingCheck()" style="font-size:0.8rem;background:#fef3c7;color:#92400e;">&#129658; Check training data</button>
         <button id="dlGalleryBtn" onclick="openTrainingGallery(DL.key)" style="font-size:0.8rem;background:#e0e7ff;color:#3730a3;">&#128444; Review training images</button>
