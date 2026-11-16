@@ -8823,6 +8823,134 @@ onmessage = (e) => {
         };
     }
 
+    // ---- Size classes a mound scan runs with ----
+    // From the Mound Shape choice: All Shapes runs Conical and Platform,
+    // Custom and Learned run the sliders, the others their own class. The
+    // built-in classes can be lowered by "Adjust settings to fit this mound"
+    // (prefs.moundFit: lower floors for min height / min diameter), which
+    // keeps each class's own scales and limits otherwise. The scan and the
+    // "Mound check" popup both use this, so the check matches the scan.
+    function moundFitFloors() { const f = trainingData.prefs && trainingData.prefs.moundFit; return f && (f.minHeightFt != null || f.minDiameterFt != null) ? f : null; }
+    function moundThresholdsOffSliders() { return (typeof activeThresholdMode !== 'undefined' && activeThresholdMode !== 'mounds') ? trainingData.mounds.thresholds : null; }
+    function moundScanPresets() {
+        const mode = document.getElementById('moundShapeMode').value, defs = moundShapePresetDefs();
+        if (mode === 'custom' || mode === 'learned') {
+            // the sliders show the selected scan mode's values; with another
+            // mode selected, the Mounds values are read from where they're kept
+            const t = moundThresholdsOffSliders();
+            const v = (id) => t && t[id] != null ? t[id] : parseFloat(document.getElementById(id).value);
+            return [{ name: mode, minHeight: v('minHeight'), minCircularity: v('minCircularity'), maxCircularity: v('maxCircularity'), minDiameter: v('minDiameter'),
+                      maxDiameter: v('maxDiameter'), trendRadius: v('trendRadius'), maxFlankSlope: v('maxFlankSlope'), maxElongation: v('maxElongation') }];
+        }
+        const ps = mode === 'all' ? [{ name: 'conical', ...defs.conical }, { name: 'platform', ...defs.platform }] : [{ name: mode, ...(defs[mode] || defs.broad) }];
+        const f = moundFitFloors();
+        if (!f) return ps;
+        return ps.map(p => ({ ...p, minHeight: f.minHeightFt != null ? Math.min(p.minHeight, f.minHeightFt) : p.minHeight,
+                              minDiameter: f.minDiameterFt != null ? Math.min(p.minDiameter, f.minDiameterFt) : p.minDiameter }));
+    }
+    function updateMoundFitNote() {
+        const el = document.getElementById('moundFitNote'); if (!el) return;
+        const f = moundFitFloors();
+        el.style.display = f ? 'block' : 'none';
+        if (f) el.innerHTML = `Lowered to fit your mounds: ${[f.minHeightFt != null ? `min height ${metersToFeetInches(feetToMeters(f.minHeightFt))}` : '', f.minDiameterFt != null ? `min diameter ${Math.round(f.minDiameterFt)} ft` : ''].filter(Boolean).join(', ')} (for the built-in shapes). <a href="#" onclick="event.preventDefault(); clearMoundFitFloors();">Clear</a>`;
+    }
+    function clearMoundFitFloors() {
+        if (trainingData.prefs) delete trainingData.prefs.moundFit;
+        saveTrainingData(); updateMoundFitNote();
+        document.getElementById('status').innerText = 'Mound size floors from "Adjust settings to fit this mound" cleared.';
+    }
+    // The mound rule sliders (template, height : width, persistence,
+    // flat-ground slope) are remembered across visits
+    const MOUND_RULE_IDS = { moundMinTemplate: ['', 2], moundMinHW: ['', 3], moundMinPersist: ['', 2], moundMaxGroundSlope: ['°', 0] };
+    function saveMoundRules() {
+        const p = trainingData.prefs || (trainingData.prefs = {});
+        p.moundRules = {};
+        for (const id in MOUND_RULE_IDS) p.moundRules[id] = parseFloat(document.getElementById(id).value);
+        saveTrainingData();
+    }
+    function restoreMoundRules() {
+        const r = trainingData.prefs && trainingData.prefs.moundRules; if (!r) return;
+        const learned = document.getElementById('moundShapeMode').value === 'learned';
+        for (const id in MOUND_RULE_IDS) {
+            if (r[id] == null || (learned && (id === 'moundMinTemplate' || id === 'moundMinHW'))) continue;   // Learned sets these itself
+            document.getElementById(id).value = r[id]; updateThresholdVal(id, ...MOUND_RULE_IDS[id]);
+        }
+    }
+    // "Adjust settings to fit this mound" (in the Mound check popup). Each
+    // press starts from the current settings and loosens only what the
+    // checked mound still fails, by just enough plus a small margin, then
+    // checks it again. Nothing is tightened, so mounds that already pass
+    // keep passing. Fixed rules that no setting controls are listed instead.
+    function moundFitSettings() {
+        const x = window.__moundCheckCtx; if (!x) return;
+        const changes = [], cant = [];
+        const down = (v, st) => Math.floor(v / st + 1e-9) * st, up = (v, st) => Math.ceil(v / st - 1e-9) * st;
+        const num = (id) => parseFloat(document.getElementById(id).value);
+        const setSlider = (id, v, fmt, label, shown) => {
+            const el = document.getElementById(id), before = el.value;
+            el.value = v; fmt();
+            if (el.value !== before) changes.push(`${label} ${shown(parseFloat(before))} &rarr; ${shown(parseFloat(el.value))}`);
+        };
+        const ft = (f) => metersToFeetInches(feetToMeters(f)), dec = (d) => (v) => v.toFixed(d), deg = (v) => v + '&deg;', pct = (v) => Math.round(v * 100) + '%';
+        const mode = document.getElementById('moundShapeMode').value;
+        // 1. size class: only "too small / too low" can be fixed; too big or
+        //    the wrong shape means the measurement took in the landform
+        if (!x.sizeOk.length) {
+            const hFt = metersToFeet(x.hM), dFt = metersToFeet(x.dM);
+            const shapeOk = x.presets.filter(p => x.comp.circularity >= p.minCircularity && x.comp.elongation <= p.maxElongation * 1.3);
+            const sizeOkP = shapeOk.filter(p => dFt <= p.maxDiameter);
+            if (x.tooBig || !sizeOkP.length) {
+                cant.push(`Size class: what was measured here (${metersToFeetInches(x.dM)} across, circularity ${x.comp.circularity.toFixed(2)}, elongation ${x.comp.elongation.toFixed(1)}x) is too big or not round enough for any class, so it's probably the landform under the mound. Tap the top of the mound itself.`);
+            } else {
+                const needH = Math.max(0.25, down(hFt * 0.95, 0.25)), needD = Math.max(1, down(dFt * 0.95, 1));
+                const p = sizeOkP.reduce((a, b) => (Math.max(0, a.minHeight - hFt) + Math.max(0, a.minDiameter - dFt) / 20) <= (Math.max(0, b.minHeight - hFt) + Math.max(0, b.minDiameter - dFt) / 20) ? a : b);
+                if (mode === 'custom' || mode === 'learned') {
+                    if (mode === 'learned') {   // keep the learned values as the starting point, but stop them being recalculated over these changes
+                        const sel = document.getElementById('moundShapeMode'); sel.value = 'custom'; window.__prevMoundShape = 'custom';
+                        (trainingData.prefs || (trainingData.prefs = {})).moundShape = 'custom';
+                        changes.push('Mound Shape Learned &rarr; Custom (the learned values kept as the starting point)');
+                    }
+                    const t = moundThresholdsOffSliders();
+                    const lower = (key, need, label) => {
+                        if (!t) { setSlider(key, need, () => updateLengthVal(key), label, ft); return; }
+                        if (need < t[key]) { changes.push(`${label} ${ft(t[key])} &rarr; ${ft(need)}`); t[key] = need; }
+                    };
+                    if (hFt < p.minHeight) lower('minHeight', needH, 'Min height');
+                    if (dFt < p.minDiameter) lower('minDiameter', needD, 'Min diameter');
+                    if (!t) saveCurrentSlidersToMode('mounds');
+                } else {
+                    const pr = trainingData.prefs || (trainingData.prefs = {}), f = pr.moundFit || (pr.moundFit = {});
+                    const cur = (k, def) => f[k] != null ? f[k] : def;
+                    if (hFt < p.minHeight) { const b = cur('minHeightFt', p.minHeight); f.minHeightFt = Math.min(b, needH); if (f.minHeightFt < b) changes.push(`Min height (${mode === 'all' ? 'Conical &amp; Platform' : mode}) ${ft(b)} &rarr; ${ft(f.minHeightFt)}`); }
+                    if (dFt < p.minDiameter) { const b = cur('minDiameterFt', p.minDiameter); f.minDiameterFt = Math.min(b, needD); if (f.minDiameterFt < b) changes.push(`Min diameter (${mode === 'all' ? 'Conical &amp; Platform' : mode}) ${Math.round(b)} ft &rarr; ${Math.round(f.minDiameterFt)} ft`); }
+                    updateMoundFitNote();
+                }
+            }
+        }
+        // 2. the rule sliders
+        if (x.tm.score < num('moundMinTemplate')) setSlider('moundMinTemplate', Math.max(0, down(x.tm.score - 0.02, 0.05)), () => updateThresholdVal('moundMinTemplate', '', 2), 'Min template match', dec(2));
+        const hw = x.hM / x.dM;
+        if (hw < num('moundMinHW')) setSlider('moundMinHW', Math.max(0, down(hw * 0.95, 0.005)), () => updateThresholdVal('moundMinHW', '', 3), 'Min height : width', dec(3));
+        if (x.persist < num('moundMinPersist')) {
+            if (x.persist - 0.05 < 0.3) cant.push(`Persistence: it survives only ${pct(x.persist)} of the LiDAR-error runs, below the lowest setting (30%); it may be too low for the LiDAR to separate from noise.`);
+            setSlider('moundMinPersist', Math.max(0.3, down(x.persist - 0.05, 0.05)), () => updateThresholdVal('moundMinPersist', '', 2), 'Min persistence', pct);
+        }
+        if (x.slopeWhy) {
+            if (x.gs > MOUND_SLOPE_HARD_MAX || x.gs + 1 > 30) cant.push(`Ground slope: ${x.gs.toFixed(1)}&deg; is steeper than any mound is searched on (${MOUND_SLOPE_HARD_MAX}&deg;).`);
+            else setSlider('moundMaxGroundSlope', Math.ceil(x.gs + 0.5), () => updateThresholdVal('moundMaxGroundSlope', '°', 0), 'Flat-ground slope', deg);
+        }
+        // 3. fixed rules
+        if (x.comp.incomplete) cant.push('Clipped: it runs off the edge of the download. Download a larger area around it.');
+        if (x.hostFail) cant.push(`Larger landform: it is one knob on a landform only ${metersToFeetInches(x.hostDiam)} across (a fixed rule against natural knob clusters).`);
+        if (x.comp.fillRatio < 0.6) cant.push(`Solid shape: fill ratio ${x.comp.fillRatio.toFixed(2)} is under 0.60 (a fixed rule: several bumps merged).`);
+        if (x.hardReject) cant.push('Rugged ground: the ground around it is too broken to measure on a slope (a fixed rule).');
+        saveMoundRules();
+        saveTrainingData();
+        const note = (changes.length ? `<b>Settings adjusted:</b> ${changes.join('; ')}. Scan again to find mounds like this one.` : '<b>No setting needed changing</b>' + (cant.length ? '.' : ': this mound already passes every check you can adjust.')) +
+            (cant.length ? `<br><b>Not fixable with settings:</b> ${cant.join(' ')}` : '');
+        document.getElementById('status').innerHTML = note.replace(/<br>/g, ' ');
+        confirmMissedFeatureOnGrid('mounds', x.r, x.c, { recheck: true, note });
+    }
     function applyMoundPreset(preset) {
         const p = moundShapePresetDefs()[preset];
         if (!p) return;
@@ -9162,6 +9290,7 @@ onmessage = (e) => {
             applyModeThresholds(mode);
             saveTrainingData();
         }
+        if (trainingData.prefs && trainingData.prefs.moundFit) { delete trainingData.prefs.moundFit; saveTrainingData(); updateMoundFitNote(); }
         document.getElementById('status').innerText = 'Detection thresholds reset to defaults.';
     }
     function onScanModeChange() {
@@ -9219,6 +9348,9 @@ onmessage = (e) => {
         else if (want === 'conical' || want === 'platform' || want === 'broad') applyMoundPreset(want);
     }
     restoreMoundShape();
+    restoreMoundRules();
+    updateMoundFitNote();
+    for (const id in MOUND_RULE_IDS) document.getElementById(id).addEventListener('change', saveMoundRules);
 
     // Called from the checkbox on a scanner-found marker's popup.
     function confirmFeature(mode, diameter, circularity, elongation, maxMetric, lat, lon, ev, checkboxEl, template, groundSlope) {
@@ -9417,13 +9549,15 @@ onmessage = (e) => {
     // scan measures them, best candidate first. Used by the "This is a
     // Mound" check and by the outline tool. snapPx: how far from (r, c) a
     // closed high may start.
-    function moundFindAt(r, c, snapPx) {
+    // presetsIn: the size classes to judge against (the "Mound check" popup
+    // passes the ones the scan runs with); default Conical + Platform
+    function moundFindAt(r, c, snapPx, presetsIn) {
         const nd = -100, W = demWidth, H = demHeight, n = W * H;
         const denoised = boxSmooth(currentDEM, W, H, Math.max(1, Math.round(1.0 / effRes)), nd);
         const noiseSigma = estimateNoiseFloor(currentDEM, denoised, nd);
         const thr = Math.max(0.05, 5 * noiseSigma);
         const defs = moundShapePresetDefs();
-        const presets = [{ name: 'conical', ...defs.conical }, { name: 'platform', ...defs.platform }];
+        const presets = presetsIn || [{ name: 'conical', ...defs.conical }, { name: 'platform', ...defs.platform }];
         const flatMax = parseFloat(document.getElementById('moundMaxGroundSlope').value);
         // Same multi-scale, two-pass detrending as the scan. The tap is
         // snapped to the nearest closed high within ~10 m, and of all the
@@ -9480,7 +9614,10 @@ onmessage = (e) => {
         return { found, bestTapHeight, denoised, noiseSigma, thr, presets, flatMax, nd, W, H, n };
     }
 
-    async function confirmMissedFeatureOnGrid(mode, r, c) {
+    // opts.recheck: show the check again without saving anything (after
+    // "Adjust settings to fit this mound"); opts.note: HTML shown above it
+    async function confirmMissedFeatureOnGrid(mode, r, c, opts) {
+        opts = opts || {};
         if (!currentDEM) return;
         map.closePopup();
         const status = document.getElementById('status');
@@ -9490,7 +9627,7 @@ onmessage = (e) => {
             // reports each check it passes or fails, to answer "why wasn't
             // the mound I know is here found?"
             const snapPx = Math.max(2, Math.round(10 / effRes));
-            const { found, bestTapHeight, denoised, noiseSigma, thr, presets, flatMax, nd, W, H, n } = moundFindAt(r, c, snapPx);
+            const { found, bestTapHeight, denoised, noiseSigma, thr, presets, flatMax, nd, W, H, n } = moundFindAt(r, c, snapPx, moundScanPresets());
             const tapLat = demBounds.n - ((r + 0.5) / H) * (demBounds.n - demBounds.s);
             const tapLon = demBounds.w + ((c + 0.5) / W) * (demBounds.e - demBounds.w);
             if (!found.length) {
@@ -9517,12 +9654,17 @@ onmessage = (e) => {
             // Only "too small / too low" is forgiven: the shape must still be
             // round and compact enough for a mound class, and not too big
             const tooBig = !presets.some(p => diam <= feetToMeters(p.maxDiameter) && comp.circularity >= p.minCircularity && comp.elongation <= p.maxElongation * 1.3);
-            const saved = !tooBig && !comp.incomplete;
+            const saved = !tooBig && !comp.incomplete && !opts.recheck;
+            const flatNow = parseFloat(document.getElementById('moundMaxGroundSlope').value);
+            window.__moundCheckCtx = { r, c, comp, diam, hM, dM: best.dM, gs, tm, persist, tooBig, presets, sizeOk,
+                hostFail: best.pass === 'spur' && !moundHostOk(best.hostDiam, diam), hostDiam: best.hostDiam,
+                hardReject: !!(best.plane && best.hardReject), slopeWhy: moundSlopeRule(gs, flatNow, tm.score, comp) };
             const cR = best.plane && !best.rugged && best.dM > diam && best.plane.centroidR != null ? best.plane.centroidR : comp.centroidR;
             const cC = best.plane && !best.rugged && best.dM > diam && best.plane.centroidC != null ? best.plane.centroidC : comp.centroidC;
             const cLat = demBounds.n - ((cR + 0.5) / H) * (demBounds.n - demBounds.s);
             const cLon = demBounds.w + ((cC + 0.5) / W) * (demBounds.e - demBounds.w);
-            const html = `<b>Mound check at this point (iMound pipeline)</b>
+            const html = (opts.note ? `<div style="font-size:0.72rem;background:#eff6ff;border:1px solid #bfdbfe;border-radius:6px;padding:6px;margin-bottom:6px;color:#1e3a8a;">${opts.note}</div>` : '') +
+                `<b>Mound check at this point (iMound pipeline)</b>
                 <div style="font-size:0.7rem;color:#64748b;">Measured ${best.pass === 'spur' ? 'with the spur pass (curved-surface detrend), ' : ''}at the ${Math.round(best.scaleM)} m scale; outlined in brown on the map.</div>
                 <table style="font-size:0.72rem;border-collapse:collapse;margin-top:6px;">
                 ${chk(true, `Closed high: ${metersToFeetInches(comp.maxMetric)} above its base contour, ${metersToFeetInches(diam)} across`)}
@@ -9536,7 +9678,11 @@ onmessage = (e) => {
                 ${chk(hM / best.dM >= parseFloat(document.getElementById('moundMinHW').value), `Height : width ${(hM / best.dM).toFixed(3)} (min ${document.getElementById('moundMinHW').value})`)}
                 ${chk(tm.score >= parseFloat(document.getElementById('moundMinTemplate').value), `Template match ${tm.score.toFixed(2)} (${tm.shape}; min ${document.getElementById('moundMinTemplate').value})`)}
                 ${chk(persist >= parseFloat(document.getElementById('moundMinPersist').value), `Persists in ${Math.round(persist * 100)}% of LiDAR-error runs (min ${Math.round(parseFloat(document.getElementById('moundMinPersist').value) * 100)}%)`)}
-                </table><div style="font-size:0.7rem;color:#64748b;margin-top:4px;">${saved
+                </table>
+                <button type="button" onclick="moundFitSettings()" title="Loosens only the settings this mound still fails, starting from your current settings. Press again after a change to refine further." style="margin-top:6px;padding:6px 8px;font-size:0.78rem;background:#1d4ed8;color:#fff;border:none;border-radius:6px;cursor:pointer;width:100%;">&#9881; Adjust settings to fit this mound</button>
+                <div style="font-size:0.7rem;color:#64748b;margin-top:4px;">${opts.recheck
+                    ? 'Checked again with the adjusted settings (nothing new saved). Scan again to find mounds like this one.'
+                    : saved
                     ? 'Recorded as a confirmed mound.'
                     : comp.incomplete ? '<b>Not saved as training:</b> the feature runs off the edge of the download. Download a larger area around it and try again.'
                     : `<b>Not saved as training:</b> the closed high measured here (${metersToFeetInches(diam)} across) is too big, irregular or stretched for any mound class, so it's probably the landform the mound sits on. Saving it would loosen the size limits for every future scan. Try tapping the top of the mound itself.`}</div>`;
@@ -12822,27 +12968,7 @@ onmessage = (e) => {
             // conical's own circularity/size bar, not platform's, and vice
             // versa. A specific single shape, or Custom, runs just one scan
             // exactly as before.
-            const moundShapeMode = document.getElementById('moundShapeMode').value;
-            const presetDefs = moundShapePresetDefs();
-            let presetsToRun;
-            if (moundShapeMode === 'all') {
-                presetsToRun = [{ name: 'conical', ...presetDefs.conical }, { name: 'platform', ...presetDefs.platform }];
-            } else if (moundShapeMode === 'custom' || moundShapeMode === 'learned') {
-                // Learned = the sliders, filled from your confirmed mounds (and adjustable)
-                presetsToRun = [{
-                    name: moundShapeMode,
-                    minHeight: parseFloat(document.getElementById('minHeight').value),
-                    minCircularity: parseFloat(document.getElementById('minCircularity').value),
-                    maxCircularity: parseFloat(document.getElementById('maxCircularity').value),
-                    minDiameter: parseFloat(document.getElementById('minDiameter').value),
-                    maxDiameter: parseFloat(document.getElementById('maxDiameter').value),
-                    trendRadius: parseFloat(document.getElementById('trendRadius').value),
-                    maxFlankSlope: parseFloat(document.getElementById('maxFlankSlope').value),
-                    maxElongation: parseFloat(document.getElementById('maxElongation').value),
-                }];
-            } else {
-                presetsToRun = [{ name: moundShapeMode, ...presetDefs[moundShapeMode] }];
-            }
+            const presetsToRun = moundScanPresets();
 
 
             const tick0 = (msg) => { status.innerText = msg; return new Promise(r => setTimeout(r, 0)); };

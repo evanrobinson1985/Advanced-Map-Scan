@@ -231,6 +231,7 @@
                 <option value="custom">Custom (use sliders below)</option>
                 <option value="learned" disabled>Learned from my confirmed mounds (needs 5)</option>
             </select>
+            <div id="moundFitNote" style="display:none; font-size:0.72rem; color:#1e3a8a; background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; padding:4px 6px; margin-top:4px;"></div>
             <div class="slider-row" style="margin-top:6px;">
                 <label for="moundMinTemplate">Min template match</label>
                 <input type="range" id="moundMinTemplate" min="0" max="0.95" step="0.05" value="0.6" oninput="updateThresholdVal('moundMinTemplate','',2)">
@@ -768,7 +769,7 @@
             <label for="dlArchSel" title="Which network design Train model uses for the selected model">Network</label>
             <select id="dlArchSel" onchange="dlSetArch(this.value)" style="width:auto; flex-grow:1; margin:0 0 0 10px; padding:6px;">
                 <option value="classic" selected>Classic (original, quicker to train)</option>
-                <option value="improved">Improved (residual, ensemble of 3; about 3&times; the training time)</option>
+                <option value="improved">Improved (residual, ensemble of 3; about 5&times; the training time)</option>
             </select>
         </div>
         <button id="dlTrainBtn" onclick="dlTrain()" style="background:#f3e8ff;color:#6b21a8;">&#129504; Train model</button>
