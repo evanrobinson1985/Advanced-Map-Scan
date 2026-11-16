@@ -1,8 +1,10 @@
 # Advanced Map Scan: LiDAR Karst Archaeology GIS Platform
 
-A single-file web app (`index.html`) plus a batch Python pipeline (`pipeline/karst_pipeline.py`) for finding likely prehistoric habitation, hunting and ceremonial sites in forested karst terrain (Cumberland Plateau / Northeast Alabama). They run the terrain-analysis workflow in *Geospatial Archaeology: Comprehensive GIS Workflows for Karst Terrain Analysis* on 1-meter bare-earth LiDAR.
+A static web app (`index.html`, with its script in `app.js` and styles in `styles.css`) plus a batch Python pipeline (`pipeline/karst_pipeline.py`) for finding likely prehistoric habitation, hunting and ceremonial sites in forested karst terrain (Cumberland Plateau / Northeast Alabama). They run the terrain-analysis workflow in *Geospatial Archaeology: Comprehensive GIS Workflows for Karst Terrain Analysis* on 1-meter bare-earth LiDAR.
 
-Open `index.html` in a browser (or serve it with GitHub Pages). No build step is needed.
+Open `index.html` in a browser (or serve it with GitHub Pages). Keep `app.js` and `styles.css` next to it. No build step is needed.
+
+**The panel.** Each section heading folds that section away; *1. Data Pipeline* and *3. Feature Detection* start open and the rest start folded, and the app remembers what you open or fold. Long explanations show their first two lines with a *more* link. On a phone the whole panel starts folded down to its title so the map is visible; tap the title to open it. *Reset thresholds to defaults* at the end of *4. Detection Thresholds* puts that section's sliders back to their starting values and, for the selected scan mode, undoes thresholds widened by confirmations (confirmed examples are kept).
 
 Terrain is drawn with bicubic height interpolation and exact per-pixel lighting from a level-of-detail texture pyramid, so it stays smooth at any zoom and large downloads render in full. Faceted, "low-poly" terrain in the data itself is removed from the map view by *Terrain Smoothing* (display only; scans always use the raw DTM). It covers two cases: coarse source data upsampled into a finer download, which the app detects and flags, and flat triangle facets left in LiDAR DEMs where sparse ground returns under forest canopy were triangulated. Smoothing is off by default (raw data); choose *Auto* or *Strong* to turn it on. It is feature-preserving, so it blends facets but keeps real breaks such as bluff edges sharp.
 
@@ -37,7 +39,7 @@ Each waypoint also carries its elevation, match score, depth or height, and size
 
 A summary lists what was detected and every value set, and all sliders stay adjustable. Confirmed training examples are re-applied afterwards, so thresholds never exclude a site you've confirmed.
 
-**My location.** The 📍 button beside the map's search box, and **📍 My location** in the panel's Search box, find where you are and load the map there. Your browser asks for permission the first time. The app then:
+**My location.** The 📍 button beside the map's search box finds where you are and load the map there. Your browser asks for permission the first time. The app then:
 
 - marks you with a blue dot and a circle showing how accurate the position is. The dot keeps following you as you move;
 - shows which way you are facing with a blue beam and arrow. On a phone it uses the compass, which works standing still; an iPhone asks for permission to use motion and orientation the first time. Without a compass (most computers), the beam shows your direction of travel while you walk or drive, and is hidden when you stop. Tap the dot to see your coordinates, accuracy and direction (for example "Facing NE (60°)");
@@ -125,7 +127,7 @@ In testing on 1.5 km of 1 m LiDAR around Russell Cave, the longest freezes were:
 
 It needs the page opened over https or as a local file. If access is blocked, allow location for the page in the browser's site settings (and turn on Location Services on a phone). Your position is used only in your browser; it is not sent anywhere except as the area of the terrain download.
 
-**Go to a location.** The search box at the top right of the map (a 🔍 button on a phone) and the Search box in the panel take coordinates or an address. The Search box in the panel works the same way. Coordinates are read in any common form:
+**Go to a location.** The search box at the top right of the map (a 🔍 button on a phone) takes coordinates or an address. Coordinates are read in any common form:
 - decimal degrees (`34.9745, -85.8136` or `34.9745 N 85.8136 W`; longitude-first as GIS software writes it also works);
 - degrees-minutes-seconds (`34°58'28"N 85°48'49"W`) and degrees with decimal minutes;
 - UTM (`16S 608297 3870858`);

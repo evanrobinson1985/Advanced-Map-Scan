@@ -1,0 +1,84 @@
+        body, html { margin: 0; padding: 0; height: 100%; font-family: sans-serif; overflow: hidden; }
+        /* 100% / dvh = the part of the screen actually visible: on phones 100vh
+           also counts the area under the browser's toolbar, which hid the
+           bottom of the map (scale bar, attribution) */
+        #map { height: 100%; height: 100dvh; width: 100%; }
+
+        /* WebGL Canvas Overlay - layering
+           This canvas lives inside a genuine Leaflet pane now (created and
+           positioned in the script, not here), not as a plain page-level
+           sibling of #map. Two earlier fixes chased this from outside #map's
+           subtree and both fell short for the same underlying reason:
+           .leaflet-map-pane - the element that actually holds every real
+           Leaflet pane (tiles, markers, popups) - gets a live CSS transform
+           applied by Leaflet itself to track panning. A transform ALONE
+           creates a stacking context, entirely independent of z-index, so no
+           z-index override on .leaflet-map-pane (or #map) could ever stop it
+           from re-trapping its children behind this canvas. Being a genuine
+           sibling pane INSIDE .leaflet-map-pane sidesteps the whole problem:
+           tiles 200 < this canvas's pane at 450 < shadows 500, markers 600,
+           tooltips 650, popups 700, controls 800/1000 - real sibling
+           z-indexes, compared directly, for real this time. Position/size
+           are set per-render in renderGLLayer() using layer points, which pan
+           correctly for free via that same transform. */
+        #glCanvas { position: absolute; pointer-events: none; opacity: 0.7; }
+        #glCanvasSlope { position: absolute; pointer-events: none; opacity: 0.7; display: none; }
+        #glCanvasSettlement { position: absolute; pointer-events: none; opacity: 0.8; display: none; }
+
+        #ui-panel {
+            position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 1000;
+            background: rgba(255, 255, 255, 0.95); padding: 15px; border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.3); width: 90%; max-width: 400px;
+            max-height: 85vh; overflow-y: auto;
+        }
+        
+        h3 { margin: 0 0 10px 0; font-size: 1.1rem; color: #1e293b; text-align: center; }
+        .control-group { background: #f8fafc; padding: 10px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #e2e8f0; }
+        .control-group h4 { margin: 0 0 8px 0; font-size: 0.9rem; color: #334155; }
+        
+        .slider-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; font-size: 0.85rem; }
+        input[type=range] { flex-grow: 1; margin: 0 10px; }
+        /* Phones: 16px text in fields stops iPhone Safari zooming the page in
+           whenever one is tapped (now that pinch-zoom is allowed again) */
+        @media (max-width: 700px) {
+            input[type=text], input[type=search], input[type=number], select, textarea { font-size: 16px !important; }
+        }
+        .val-display { width: 35px; text-align: right; font-weight: bold; }
+        
+        .input-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; font-size: 0.85rem; }
+        .input-row input { width: 60px; padding: 4px; text-align: center; border: 1px solid #cbd5e1; border-radius: 4px; }
+        
+        /* Folded panel: no gap under the title */
+        #ui-panel:has(#panelContent[style*="display: none"]) #panelHeader { margin-bottom: 0 !important; }
+        /* Foldable panel sections: the heading is the toggle */
+        .control-group > h4.sec-toggle { cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 8px; user-select: none; }
+        .control-group > h4.sec-toggle::after { content: '\25B2'; font-size: 0.7rem; color: #64748b; }
+        .control-group.sec-folded > h4.sec-toggle { margin-bottom: 0; }
+        .control-group.sec-folded > h4.sec-toggle::after { content: '\25BC'; }
+        .control-group.sec-folded > :not(h4):not(.keep-open) { display: none !important; }
+        .control-group.sec-folded > .keep-open { margin-top: 8px; }
+        .control-group > h4.sec-toggle:focus-visible, #panelHeader:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; border-radius: 4px; }
+        /* Long explanations show two lines until "more" is tapped */
+        .hint-clamp { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+        .hint-more { display: inline; width: auto; margin: 0 0 4px; padding: 0; background: none; border: none; color: #2563eb; font-size: 0.72rem; cursor: pointer; text-decoration: underline; }
+        .hint-more:hover { background: none; }
+        details { font-size: 0.85rem; color: #475569; margin-top: 10px; margin-bottom: 5px; }
+        summary { cursor: pointer; font-weight: bold; }
+        
+        select, button { width: 100%; padding: 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-weight: bold; margin-top: 5px; }
+        #downloadBtn { background: #0f172a; color: white; border: none; cursor: pointer; }
+        #scanBtn { background: #2563eb; color: white; border: none; display: none; cursor: pointer; }
+        
+        #status { font-size: 0.8rem; text-align: center; color: #64748b; margin-top: 10px; font-weight: bold; }
+        .cave-marker { filter: hue-rotate(0deg); }
+        .mound-marker { filter: hue-rotate(150deg); }
+        .shelter-marker { filter: hue-rotate(270deg); }
+        .hunt-marker { filter: hue-rotate(90deg); }
+        #panelHeader:hover { opacity: 0.8; }
+    /* Scale bar: readable over hillshade; on phones it sits above the folded panel */
+    .leaflet-control-scale { margin-left: 10px !important; margin-bottom: 10px !important; }
+    .leaflet-control-scale-line { background: rgba(255,255,255,0.92); border: 2px solid #0f172a; border-top: none; color: #0f172a;
+        font-weight: bold; font-size: 13px; line-height: 1.3; padding: 2px 6px; box-shadow: 0 1px 4px rgba(0,0,0,0.45); }
+    @media (max-width: 700px) { .leaflet-bottom.leaflet-left { bottom: 84px; } }
+    .outline-drawing .leaflet-interactive { pointer-events: none !important; }
+    .outline-drawing { cursor: crosshair; }
